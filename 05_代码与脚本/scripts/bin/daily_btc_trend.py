@@ -151,6 +151,12 @@ def resample_bars(bars: list[dict], step_hours: int) -> list[dict]:
     return out
 
 
+def _base_sym() -> str:
+    """BTCUSDT → BTC；ETHUSDT → ETH（展示用基码）。"""
+    s = SYMBOL.upper()
+    return s[:-4] if s.endswith("USDT") else s
+
+
 def _fmt(x) -> str:
     return "N/A" if x is None else f"{x:,.2f}"
 
@@ -365,8 +371,15 @@ def _compute_correlations(btc_by_date: dict, macro: list[dict], windows=(30, 90)
 
 
 def load_market_context(conn) -> dict:
-    """读取四类多因子所需的衍生品/链上/宏观数据（只读 biz 各表，缺表/缺数据返回 None）。"""
+    """读取四类多因子所需的衍生品/链上/宏观数据（只读 biz 各表，缺表/缺数据返回 None）。
+
+    BTC 专属源（期权/OBM 链上近似/BTC-OI 分位/周期标记）对 ETH 自动降级为 None，
+    其余（合约 OI/费率/多空比/基差/爆仓/CoinMetrics 链上/宏观相关性）按 `SYMBOL` 查询。
+    """
     ctx: dict = {}
+    base = SYMBOL[:-4] if SYMBOL.upper().endswith("USDT") else SYMBOL.upper()  # BTC / ETH
+    base_low = base.lower()
+    is_btc = base == "BTC"
 
     def q(sql, params=()):
         try:
@@ -381,9 +394,9 @@ def load_market_context(conn) -> dict:
     rows = q("""
         SELECT ts, oi_usd, oi_change_24h_pct
         FROM biz.coinglass_derivatives_snapshot
-        WHERE symbol = 'BTC' AND exchange = 'All' AND oi_usd IS NOT NULL
+        WHERE symbol = %s AND exchange = 'All' AND oi_usd IS NOT NULL
         ORDER BY ts DESC LIMIT 8
-    """)
+    """, (base,))
     if rows and rows[0][1] is not None:
         oi = {"ts": rows[0][0], "value_usd": float(rows[0][1])}
         oi["chg24h"] = float(rows[0][2]) if rows[0][2] is not None else None
@@ -394,27 +407,27 @@ def load_market_context(conn) -> dict:
     else:
         ctx["oi"] = None
 
-    # OI 60d 历史分位（Binance 单所口径，btc_oi_daily；coinglass All 历史太短）
-    rows = q("SELECT open_interest FROM biz.btc_oi_daily "
-             "WHERE open_interest IS NOT NULL ORDER BY metric_date ASC")
-    if rows:
-        vals = [float(r[0]) for r in rows]
-        cur_oi = vals[-1]
-        ctx["oi_pct60"] = {
-            "value": cur_oi,
-            "n": len(vals),
-            "pct": 100.0 * sum(1 for x in vals[:-1] if x < cur_oi) / max(1, len(vals) - 1),
-        }
-    else:
-        ctx["oi_pct60"] = None
+    # OI 60d 历史分位（仅 BTC 有 btc_oi_daily 表；ETH 降级为 None）
+    ctx["oi_pct60"] = None
+    if is_btc:
+        rows = q("SELECT open_interest FROM biz.btc_oi_daily "
+                 "WHERE open_interest IS NOT NULL ORDER BY metric_date ASC")
+        if rows:
+            vals = [float(r[0]) for r in rows]
+            cur_oi = vals[-1]
+            ctx["oi_pct60"] = {
+                "value": cur_oi,
+                "n": len(vals),
+                "pct": 100.0 * sum(1 for x in vals[:-1] if x < cur_oi) / max(1, len(vals) - 1),
+            }
 
     # ── ② 资金费率（Binance，CoinGlass 快照；btc_funding_daily 滞后故不用）──
     rows = q("""
         SELECT ts, funding_rate
         FROM biz.coinglass_derivatives_snapshot
-        WHERE symbol = 'BTC' AND exchange = 'Binance' AND funding_rate IS NOT NULL
+        WHERE symbol = %s AND exchange = 'Binance' AND funding_rate IS NOT NULL
         ORDER BY ts DESC LIMIT 30
-    """)
+    """, (base,))
     if rows:
         rates = [float(r[1]) for r in rows if r[1] is not None]
         ctx["funding"] = {
@@ -432,10 +445,10 @@ def load_market_context(conn) -> dict:
     rows = q("""
         SELECT ratio_type, ts, long_percent, short_percent, ls_ratio
         FROM biz.cg_ls_ratio_hist
-        WHERE symbol = 'BTCUSDT'
-          AND ts = (SELECT MAX(ts) FROM biz.cg_ls_ratio_hist WHERE symbol = 'BTCUSDT')
+        WHERE symbol = %s
+          AND ts = (SELECT MAX(ts) FROM biz.cg_ls_ratio_hist WHERE symbol = %s)
         ORDER BY ratio_type
-    """)
+    """, (SYMBOL, SYMBOL))
     if rows:
         ctx["lsr"] = {
             r[0]: {"ts": r[1], "long_pct": float(r[2]) if r[2] is not None else None,
@@ -450,17 +463,17 @@ def load_market_context(conn) -> dict:
     rows = q("""
         SELECT ts, close_basis
         FROM biz.cg_basis_hist
-        WHERE symbol = 'BTCUSDT' AND interval = '4h' AND close_basis IS NOT NULL
+        WHERE symbol = %s AND interval = '4h' AND close_basis IS NOT NULL
         ORDER BY ts DESC LIMIT 1
-    """)
+    """, (SYMBOL,))
     ctx["basis"] = {"ts": rows[0][0], "close_pct": float(rows[0][1])} if rows else None
 
     # ── ② 爆仓（日度 regime + 4h 明细）──
     rows = q("""
         SELECT ts, liq_total, long_share, bucket, is_extreme
-        FROM biz.liq_daily_regime WHERE symbol = 'BTCUSDT'
+        FROM biz.liq_daily_regime WHERE symbol = %s
         ORDER BY ts DESC LIMIT 8
-    """)
+    """, (SYMBOL,))
     if rows:
         latest = rows[0]
         ctx["liq"] = {
@@ -475,10 +488,10 @@ def load_market_context(conn) -> dict:
     rows = q("""
         SELECT ts, long_liq_usd, short_liq_usd
         FROM biz.liquidation_history
-        WHERE symbol = 'BTCUSDT' AND exchange_scope = 'all'
+        WHERE symbol = %s AND exchange_scope = 'all'
           AND long_liq_usd IS NOT NULL
         ORDER BY ts DESC LIMIT 1
-    """)
+    """, (SYMBOL,))
     if rows:
         ctx["liq_4h"] = {
             "ts": rows[0][0],
@@ -492,9 +505,9 @@ def load_market_context(conn) -> dict:
     rows = q("""
         SELECT metric_date, cap_mvrv_cur, sply_ex_usd, flow_in_ex_usd, flow_out_ex_usd,
                adr_act_cnt, roi_30d, price_usd
-        FROM biz.cm_asset_onchain_daily WHERE cm_symbol = 'btc'
+        FROM biz.cm_asset_onchain_daily WHERE cm_symbol = %s
         ORDER BY metric_date DESC LIMIT 2
-    """)
+    """, (base_low,))
     if rows:
         d0 = rows[0]
         onchain = {
@@ -530,9 +543,9 @@ def load_market_context(conn) -> dict:
     rows = q("""
         SELECT metric_date, mvrv_pct_full, mvrv_extreme
         FROM biz.cm_onchain_percentile_full
-        WHERE cm_symbol = 'btc' AND mvrv_pct_full IS NOT NULL
+        WHERE cm_symbol = %s AND mvrv_pct_full IS NOT NULL
         ORDER BY metric_date DESC LIMIT 1
-    """)
+    """, (base_low,))
     if rows:
         ctx["mvrv_pct"] = {
             "date": rows[0][0],
@@ -584,9 +597,9 @@ def load_market_context(conn) -> dict:
     rows = q("""
         SELECT flow_date, SUM(net_flow_usd)
         FROM biz.etf_flow_daily
-        WHERE symbol = 'BTC' AND flow_date >= CURRENT_DATE - 8
+        WHERE symbol = %s AND flow_date >= CURRENT_DATE - 8
         GROUP BY flow_date ORDER BY flow_date DESC
-    """)
+    """, (base,))
     if rows:
         days = [(r[0], float(r[1])) for r in rows if r[1] is not None]
         week = days[:5]  # 最近 5 个交易日 = 完整交易周（与 Farside 周度口径对齐）
@@ -600,47 +613,48 @@ def load_market_context(conn) -> dict:
     else:
         ctx["etf"] = None
 
-    # BTC 1h 最新收盘（作「现价」参考基准，统一各数据源时点差异的展示）
+    # 1h 最新收盘（作「现价」参考基准，统一各数据源时点差异的展示）
     rows = q("""
         SELECT close_px FROM biz.asset_klines
-        WHERE symbol = 'BTCUSDT' AND interval = '1h' AND close_px > 0
+        WHERE symbol = %s AND interval = '1h' AND close_px > 0
         ORDER BY open_time DESC LIMIT 1
-    """)
+    """, (SYMBOL,))
     ctx["btc_ref_price"] = float(rows[0][0]) if rows and rows[0][0] is not None else None
 
     rows = q("SELECT metric_date, value FROM biz.cefi_index_daily "
              "ORDER BY metric_date DESC LIMIT 1")
     ctx["cefi"] = {"date": rows[0][0], "value": float(rows[0][1])} if rows else None
 
-    rows = q("""
-        SELECT snapshot_date, btc_cycle_phase, btc_cycle_label
-        FROM biz.market_snapshot_daily ORDER BY snapshot_date DESC LIMIT 1
-    """)
-    if rows:
-        ctx["cycle"] = {"date": rows[0][0], "phase": rows[0][1], "label": rows[0][2]}
-    else:
-        ctx["cycle"] = None
+    # BTC 周期标记（market_snapshot_daily 为 BTC 专属，ETH 报不展示）
+    ctx["cycle"] = None
+    if is_btc:
+        rows = q("""
+            SELECT snapshot_date, btc_cycle_phase, btc_cycle_label
+            FROM biz.market_snapshot_daily ORDER BY snapshot_date DESC LIMIT 1
+        """)
+        if rows:
+            ctx["cycle"] = {"date": rows[0][0], "phase": rows[0][1], "label": rows[0][2]}
 
-    # ── 期权市场（Deribit 免费快照）──────────────────────────
-    rows = q("""
-        SELECT metric_date, spot_price, dvol_30d, call_oi, put_oi, pcr,
-               max_pain_strike, nearest_expiry
-        FROM biz.btc_options_snapshot ORDER BY metric_date DESC LIMIT 1
-    """)
-    if rows:
-        r = rows[0]
-        ctx["options"] = {
-            "date": r[0],
-            "spot": float(r[1]) if r[1] is not None else None,
-            "dvol": float(r[2]) if r[2] is not None else None,
-            "call_oi": float(r[3]) if r[3] is not None else None,
-            "put_oi": float(r[4]) if r[4] is not None else None,
-            "pcr": float(r[5]) if r[5] is not None else None,
-            "max_pain": float(r[6]) if r[6] is not None else None,
-            "nearest_expiry": r[7],
-        }
-    else:
-        ctx["options"] = None
+    # ── 期权市场（Deribit 快照，当前仅接入 BTC；ETH 降级为 None）──
+    ctx["options"] = None
+    if is_btc:
+        rows = q("""
+            SELECT metric_date, spot_price, dvol_30d, call_oi, put_oi, pcr,
+                   max_pain_strike, nearest_expiry
+            FROM biz.btc_options_snapshot ORDER BY metric_date DESC LIMIT 1
+        """)
+        if rows:
+            r = rows[0]
+            ctx["options"] = {
+                "date": r[0],
+                "spot": float(r[1]) if r[1] is not None else None,
+                "dvol": float(r[2]) if r[2] is not None else None,
+                "call_oi": float(r[3]) if r[3] is not None else None,
+                "put_oi": float(r[4]) if r[4] is not None else None,
+                "pcr": float(r[5]) if r[5] is not None else None,
+                "max_pain": float(r[6]) if r[6] is not None else None,
+                "nearest_expiry": r[7],
+            }
 
     # ── 宏观 + 跨资产联动（Yahoo 免费序列 + 滚动相关性）────────
     rows = q("""
@@ -657,45 +671,45 @@ def load_market_context(conn) -> dict:
                   "gold": float(r[4]) if r[4] is not None else None}
                  for r in rows]
         ctx["macro"] = macro
-        # 相关性需要 BTC 1d 收盘
+        # 相关性需要该币 1d 收盘
         btc_rows = q("""
             SELECT open_time::date, close_px FROM biz.asset_klines
-            WHERE symbol = 'BTCUSDT' AND interval = '1d'
+            WHERE symbol = %s AND interval = '1d'
               AND open_time >= CURRENT_DATE - 120 AND close_px > 0
             ORDER BY open_time ASC
-        """)
+        """, (SYMBOL,))
         btc_by_date = {r[0]: float(r[1]) for r in btc_rows}
         ctx["corr"] = _compute_correlations(btc_by_date, macro)
     else:
         ctx["macro"] = None
         ctx["corr"] = None
 
-    # ── 链上近似：LTH/STH 花费代理 + 矿工维度（现库 OBM）────────
-    obm_names = (
-        "obm_spent_value_lt155d_btc_daily",
-        "obm_spent_value_ge155d_btc_daily",
-        "obm_liveliness_ratio_daily",
-        "obm_cdd_btcxdays_daily",
-        "obm_miner_revenue_btc_daily",
-        "obm_issuance_btc_daily",
-    )
-    rows = q("""
-        SELECT metric_date, metric_name, value FROM biz.obm_btc_daily
-        WHERE metric_name = ANY(%s) AND metric_date >= CURRENT_DATE - 10
-        ORDER BY metric_date DESC
-    """, (list(obm_names),))
-    obm_by_date: dict = {}
-    for d, name, val in rows:
-        if val is None:
-            continue
-        obm_by_date.setdefault(d, {})[name] = float(val)
-    if obm_by_date:
-        latest_date = max(obm_by_date)
-        ctx["obm"] = obm_by_date[latest_date]
-        ctx["obm_date"] = latest_date
-    else:
-        ctx["obm"] = None
-        ctx["obm_date"] = None
+    # ── 链上近似：LTH/STH 花费代理 + 矿工维度（现库 OBM，仅 BTC 有）──
+    ctx["obm"] = None
+    ctx["obm_date"] = None
+    if is_btc:
+        obm_names = (
+            "obm_spent_value_lt155d_btc_daily",
+            "obm_spent_value_ge155d_btc_daily",
+            "obm_liveliness_ratio_daily",
+            "obm_cdd_btcxdays_daily",
+            "obm_miner_revenue_btc_daily",
+            "obm_issuance_btc_daily",
+        )
+        rows = q("""
+            SELECT metric_date, metric_name, value FROM biz.obm_btc_daily
+            WHERE metric_name = ANY(%s) AND metric_date >= CURRENT_DATE - 10
+            ORDER BY metric_date DESC
+        """, (list(obm_names),))
+        obm_by_date: dict = {}
+        for d, name, val in rows:
+            if val is None:
+                continue
+            obm_by_date.setdefault(d, {})[name] = float(val)
+        if obm_by_date:
+            latest_date = max(obm_by_date)
+            ctx["obm"] = obm_by_date[latest_date]
+            ctx["obm_date"] = latest_date
     return ctx
 
 
@@ -858,10 +872,10 @@ def build_risk_factors(rows: list[dict], ctx: dict) -> list[str]:
     corr = ctx.get("corr") or {}
     nas = corr.get("btc_vs_nasdaq_30d")
     if nas is not None and nas > 0.5:
-        risks.append(f"纳指联动强：BTC×纳指 30d 相关性 {nas:+.2f}，美股回调会拖累 BTC")
+        risks.append(f"纳指联动强：{_base_sym()}×纳指 30d 相关性 {nas:+.2f}，美股回调会拖累 {_base_sym()}")
     dxy = corr.get("btc_vs_dxy_30d")
     if dxy is not None and dxy < -0.3:
-        risks.append(f"美元压制：BTC×DXY 30d 相关性 {dxy:+.2f}，美元/美债走强对 BTC 不利")
+        risks.append(f"美元压制：{_base_sym()}×DXY 30d 相关性 {dxy:+.2f}，美元/美债走强对 {_base_sym()} 不利")
     op = ctx.get("options")
     if op and op.get("max_pain") and op.get("spot") and op["spot"] < op["max_pain"]:
         risks.append(f"期权压制：max pain {_fmt(op['max_pain'])} 高于现货，临近交割有向痛点收敛倾向")
@@ -1093,7 +1107,7 @@ def render_market_md(ctx: dict, generated_at: datetime) -> list[str]:
         lag = _lag_days(basis["ts"], now)
         b = basis["close_pct"]
         tag = "期货升水（乐观）" if b > 0 else "期货贴水（悲观）"
-        lines.append(f"- **基差（BTCUSDT 4h，CoinGlass）**：{b:+.2f}%（{tag}）"
+        lines.append(f"- **基差（{SYMBOL} 4h，CoinGlass）**：{b:+.2f}%（{tag}）"
                      f"（{basis['ts']:%m-%d} UTC" + ("，⏳滞后" if lag > MAX_LAG_DAYS else "") + "）")
     else:
         lines.append("- 基差：N/A")
@@ -1165,7 +1179,7 @@ def render_market_md(ctx: dict, generated_at: datetime) -> list[str]:
         lines.append("- 说明：期权 OI/PCR 是**持仓与对冲结构**，DVOL 是波动预期，均不是方向信号；"
                      "Deribit 名义口径，跨所不可直接相加。")
     else:
-        lines.append("- 期权数据：N/A（未接入或表空，运行 ingest_btc_options.py）")
+        lines.append(f"- 期权数据：N/A（未接入 {_base_sym()} 期权，ingest_btc_options.py 当前仅支持 BTC）")
     lines.append("")
 
     # ── ④ 链上与宏观 ──
@@ -1191,7 +1205,7 @@ def render_market_md(ctx: dict, generated_at: datetime) -> list[str]:
             netf_tag = "转入（抛压）" if netf > 0 else "转出（囤币）"
         else:
             netf_txt, netf_tag = "N/A", ""
-        lines.append(f"- **交易所 BTC 余额**：{sply}"
+        lines.append(f"- **交易所 {_base_sym()} 余额**：{sply}"
                      + (f"（7d {_pct(oc['sply_ex_chg7d'])}" if oc.get("sply_ex_chg7d") is not None else "")
                      + "）"
                      + f"｜24h 净流 {netf_txt}（{netf_tag}）")
@@ -1239,10 +1253,10 @@ def render_market_md(ctx: dict, generated_at: datetime) -> list[str]:
         span = ""
         if etf.get("week_span"):
             span = f"（{etf['week_span'][0]:%m-%d}~{etf['week_span'][1]:%m-%d}，{etf['n_week']} 个交易日）"
-        lines.append(f"- **BTC ETF 最近交易周净流入**：{_fmt_usd_b(etf['sum_week'])}{span}")
+        lines.append(f"- **{_base_sym()} ETF 最近交易周净流入**：{_fmt_usd_b(etf['sum_week'])}{span}")
         lines.append("  └ 源：cryptoetf.today；与 Farside/SoSoValue 口径可能略有出入，周度=最近 5 个交易日")
     elif etf:
-        lines.append("- BTC ETF 最近交易周净流入：N/A")
+        lines.append(f"- {_base_sym()} ETF 最近交易周净流入：N/A")
     fg = ctx.get("fear_greed")
     if fg:
         lines.append(f"- **恐贪指数**：{fg['value']}（{fg['cls']}，{fg['date']:%m-%d}，源{fg.get('src','')}）"
@@ -1250,13 +1264,13 @@ def render_market_md(ctx: dict, generated_at: datetime) -> list[str]:
         lines.append("  └ 不同源口径差异较大（CMC/alternative.me 可差 10+ 点），以入库源为准")
     g = ctx.get("global")
     if g:
-        lines.append(f"- **BTC 市值占比**：{g['btc_dom']:.2f}%"
-                     f"（总市值 {_fmt_usd_b(g['total_mcap'])}）" if g.get("btc_dom") is not None else "- BTC 市值占比：N/A")
+        lines.append(f"- **全市场总市值**：{_fmt_usd_b(g['total_mcap'])}"
+                     f"｜**BTC 市值占比**：{g['btc_dom']:.2f}%" if g.get("btc_dom") is not None else "- 全市场总市值：N/A")
         if g.get("btc_dom") is not None:
-            lines.append("  └ CMC 当日快照口径，与 Binance 现价/流通量为不同时点，存在约 1% 级口径差异")
+            lines.append("  └ CMC 当日快照口径，与交易所现价/流通量为不同时点，存在约 1% 级口径差异")
     cyc = ctx.get("cycle")
     if cyc and cyc.get("label"):
-        lines.append(f"- **BTC 周期阶段**：{cyc['label']}（{cyc['phase']}）")
+        lines.append(f"- **{_base_sym()} 周期阶段**：{cyc['label']}（{cyc['phase']}）")
     cefi = ctx.get("cefi")
     if cefi:
         lines.append(f"- **机构情绪指数（CEFI）**：{cefi['value']:.0f}/100（0-100，越高越乐观）")
@@ -1293,7 +1307,7 @@ def render_market_md(ctx: dict, generated_at: datetime) -> list[str]:
         lines.append(f"- 最新：" + (" ｜ ".join(parts) if parts else "N/A"))
     corr = ctx.get("corr") or {}
     if corr:
-        lines.append("- **BTC 日收益滚动相关性**：")
+        lines.append(f"- **{_base_sym()} 日收益滚动相关性**：")
         for key, label in (
             ("btc_vs_nasdaq_30d", "vs 纳指 30d"), ("btc_vs_nasdaq_90d", "vs 纳指 90d"),
             ("btc_vs_gold_30d", "vs 黄金 30d"), ("btc_vs_gold_90d", "vs 黄金 90d"),
@@ -1304,11 +1318,11 @@ def render_market_md(ctx: dict, generated_at: datetime) -> list[str]:
                 tag = "（强正相关，同向联动）" if v > 0.5 else ("（强负相关，反向）" if v < -0.5 else "")
                 lines.append(f"  - {label}：{v:+.2f}{tag}")
     elif ctx.get("macro"):
-        lines.append("- BTC 滚动相关性：数据不足（需 ≥20 天对齐样本）")
+        lines.append(f"- {_base_sym()} 滚动相关性：数据不足（需 ≥20 天对齐样本）")
     else:
         lines.append("- 宏观/相关性：N/A（未接入，运行 ingest_macro_market.py）")
     if macro or corr:
-        lines.append("- 说明：DXY/美债走强通常压制风险资产（BTC 负相关倾向），相关性是描述不是规律。")
+        lines.append(f"- 说明：DXY/美债走强通常压制风险资产（{_base_sym()} 负相关倾向），相关性是描述不是规律。")
     lines.append("")
     return lines
 
@@ -1643,7 +1657,7 @@ def build_tf_judgment(rows: list[dict]) -> list[str]:
 
 def render_markdown(rows: list[dict], ctx: dict, generated_at: datetime) -> str:
     lines = []
-    lines.append("# BTC 大盘趋势分析（每日）")
+    lines.append(f"# {_base_sym()} 大盘趋势分析（每日）")
     lines.append("")
     lines.append(f"> 生成时间：{_fmt_cn(generated_at)}（Asia/Shanghai）｜"
                  f"数据源：Binance USDT 永续 {SYMBOL}（biz.asset_klines）+ 衍生品/链上/宏观各表")
@@ -1802,7 +1816,7 @@ def render_html(rows: list[dict], ctx: dict, generated_at: datetime) -> str:
     p = []
     p.append('<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;'
              'font-size:14px;color:#171717;line-height:1.6">')
-    p.append("<h2 style='margin:0 0 2px'>📊 BTC 大盘趋势分析（每日）</h2>")
+    p.append(f"<h2 style='margin:0 0 2px'>📊 {_base_sym()} 大盘趋势分析（每日）</h2>")
     p.append(f"<p style='margin:0 0 12px;color:#64748b;font-size:12px'>"
              f"生成时间 {_fmt_cn(generated_at)}（Asia/Shanghai）· "
              f"数据源：Binance USDT 永续 {SYMBOL} + 衍生品/链上/宏观</p>")
@@ -2165,11 +2179,13 @@ def self_test() -> int:
 # ---------------------------------------------------------------- main
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="每日 BTC 大盘趋势分析（VP + 盘面结构 + 多因子共振）")
+    global SYMBOL
+    parser = argparse.ArgumentParser(description="每日大盘趋势分析（VP + 盘面结构 + 多因子共振），支持 BTC/ETH")
+    parser.add_argument("--symbol", default="BTCUSDT", help="合约码（默认 BTCUSDT；ETHUSDT 亦可）")
     parser.add_argument("--interval", default="", help="单周期（5m/15m/1h/1d）；与 --intervals 二选一")
     parser.add_argument("--intervals", default="1h,4h,1d,1w", help="逗号分隔多周期（默认 1h,4h,1d,1w）。"
                         "⚠️ PowerShell 会把 `1d` 当十进制数吞掉，传参请加引号：--intervals \"1h,4h,1d,1w\"")
-    parser.add_argument("--out", default="", help=f"Markdown 输出路径（默认 {DEFAULT_OUT.name}）")
+    parser.add_argument("--out", default="", help=f"Markdown 输出路径（默认按币种，如 {DEFAULT_OUT.name}）")
     parser.add_argument("--send-email", action="store_true", help="生成后把报告发到 SMTP_TO 邮箱")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
@@ -2177,12 +2193,16 @@ def main() -> int:
     if args.self_test:
         return self_test()
 
+    SYMBOL = args.symbol.strip().upper()
+    base = _base_sym()
+
     intervals = [s.strip() for s in (args.interval or args.intervals).split(",") if s.strip()]
     intervals = [iv for iv in intervals if iv in INTERVAL_CONFIG]
     if not intervals:
         print("无有效周期（可选：5m/15m/1h/1d）")
         return 2
-    out_path = Path(args.out) if args.out else DEFAULT_OUT
+    default_out = DATA_DIR / f"daily_{base.lower()}_trend.md"
+    out_path = Path(args.out) if args.out else default_out
 
     settings = get_settings(require_database=True)
     rows = []
@@ -2245,8 +2265,8 @@ def _send_report_email(rows: list[dict], ctx: dict, generated_at: datetime) -> i
             print("[ERROR] SMTP 未配置，邮件未发送（按失败处理）")
             return 1
         body = render_html(rows, ctx, generated_at)
-        subject = f"📊 BTC 大盘趋势分析 {generated_at:%Y-%m-%d}"
-        ok, msg = notifier.send(subject=subject, body_html=body, from_name="BTC大盘趋势")
+        subject = f"📊 {_base_sym()} 大盘趋势分析 {generated_at:%Y-%m-%d}"
+        ok, msg = notifier.send(subject=subject, body_html=body, from_name=f"{_base_sym()}大盘趋势")
         if ok:
             print(f"[OK] 邮件已发送: {msg}")
             return 0

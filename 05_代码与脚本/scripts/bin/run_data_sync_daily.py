@@ -76,7 +76,16 @@ TASKS = [
     ("主表 supply/市值对齐 CMC", "sync_core_supply_from_cmc.py", ["--sync"], True),
     ("CMC 分类聚合", "ingest_cmc_category.py", [], False),
 
+    # ─── 宏观/期权层（免费外部 API，易抖，失败只记录）───
+    ("BTC 期权快照（Deribit）", "ingest_btc_options.py", [], False),
+    ("宏观/跨资产（Yahoo）", "ingest_macro_market.py", [], False),
+
     # ─── 信号层 ───
+    # 每日变化榜 2026-10-12 起改用币安 USDT 永续日线口径，数据源是
+    # biz.asset_klines(interval='1d')，必须先物化当日日线（脚本内部顺带刷新
+    # 「币安可交易池」biz.asset_binance_pair）。失败不阻断 diff（榜单会停留在
+    # 上一个完整 UTC 日，属可接受降级），故标非 critical。
+    ("币安日线物化", "refresh_binance_daily.py", [], False),
     ("每日 diff 变化榜", "daily_diff_generator.py", [], False),
 
     # ─── 链接分类矫正 ───

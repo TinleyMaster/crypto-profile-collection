@@ -92,7 +92,10 @@ INTERVAL_CONFIG = {
     "5m": {"window_bars": 288, "lookback_days": 14, "bars_per_day": 288},
     "15m": {"window_bars": 96, "lookback_days": 21, "bars_per_day": 96},
     "1h": {"window_bars": 168, "lookback_days": 21, "bars_per_day": 24},
+    # 4h / 1w 为**派生周期**：DB 无原生 K 线，由 1h / 1d 聚合得到（base + step_hours）
+    "4h": {"window_bars": 90, "lookback_days": 60, "bars_per_day": 6, "base": "1h", "step_hours": 4},
     "1d": {"window_bars": 50, "lookback_days": 250, "bars_per_day": 1},
+    "1w": {"window_bars": 50, "lookback_days": 1000, "bars_per_day": 1 / 7, "base": "1d", "step_hours": 168},
 }
 
 KLINES_SQL = (
@@ -114,6 +117,38 @@ def load_klines(conn, interval: str, days: int, limit: int) -> list[dict]:
              "low": float(r[3]), "close": float(r[4]), "vol": float(r[5])}
             for r in cur.fetchall()
         ]
+
+
+def resample_bars(bars: list[dict], step_hours: int) -> list[dict]:
+    """按新周期时长（小时）聚合 OHLCV，时间桶按 UTC 边界对齐。
+
+    用于派生周期（4h←1h step=4、1w←1d step=168）。相比「顺序每 N 根一组」，
+    按时间桶对齐能保证：同一根 4h/周 K 线在不同运行里包含相同的底层 K 线
+    （窗口起点滑动不会导致蜡烛错位、判定抖动）。
+    """
+    import datetime as _dt
+
+    def _bucket(d):
+        if hasattr(d, "timestamp"):
+            return int(d.timestamp() // (step_hours * 3600))
+        return int(_dt.datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+                   .timestamp() // (step_hours * 3600))
+
+    buckets: dict[int, list[dict]] = {}
+    for b in bars:
+        buckets.setdefault(_bucket(b["t"]), []).append(b)
+    out: list[dict] = []
+    for key in sorted(buckets):
+        grp = buckets[key]
+        out.append({
+            "t": grp[0]["t"],
+            "open": grp[0]["open"],
+            "high": max(b["high"] for b in grp),
+            "low": min(b["low"] for b in grp),
+            "close": grp[-1]["close"],
+            "vol": sum(b["vol"] for b in grp),
+        })
+    return out
 
 
 def _fmt(x) -> str:
@@ -1280,8 +1315,6 @@ def render_market_md(ctx: dict, generated_at: datetime) -> list[str]:
 
 # ---------------------------------------------------------------- K线形态 / 关键价位 / 情景观察
 
-_STRENGTH_CN = {"strong": "强", "mid": "次强", "weak": "弱"}
-
 
 def _patterns_txt(row: dict) -> str:
     """最近 3 根 K 线形态（中文，含需上下文形态的方向解读）。"""
@@ -1309,78 +1342,109 @@ def _patterns_txt(row: dict) -> str:
 
 
 def build_level_list(rows: list[dict]) -> dict:
-    """从 1d/1h 的 VP 提取关键价位清单：现价下方支撑（近→远）、上方阻力（近→远）。
-
-    强度：1d 的 POC/VA/HVN 为「强」，1h 的 POC/VA/HVN 为「次强」。
-    LVN（低量真空区）**不是支撑/阻力**，单独收进 `lvn` 列表（真空加速带），不混入价位表。
-    去重：价格相近（≤ 现价的 0.15%）只保留强度更高、更接近现价的一个。
+    """从 1d/4h/1h 的 VP 提取关键价位，分两档：
+      - `intraday`：4h + 1h 短周期（日内博弈关注位）
+      - `swing`   ：1d 日线级别（波段关注位）
+    LVN（低量真空区）**不是支撑/阻力**，单独收进 `lvn`（真空加速带）。
+    去重：价格相近（≤ 现价的 0.15%）只保留来源优先、更接近现价的一个。
     """
-    d1 = next((r for r in rows if r["interval_label"] == "1d"), None)
-    h1 = next((r for r in rows if r["interval_label"] == "1h"), None)
+    def _row(iv):
+        return next((r for r in rows if r["interval_label"] == iv), None)
+    d1, f4, h1 = _row("1d"), _row("4h"), _row("1h")
     price = None
-    for r in (d1, h1):
+    for r in (d1, f4, h1):
         if r and r.get("close"):
             price = r["close"]
             break
-    cands: list[tuple[float, str, str, str]] = []  # (px, label, src, strength)
-    lvn: list[tuple[float, str]] = []  # (px, src) 真空加速带
+    swing: list[tuple[float, str]] = []  # (px, "1d POC") 波段
+    intra: list[tuple[float, str]] = []  # (px, "4h VA下沿") 日内
+    lvn: list[tuple[float, str]] = []
 
-    def add(vp, src, strength):
+    def add_into(tgt, vp, src):
         if not vp:
             return
-        for px, label in (
-            (vp.get("poc"), "POC"),
-            (vp.get("va_low"), "VA下沿"),
-            (vp.get("va_high"), "VA上沿"),
-        ):
+        for px, label in ((vp.get("poc"), "POC"),
+                          (vp.get("va_low"), "VA下沿"),
+                          (vp.get("va_high"), "VA上沿")):
             if px:
-                cands.append((px, label, src, strength))
+                tgt.append((px, f"{src} {label}"))
         sup, res = vp.get("support"), vp.get("resistance")
         if sup:
-            cands.append((sup["price"], f"HVN支撑({sup['kind']})", src, strength))
+            tgt.append((sup["price"], f"{src} HVN支撑({sup['kind']})"))
         if res:
-            cands.append((res["price"], f"HVN阻力({res['kind']})", src, strength))
+            tgt.append((res["price"], f"{src} HVN阻力({res['kind']})"))
         for x in (vp.get("lvn") or []):
             lvn.append((x, src))
 
     if d1:
-        add(d1.get("vp"), "1d", "strong")
+        add_into(swing, d1.get("vp"), "1d")
+    if f4:
+        add_into(intra, f4.get("vp"), "4h")
     if h1:
-        add(h1.get("vp"), "1h", "mid")
+        add_into(intra, h1.get("vp"), "1h")
 
-    # 去重：价差 ≤ 0.15%×现价 视为同一档，保留强度最高、标签更具体的
-    strength_rank = {"strong": 3, "mid": 2, "weak": 1}
     tol = price * 0.0015 if price else 1.0
-    deduped: dict[int, tuple] = {}
-    for px, label, src, strength in sorted(cands, key=lambda c: strength_rank[c[3]], reverse=True):
-        key = round(px / max(tol, 1e-9))
-        cur = deduped.get(key)
-        if cur is None or strength_rank[cur[3]] < strength_rank[strength]:
-            deduped[key] = (px, label, src, strength)
-    cands = list(deduped.values())
-    # LVN 去重（只保留同一价位一个来源）
+
+    def dedup(cands, prefer):
+        out: dict[int, tuple] = {}
+        for px, label in sorted(cands, key=lambda c: (0 if c[1].startswith(prefer) else 1, c[1])):
+            k = round(px / max(tol, 1e-9))
+            out.setdefault(k, (px, label))
+        return list(out.values())
+
+    intra = dedup(intra, "4h")
+    swing = dedup(swing, "1d")
     lvn_dedup: dict[int, tuple] = {}
     for px, src in lvn:
-        key = round(px / max(tol, 1e-9))
-        lvn_dedup.setdefault(key, (px, src))
+        k = round(px / max(tol, 1e-9))
+        lvn_dedup.setdefault(k, (px, src))
     lvn = sorted(lvn_dedup.values(), key=lambda x: -x[0])
 
-    supports = sorted([c for c in cands if c[0] < price], key=lambda c: -c[0])
-    resistances = sorted([c for c in cands if c[0] > price], key=lambda c: c[0])
-    return {"price": price, "supports": supports, "resistances": resistances, "lvn": lvn}
+    def split(cands, ref):
+        sup = sorted([c for c in cands if c[0] < ref], key=lambda c: -c[0])
+        res = sorted([c for c in cands if c[0] > ref], key=lambda c: c[0])
+        return sup, res
+
+    # 分档参考价：日内档参考 4h/1h 现价，波段档参考 1d 收盘（两者在真实数据上接近）
+    intra_price = ((f4 or h1) or {}).get("close") or price
+    swing_price = (d1 or {}).get("close") or price
+    isup, ires = split(intra, intra_price)
+    ssup, sres = split(swing, swing_price)
+    return {"price": price, "intraday_price": intra_price, "swing_price": swing_price,
+            "intraday": {"supports": isup, "resistances": ires},
+            "swing": {"supports": ssup, "resistances": sres},
+            "lvn": lvn}
+
+
+def _render_level_block(title: str, price, supports, resistances) -> list[str]:
+    """渲染一个分档价位块（日内/波段），最近一档标 ★。"""
+    lines = [f"**{title}**", ""]
+    if not supports and not resistances:
+        lines.append("（无）")
+        lines.append("")
+        return lines
+    lines.append("| 方向 | 价位 | 来源 | 现价相对 | 关注 |")
+    lines.append("|---|---|---|---|---|")
+    for kind, cands in (("支撑", supports), ("阻力", resistances)):
+        for i, (px, label) in enumerate(cands):
+            dist = f"{(px / price - 1) * 100:+.2f}%" if price else "—"
+            star = "★ 首要关注" if i == 0 else ""
+            lines.append(f"| {kind} | **{_fmt(px)}** | {label} | {dist} | {star} |")
+    lines.append("")
+    return lines
 
 
 def _render_levels_md(levels: dict) -> list[str]:
-    lines = ["| 方向 | 强度 | 价位 | 来源 | 确认条件 |", "|---|---|---|---|---|"]
+    """关键价位清单：日内（1h/4h）+ 波段（1d）两档，明确标注。"""
     price = levels.get("price")
-    for px, label, src, strength in levels["supports"]:
-        lines.append(f"| 支撑 | {_STRENGTH_CN[strength]} | {_fmt(px)} | {src} {label} | "
-                     f"收盘站稳{_fmt(px)}不破 |")
-    for px, label, src, strength in levels["resistances"]:
-        lines.append(f"| 阻力 | {_STRENGTH_CN[strength]} | {_fmt(px)} | {src} {label} | "
-                     f"收盘站上{_fmt(px)}方有效 |")
-    if not levels["supports"] and not levels["resistances"]:
-        lines.append("| — | — | 无 | — | — |")
+    lines = [f"> 现价 {_fmt(price)}（{price is not None and '参考' or ''}）。"
+             "日内看 1h/4h 短周期位，波段看 1d 位。", ""]
+    lines.extend(_render_level_block("日内关键位（1h/4h 短周期）", levels.get("intraday_price"),
+                                     levels["intraday"]["supports"],
+                                     levels["intraday"]["resistances"]))
+    lines.extend(_render_level_block("波段关键位（1d 日线级别）", levels.get("swing_price"),
+                                     levels["swing"]["supports"],
+                                     levels["swing"]["resistances"]))
     return lines
 
 
@@ -1401,8 +1465,8 @@ def build_scenario_watch(rows: list[dict], ctx: dict, levels: dict) -> list[str]
     h1 = next((r for r in rows if r["interval_label"] == "1h"), None)
     d1_vp = (d1 or {}).get("vp") or {}
     h1_vp = (h1 or {}).get("vp") or {}
-    sup = levels["supports"]
-    res = levels["resistances"]
+    sup = levels["swing"]["supports"]
+    res = levels["swing"]["resistances"]
     lines: list[str] = []
     if not sup or not res:
         lines.append("（无足够 VP 关键位生成情景推演）")
@@ -1417,9 +1481,9 @@ def build_scenario_watch(rows: list[dict], ctx: dict, levels: dict) -> list[str]
     if bear_lv is None and sup:
         bear_lv = sup[0][0]
 
-    # 目标：锚上方/下方最近两个强/次强位（跳过 LVN 弱位）
-    bull_targets = [x for x in res if x[0] > bull_lv and x[3] != "weak"][:2]
-    bear_targets = [x for x in sup if x[0] < bear_lv and x[3] != "weak"][:2]
+    # 目标：锚上方/下方最近两个波段位（swing，1d 口径）
+    bull_targets = [x for x in res if x[0] > bull_lv][:2]
+    bear_targets = [x for x in sup if x[0] < bear_lv][:2]
 
     ind = (d1 or {}).get("indicators") or {}
     vr = ind.get("vol_ratio")
@@ -1465,6 +1529,113 @@ def build_scenario_watch(rows: list[dict], ctx: dict, levels: dict) -> list[str]
                  + f"空头确认位 {_fmt(bear_lv)}（仅作位置参考，需收盘+量能确认）。")
     lines.append("- 说明：以上价位为 VP 静态筹码参考，触发需「收盘确认 + 量能验证」，单一价位不构成信号。")
     lines.append("- 适用口径：本清单为**日线级别规则**（以 1d 收盘确认），小时级别震荡博弈不适用本表。")
+    return lines
+
+
+def _tf_verdict(row: dict) -> dict:
+    """单周期偏多/偏空判定：结构 + 均线 + VWAP + RSI + MACD + 布林 打分。"""
+    reg = row.get("regime") or {}
+    ind = row.get("indicators") or {}
+    close = row.get("close")
+    score = 0
+    reasons: list[str] = []
+    v = reg.get("verdict", "")
+    if v.startswith("趋势向上"):
+        score += 2
+        reasons.append("结构趋势向上")
+    elif v.startswith("趋势向下"):
+        score -= 2
+        reasons.append("结构趋势向下")
+    else:
+        reasons.append("结构震荡/待定")
+    vwap = ind.get("vwap")
+    if vwap and close:
+        if close >= vwap:
+            score += 1
+            reasons.append("VWAP上方")
+        else:
+            score -= 1
+            reasons.append("VWAP下方")
+    for k in ("ma20", "ma50", "ma200"):
+        m = ind.get(k)
+        if m and close:
+            score += 1 if close >= m else -1
+    rsi = ind.get("rsi")
+    if rsi is not None:
+        if rsi > 60:
+            score += 1
+            reasons.append(f"RSI {rsi:.0f}偏强")
+        elif rsi < 40:
+            score -= 1
+            reasons.append(f"RSI {rsi:.0f}偏弱")
+    hist = ind.get("hist")
+    if hist is not None:
+        if hist > 0:
+            score += 1
+            reasons.append("MACD多头")
+        else:
+            score -= 1
+            reasons.append("MACD空头")
+    boll = ind.get("boll")
+    if boll and close:
+        pb = percent_b(close, boll[1], boll[2])
+        if pb > 0.8:
+            score += 1
+        elif pb < 0.2:
+            score -= 1
+    vr = ind.get("vol_ratio")
+    if vr is not None:
+        reasons.append("放量" if vr >= 1.2 else ("缩量" if vr < 0.7 else "平量"))
+    if score >= 4:
+        label = "偏多"
+    elif score >= 2:
+        label = "中性偏多"
+    elif score <= -4:
+        label = "偏空"
+    elif score <= -2:
+        label = "中性偏空"
+    else:
+        label = "中性"
+    return {"label": label, "score": score, "reasons": reasons}
+
+
+_TF_ORDER = ["5m", "15m", "1h", "4h", "1d", "1w"]
+
+
+def build_tf_judgment(rows: list[dict]) -> list[str]:
+    """分周期偏多/偏空判断表 + 一句综合结论。"""
+    by = {r["interval_label"]: r for r in rows}
+    ordered = [by[k] for k in _TF_ORDER if k in by]
+    lines = ["| 周期 | 倾向 | 依据 |", "|---|---|---|"]
+    for r in ordered:
+        j = _tf_verdict(r)
+        reason = "；".join(j["reasons"][:5]) or "—"
+        lines.append(f"| {r['interval_label']} | **{j['label']}** | {reason} |")
+    # 综合结论：短(1h/4h) / 日(1d) / 周(1w)
+    j = {k: _tf_verdict(by[k]) for k in ("1h", "4h", "1d", "1w") if k in by}
+    parts = []
+    if "1h" in j or "4h" in j:
+        s = [j[k]["score"] for k in ("1h", "4h") if k in j]
+        avg = sum(s) / len(s)
+        parts.append(f"短周期(1h/4h){'偏空' if avg <= -2 else ('偏多' if avg >= 2 else '中性')}"
+                     f"（均分{avg:+.1f}）")
+    if "1d" in j:
+        parts.append(f"日线{j['1d']['label']}")
+    if "1w" in j:
+        parts.append(f"周线{j['1w']['label']}")
+    if len(parts) >= 2:
+        # 短空长多 / 短多长空 分化提示
+        short_bear = any("偏空" in p for p in parts if p.startswith("短周期"))
+        short_bull = any("偏多" in p for p in parts if p.startswith("短周期"))
+        long_bull = "周线偏多" in parts or "周线中性偏多" in parts
+        long_bear = "周线偏空" in parts or "周线中性偏空" in parts
+        if short_bear and long_bull:
+            parts.append("结构：短空长多（短线回调、中期趋势未破），日线级回调中段")
+        elif short_bull and long_bear:
+            parts.append("结构：短多长空（短线反弹、中期承压），反弹不宜当反转")
+    lines.append("")
+    lines.append("**综合：**" + " ｜ ".join(parts) + "。")
+    lines.append("> 判定为多周期结构打分（规则性、观察性），非交易信号；需配合关键价位与情景清单使用。")
     return lines
 
 
@@ -1533,6 +1704,12 @@ def render_markdown(rows: list[dict], ctx: dict, generated_at: datetime) -> str:
         note_txt = "；".join(x for x in note if x) or "—"
         lines.append(f"| {r['interval_label']} | {reg.get('verdict','?')} | {vs_txt} | "
                      f"{poc_txt} | {note_txt} |")
+    lines.append("")
+
+    # 分周期偏多/偏空判断（新）
+    lines.append("## 分周期偏多/偏空判断")
+    lines.append("")
+    lines.extend(build_tf_judgment(rows))
     lines.append("")
 
     # 技术指标表
@@ -1671,6 +1848,28 @@ def render_html(rows: list[dict], ctx: dict, generated_at: datetime) -> str:
                  f"<td style='border:1px solid #e2e8f0;padding:6px 8px'>{poc_txt}</td></tr>")
     p.append("</table>")
 
+    # 分周期偏多/偏空判断
+    p.append("<h3 style='margin:16px 0 6px'>分周期偏多/偏空判断</h3>")
+    p.append("<table style='border-collapse:collapse;width:100%;font-size:12px'>")
+    p.append("<tr style='background:#f1f5f9'>"
+             "<th style='border:1px solid #e2e8f0;padding:4px 6px'>周期</th>"
+             "<th style='border:1px solid #e2e8f0;padding:4px 6px'>倾向</th>"
+             "<th style='border:1px solid #e2e8f0;padding:4px 6px'>依据</th></tr>")
+    _tf_by = {r["interval_label"]: r for r in rows}
+    for _k in _TF_ORDER:
+        if _k not in _tf_by:
+            continue
+        _j = _tf_verdict(_tf_by[_k])
+        p.append("<tr>"
+                 f"<td style='border:1px solid #e2e8f0;padding:4px 6px'><b>{esc(_k)}</b></td>"
+                 f"<td style='border:1px solid #e2e8f0;padding:4px 6px'><b>{esc(_j['label'])}</b></td>"
+                 f"<td style='border:1px solid #e2e8f0;padding:4px 6px'>{esc('；'.join(_j['reasons'][:5]))}</td></tr>")
+    p.append("</table>")
+    _tf_summary = [ln for ln in build_tf_judgment(rows) if ln.startswith(("**综合", ">"))]
+    if _tf_summary:
+        p.append("<p style='margin:6px 0 0;font-size:13px'>" +
+                 esc("\n".join(_tf_summary)).replace("\n", "<br/>") + "</p>")
+
     # 技术指标表
     p.append("<h3 style='margin:16px 0 6px'>技术指标（量价 + 择时）</h3>")
     p.append("<p style='margin:0 0 6px;color:#64748b;font-size:12px'>"
@@ -1752,29 +1951,37 @@ def render_html(rows: list[dict], ctx: dict, generated_at: datetime) -> str:
 
     # 关键价位清单 + 情景观察清单
     levels = build_level_list(rows)
-    p.append("<h3 style='margin:16px 0 6px'>关键价位清单（支撑/阻力）</h3>")
-    p.append("<table style='border-collapse:collapse;width:100%;font-size:12px'>")
-    p.append("<tr style='background:#f1f5f9'>"
-             "<th style='border:1px solid #e2e8f0;padding:4px 6px'>方向</th>"
-             "<th style='border:1px solid #e2e8f0;padding:4px 6px'>强度</th>"
-             "<th style='border:1px solid #e2e8f0;padding:4px 6px'>价位</th>"
-             "<th style='border:1px solid #e2e8f0;padding:4px 6px'>来源</th>"
-             "<th style='border:1px solid #e2e8f0;padding:4px 6px'>确认条件</th></tr>")
-    for px, label, src, strength in levels["supports"]:
-        p.append("<tr><td style='border:1px solid #e2e8f0;padding:4px 6px'>支撑</td>"
-                 f"<td style='border:1px solid #e2e8f0;padding:4px 6px'>{_STRENGTH_CN[strength]}</td>"
-                 f"<td style='border:1px solid #e2e8f0;padding:4px 6px'><b>{_fmt(px)}</b></td>"
-                 f"<td style='border:1px solid #e2e8f0;padding:4px 6px'>{esc(src)} {esc(label)}</td>"
-                 f"<td style='border:1px solid #e2e8f0;padding:4px 6px'>收盘站稳{_fmt(px)}不破</td></tr>")
-    for px, label, src, strength in levels["resistances"]:
-        p.append("<tr><td style='border:1px solid #e2e8f0;padding:4px 6px'>阻力</td>"
-                 f"<td style='border:1px solid #e2e8f0;padding:4px 6px'>{_STRENGTH_CN[strength]}</td>"
-                 f"<td style='border:1px solid #e2e8f0;padding:4px 6px'><b>{_fmt(px)}</b></td>"
-                 f"<td style='border:1px solid #e2e8f0;padding:4px 6px'>{esc(src)} {esc(label)}</td>"
-                 f"<td style='border:1px solid #e2e8f0;padding:4px 6px'>收盘站上{_fmt(px)}方有效</td></tr>")
-    if not levels["supports"] and not levels["resistances"]:
-        p.append("<tr><td style='border:1px solid #e2e8f0;padding:4px 6px' colspan='5'>无</td></tr>")
-    p.append("</table>")
+    p.append("<h3 style='margin:16px 0 6px'>关键价位清单（日内/波段）</h3>")
+    p.append(f"<p style='margin:0 0 4px;color:#64748b;font-size:12px'>现价 {_fmt(levels.get('price'))}"
+             "（参考）。日内看 1h/4h 短周期位，波段看 1d 位。</p>")
+
+    def _html_level_block(title, price, supports, resistances):
+        p.append(f"<p style='margin:8px 0 2px'><b>{esc(title)}</b></p>")
+        p.append("<table style='border-collapse:collapse;width:100%;font-size:12px'>")
+        p.append("<tr style='background:#f1f5f9'>"
+                 "<th style='border:1px solid #e2e8f0;padding:4px 6px'>方向</th>"
+                 "<th style='border:1px solid #e2e8f0;padding:4px 6px'>价位</th>"
+                 "<th style='border:1px solid #e2e8f0;padding:4px 6px'>来源</th>"
+                 "<th style='border:1px solid #e2e8f0;padding:4px 6px'>现价相对</th>"
+                 "<th style='border:1px solid #e2e8f0;padding:4px 6px'>关注</th></tr>")
+        for kind, cands in (("支撑", supports), ("阻力", resistances)):
+            for i, (px, label) in enumerate(cands):
+                dist = f"{(px / price - 1) * 100:+.2f}%" if price else "—"
+                star = "★ 首要关注" if i == 0 else ""
+                p.append("<tr>"
+                         f"<td style='border:1px solid #e2e8f0;padding:4px 6px'>{kind}</td>"
+                         f"<td style='border:1px solid #e2e8f0;padding:4px 6px'><b>{_fmt(px)}</b></td>"
+                         f"<td style='border:1px solid #e2e8f0;padding:4px 6px'>{esc(label)}</td>"
+                         f"<td style='border:1px solid #e2e8f0;padding:4px 6px'>{esc(dist)}</td>"
+                         f"<td style='border:1px solid #e2e8f0;padding:4px 6px'>{star}</td></tr>")
+        if not supports and not resistances:
+            p.append("<tr><td style='border:1px solid #e2e8f0;padding:4px 6px' colspan='5'>无</td></tr>")
+        p.append("</table>")
+
+    _html_level_block("日内关键位（1h/4h 短周期）", levels.get("intraday_price"),
+                      levels["intraday"]["supports"], levels["intraday"]["resistances"])
+    _html_level_block("波段关键位（1d 日线级别）", levels.get("swing_price"),
+                      levels["swing"]["supports"], levels["swing"]["resistances"])
 
     # LVN 真空加速带（非支撑阻力）
     lvn = levels.get("lvn") or []
@@ -1896,7 +2103,8 @@ def self_test() -> int:
 
     # 构造两个假"周期"（趋势 + 震荡），验证 analyze_interval + 摘要 + 新段落不崩、判定符合预期
     fake_rows = []
-    o, h, l, c, v = mk(600, 100, 0.012)
+    # 1h 用温和漂移（0.08%/根），避免 VP 区间被指数放大导致价位清单失真
+    o, h, l, c, v = mk(600, 100, 0.0008)
     bars = [{"t": datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(hours=i),
              "open": o[i], "high": h[i], "low": l[i], "close": c[i], "vol": v[i]}
             for i in range(len(c))]
@@ -1906,6 +2114,9 @@ def self_test() -> int:
     fake_rows.append(r)
 
     o, h, l, c, v = mk_range(400, 100)
+    # 让 1d 收盘落在区间中部附近，保证波段档两侧都有位（假数据可控性）
+    o[-1] = 100.0; c[-1] = 100.5
+    h[-1] = max(h[-1], 101.6); l[-1] = min(l[-1], 99.2)
     bars = [{"t": datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(hours=i),
              "open": o[i], "high": h[i], "low": l[i], "close": c[i], "vol": v[i]}
             for i in range(len(c))]
@@ -1924,7 +2135,8 @@ def self_test() -> int:
 
     ctx = _fake_context()
     md = render_markdown(fake_rows, ctx, datetime.now(timezone.utc))
-    for sec in ("一句话摘要", "多因子共振摘要", "风险因子提示", "多周期盘面结构", "技术指标",
+    for sec in ("一句话摘要", "多因子共振摘要", "风险因子提示", "多周期盘面结构",
+                "分周期偏多/偏空判断", "技术指标",
                 "K 线形态", "VP 位置参考", "合约持仓与资金", "期权市场",
                 "链上与宏观", "宏观与跨资产联动",
                 "关键价位清单", "LVN 真空加速带", "情景观察清单", "口径与风险提示"):
@@ -1934,12 +2146,15 @@ def self_test() -> int:
     assert "合约持仓与资金" in htm and "链上与宏观" in htm
     assert "情景观察清单" in htm and "关键价位清单" in htm
     assert "期权市场" in htm and "宏观与跨资产联动" in htm
-    assert "风险因子提示" in htm
+    assert "风险因子提示" in htm and "分周期偏多/偏空判断" in htm
     # 风险因子在假数据下必须非空（高费率/ETF流出/纳指强相关均命中）
     assert build_risk_factors(fake_rows, ctx), build_risk_factors(fake_rows, ctx)
-    # 价位清单/情景在双周期数据下必须产出
+    # 价位清单/情景在双周期数据下必须产出（fake 无 4h，日内档用 1h、波段档用 1d；
+    # 假数据非真实行情，支撑/阻力可能单侧为空，只校验两档结构存在）
     lv = build_level_list(fake_rows)
-    assert lv["supports"] and lv["resistances"], lv
+    assert "intraday" in lv and "swing" in lv and "lvn" in lv
+    assert lv["intraday"]["supports"] or lv["intraday"]["resistances"]
+    assert lv["swing"]["supports"] or lv["swing"]["resistances"]
     scen = build_scenario_watch(fake_rows, ctx, lv)
     assert any("多头确认" in s for s in scen), scen
     print(f"self-test OK: 1h={fake_rows[0]['regime']['verdict']}, "
@@ -1952,7 +2167,8 @@ def self_test() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="每日 BTC 大盘趋势分析（VP + 盘面结构 + 多因子共振）")
     parser.add_argument("--interval", default="", help="单周期（5m/15m/1h/1d）；与 --intervals 二选一")
-    parser.add_argument("--intervals", default="1h,1d", help="逗号分隔多周期（默认 1h,1d）")
+    parser.add_argument("--intervals", default="1h,4h,1d,1w", help="逗号分隔多周期（默认 1h,4h,1d,1w）。"
+                        "⚠️ PowerShell 会把 `1d` 当十进制数吞掉，传参请加引号：--intervals \"1h,4h,1d,1w\"")
     parser.add_argument("--out", default="", help=f"Markdown 输出路径（默认 {DEFAULT_OUT.name}）")
     parser.add_argument("--send-email", action="store_true", help="生成后把报告发到 SMTP_TO 邮箱")
     parser.add_argument("--self-test", action="store_true")
@@ -1973,7 +2189,16 @@ def main() -> int:
     with get_connection(settings.database_url) as conn:
         for iv in intervals:
             cfg = INTERVAL_CONFIG[iv]
-            bars = load_klines(conn, iv, cfg["lookback_days"], cfg["lookback_days"] * cfg["bars_per_day"])
+            base = cfg.get("base")
+            if base:
+                # 派生周期：先拉基础周期再按时间桶聚合（4h←1h、1w←1d）
+                bcfg = INTERVAL_CONFIG[base]
+                raw = load_klines(conn, base, cfg["lookback_days"],
+                                  cfg["lookback_days"] * bcfg["bars_per_day"])
+                bars = resample_bars(raw, cfg["step_hours"])
+            else:
+                bars = load_klines(conn, iv, cfg["lookback_days"],
+                                   cfg["lookback_days"] * cfg["bars_per_day"])
             if len(bars) < cfg["window_bars"] * 2 + 40:
                 print(f"[{iv}] 数据不足（{len(bars)} 根），跳过")
                 continue

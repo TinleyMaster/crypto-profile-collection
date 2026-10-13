@@ -127,6 +127,18 @@ def account_positions(client) -> list[str]:
 # → 开仓成功但无止损/追踪止盈，实盘裸奔。本组函数：保护单任一失败 → 回滚开仓 +
 # 邮件告警，禁止裸奔落地。
 
+def _prot_ok(v: dict | None) -> bool:
+    """保护单是否**确实挂上了**：须为非空 dict、无 error 键、且有交易所标识。
+
+    algo 条件单只有 algoId/clientAlgoId（没有 orderId）；经典挂单有 orderId。
+    开仓后校验与运行期自愈共用本判定（2026-10-12 DOSUSDT 事故：DB 里留着
+    已失效记录，看起来"有止损"实则裸奔，故判定必须落到标识的存在性上）。
+    """
+    if not v or "error" in v:
+        return False
+    return bool(v.get("orderId") or v.get("algoId") or v.get("clientAlgoId"))
+
+
 def _cancel_protective_orders(client, symbol: str, prot: dict | None) -> None:
     """撤某单的保护单：先按普通接口撤（openOrders 里可见的），再按 clientAlgoId 撤残余
     Algo 条件单（子账户条件单可能不进 openOrders，须走 DELETE /fapi/v1/algo/order）。"""
@@ -288,17 +300,35 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
                 qty = float(o.get("executedQty") or 0) or qty
             except Exception as e:  # noqa: BLE001
                 print(f"  [warn] {sig['symbol']} 回查成交失败: {type(e).__name__}: {e}")
-        # ⚠️ 防裸奔（2026-10-12 SUSDT/WUSDT 教训）：保护单（止损/追踪止盈）任一失败
-        # → 回滚开仓 + 邮件告警，绝不留下「开仓成功但无保护单」的裸奔持仓。
-        p_err = r.get("_protective_error")
-        if p_err:
+        # ⚠️ 开仓后保护单校验（2026-10-12 教训：SUSDT/WUSDT 静默裸奔、DOSUSDT −45%）：
+        #   ① 校验硬止损是否**真的挂上了**（响应须含 algoId/clientAlgoId 且无 error）；
+        #   ② 没挂上 → 补挂一次；
+        #   ③ 补挂仍失败（或其它保护单仍有错）→ 回滚：未成交撤单 / 已成交市价全平，
+        #      并邮件告警。绝不留下「开仓成功但无止损」的裸奔持仓。
+        need_sl = bool(p.get("SL"))
+        if need_sl and not _prot_ok(protective.get("stop_loss")):
+            print(f"  [verify] {sig['symbol']} 止损未挂上"
+                  f"（{protective.get('stop_loss') or '响应缺失'}）→ 补挂一次")
+            try:
+                sl2 = client.place_sltp(sig["symbol"], direction, avg,
+                                        p["SL"] * 100, is_stop=True)
+                protective["stop_loss"] = sl2
+                print(f"  [verify] {sig['symbol']} 补挂止损 "
+                      f"{'成功 algoId=' + str(sl2.get('algoId')) if _prot_ok(sl2) else f'仍失败: {sl2}'}")
+            except Exception as e:  # noqa: BLE001
+                print(f"  [verify] {sig['symbol']} 补挂止损异常: {type(e).__name__}: {e}")
+                protective["stop_loss"] = {"error": f"retry_failed: {type(e).__name__}: {e}"}
+        # 校验结论：该有的止损必须确实在挂，且不得残留其它保护单错误（TP/TR）
+        residual = [k for k, v in protective.items() if isinstance(v, dict) and "error" in v]
+        if (need_sl and not _prot_ok(protective.get("stop_loss"))) or residual:
+            p_err = r.get("_protective_error") or f"止损校验未通过 residual={residual}"
             rb_ok, rb_msg = _rollback_entry(client, sig["symbol"], order_id)
             rec.update(decision="aborted", order=order_id,
                        reason=f"protective_failed: {p_err} | rollback={rb_msg}",
                        rollback_ok=rb_ok, open_price=avg, open_qty=qty,
                        margin=(notional / lev) if lev else None,
                        entry_resp=entry_resp, protective=protective)
-            print(f"  [ROLLBACK] {sig['symbol']} 保护单失败→回滚开仓: {p_err} | {rb_msg}")
+            print(f"  [ROLLBACK] {sig['symbol']} 止损两次未挂上→回滚开仓: {p_err} | {rb_msg}")
             _alert_protective_failed(settings, sig, p_err, rb_msg)
             return rec
         rec.update(decision="ordered", order=order_id, reason="ok", order_id=order_id,
@@ -634,10 +664,7 @@ def _ensure_protective(client, conn, settings) -> int:
             prot = t.get("protective_orders") or {}
             sl = prot.get("stop_loss") or {}
             trl = prot.get("trailing_stop") or {}
-            # 保护单是否有效：algo 单只有 algoId/clientAlgoId（无 orderId），普通单有 orderId
-            def _prot_ok(v: dict) -> bool:
-                return bool(v) and "error" not in v and (
-                    v.get("orderId") or v.get("algoId") or v.get("clientAlgoId"))
+            # 保护单是否有效（模块级 _prot_ok：algo 单只有 algoId/clientAlgoId）
             sl_missing = not _prot_ok(sl)
             # 存量迁移：历史挂的 SL 若是「按数量」条件单（closePosition=false），
             # 币安仓位页不显示止损价（只出现在「当前委托→条件委托」），易被误判为裸奔

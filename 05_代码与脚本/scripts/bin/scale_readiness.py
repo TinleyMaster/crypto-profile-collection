@@ -55,11 +55,85 @@ def _tz8() -> timezone:
     return timezone(timedelta(hours=8))
 
 
+def _ensure_state_table() -> None:
+    """幂等自建通知去重表（容器内首跑自动建表，无需手动 migration）。"""
+    settings = get_settings(require_database=True)
+    with get_connection(settings.database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS biz.scale_ready_state (
+                    k             TEXT PRIMARY KEY,
+                    notified_tier INT NOT NULL DEFAULT 0,
+                    notified_n    INT NOT NULL DEFAULT 0,
+                    notified_at   TIMESTAMPTZ
+                )
+            """)
+            cur.execute(
+                "INSERT INTO biz.scale_ready_state (k, notified_tier, notified_n) "
+                "VALUES ('global', 0, 0) ON CONFLICT (k) DO NOTHING")
+
+
+def _maybe_notify(settings, checks, valid, equity, alert: bool) -> bool:
+    """达标且 tier 跃迁（未通知→Tier1 / Tier1→Tier2）时发邮件；否则静默。
+
+    去重规则：只在 `tier > 上次已通知 tier` 时发。Tier0（未达标）永远不发；
+    达标后保持达标不发重复邮件；若中途回落到未达标再达标，会再次提醒。
+    """
+    if not alert:
+        return False
+    n = len(valid)
+    ready = all(c[3] for c in checks)
+    tier = 2 if (ready and n >= 50) else (1 if ready else 0)
+    if tier == 0:
+        return False
+    with get_connection(settings.database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT notified_tier FROM biz.scale_ready_state WHERE k='global'")
+            r = cur.fetchone()
+            last_tier = int(r[0]) if r else 0
+        if tier <= last_tier:
+            return False
+        from crypto_research.clients.notifier import EmailNotifier
+        nf = EmailNotifier(settings)
+        if not nf.configured:
+            print("  [readiness] SMTP 未配置，无法发送扩容就绪邮件")
+            return False
+        title = "✅ 实盘可加资金" if tier == 1 else "🚀 实盘可大幅扩容"
+        rows = "".join(
+            f"<tr><td style='padding:6px;border:1px solid #ddd'>{c[0]}</td>"
+            f"<td style='padding:6px;border:1px solid #ddd'>{c[4]}</td>"
+            f"<td style='padding:6px;border:1px solid #ddd'>{'✅' if c[3] else '—'}</td></tr>"
+            for c in checks)
+        advice = ("建议 100U → 200~300U（Tier 1，保持单笔风险占比不变）"
+                  if tier == 1 else "建议 5~10 倍扩容（Tier 2），零事故需按 3 个月人工核验")
+        body = (
+            "<div style='font-family:sans-serif;font-size:14px;color:#171717'>"
+            f"<h3 style='margin:0 0 8px'>{title}</h3>"
+            f"<p>实盘统计（有效 {n} 笔，权益 {equity:.0f}U）已通过扩容就绪检查：</p>"
+            f"<table style='border-collapse:collapse'>{rows}</table>"
+            f"<p style='margin-top:10px;color:#065f46;font-weight:bold'>{advice}</p>"
+            f"<p style='color:#666'>此通知仅在门槛首次达标/升级时发送一次。"
+            f"加钱前可随时重跑：python bin/scale_readiness.py --equity {equity:.0f}</p>"
+            "</div>")
+        ok, msg = nf.send(f"[扩容就绪] {title}（{n} 笔）", body)
+        if not ok:
+            print(f"  [readiness] 邮件发送失败: {msg}")
+            return False
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE biz.scale_ready_state SET notified_tier=%s, notified_n=%s, "
+                "notified_at=NOW() WHERE k='global'", (tier, n))
+        print(f"  [readiness] 已发送扩容就绪邮件 tier={tier} n={n}")
+        return True
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--equity", type=float, default=100.0, help="当前权益基准 USDT")
     ap.add_argument("--since-fix", default=DEFAULT_SINCE_FIX,
                     help="保护单修复部署时刻（Asia/Shanghai，'YYYY-MM-DD HH:MM'）")
+    ap.add_argument("--alert", action="store_true",
+                    help="达标时发邮件（调度任务用；tier 跃迁去重，仅首次达标/升级通知）")
     args = ap.parse_args()
     equity = args.equity
     since_fix = datetime.strptime(args.since_fix, "%Y-%m-%d %H:%M").replace(tzinfo=_tz8())
@@ -185,6 +259,10 @@ def main() -> int:
     else:
         print(f"⛔ 未达标（{passed}/{len(checks)} 项通过）→ 维持当前 {equity:.0f}U 规模")
         print("   优先补齐：③修复后样本验证 → ①样本量 → ②④⑤ 随实盘表现收敛")
+
+    # ── 可选：达标时邮件通知（调度 --alert 用；tier 跃迁去重，不会重复轰炸）──
+    _ensure_state_table()
+    _maybe_notify(settings, checks, valid, equity, args.alert)
     return 0
 
 

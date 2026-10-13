@@ -155,6 +155,10 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # `每日 diff 变化榜` 就被连累不执行（实测 09-28 22:30 UTC 那次即此）。虽然子任务隔离
     # （df4444f）已消除 break，仍加一条与 data_sync_daily 解耦的兜底：每日 08:05（ETL 06:15
     # 与日同步 06:30 之后、早报快照 08:30 之前）幂等重生成一次（ON CONFLICT DO NOTHING）。
+    # 榜单数据源（2026-10-12 起）：每日变化榜改用币安 USDT 永续日线，须先物化当日
+    # 日线 + 刷新「币安可交易池」。排在 08:05 的 diff 兜底之前，早报快照（08:30）前就绪。
+    ("binance_daily_refresh", "0 8 * * *", "refresh_binance_daily.py", [],
+     "币安日线物化 + 可交易池刷新（变化榜数据源，每日 08:00）", "core"),
     ("daily_diff_fallback", "5 8 * * *", "daily_diff_generator.py", [],
      "每日变化榜兜底（每日 08:05，ETL/日同步后，幂等；防日同步关键任务失败连累）", "core"),
     ("social_heat_batch", "0 8 * * *", "phase_c_social_heat_batch.py", ["--limit", "500", "--delay", "0.5", "--timeout", "60"], "社交热度批量采集（每日 08:00，早报快照前就绪）", "core"),
@@ -190,6 +194,11 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("coinglass_derivatives_snapshot", "10 3 * * *", "ingest_coinglass_derivatives.py",
      ["--limit", "600"],
      "CoinGlass 跨所衍生品快照（每日 03:10，OI 聚合/分所/币本位 + 各所资金费率）", "core"),
+    # Binance 多空比日频采集 → biz.long_short_ratio（period='1d'）→ 每日变化榜「多空比榜」。
+    #   Binance 免费 /futures/data/*（本轮实测可通，未被 418 封），Top 150 × 3 端点 ≈ 15 min；
+    #   03:20 错开 coinglass 03:10、早于 data_sync_daily 06:30（内含 daily_diff 生成）。
+    ("binance_lsr_daily", "20 3 * * *", "ingest_binance_lsr.py", [],
+     "Binance 多空比日频采集（每日 03:20，Top 150 USDT 永续 × 大户持仓/账户/全体）", "core"),
     # SCAN-LIQ-DEPTH-001 阶段 A：盘口深度历史**日频保鲜** → biz.orderbook_depth_history。
     #   ⚠️ 与 CGV4-002 同一教训：只落地脚本不挂调度 = 通路没心跳 ⇒ 回填当天即停更。
     #   ⚠️ 日频**不得**用 --resume（游标语义会让日频永久全跳过，同爆仓回填）。
@@ -237,6 +246,10 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     #   （标签库 09-18 后零新增，积压 5,878 陌生地址静默）。每日 10:00 查积压，超 500 发邮件。
     ("enrich_reminder", "0 10 * * *", "enrich_reminder.py", [],
      "链上标签富化积压提醒（每日 10:00，陌生地址>500 发邮件，只查 DB 不爬取）", "monitor"),
+    # 扩容就绪检查（2026-10-13）：实盘达标（Tier1/Tier2）才允许加资金，达标即邮件通知，
+    #   tier 跃迁去重（biz.scale_ready_state），未达标静默。样本以天计，每 6h 足够。
+    ("scale_readiness", "30 */6 * * *", "scale_readiness.py", ["--alert"],
+     "扩容就绪检查（每6h，达标即邮件通知，tier 跃迁去重）", "monitor"),
 
     # ═══ 链上净流因子（P0 数据利用 2026-09-29）═══
     # 资产×小时交易所净流聚合（读侧 union 归因，与 onchain_alert 页同口径）。
@@ -252,6 +265,12 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # 每日深修复：回看 30d 重算，兜住 >7d 才入库的极端迟到行（避免累积成静默缺口）。
     ("onchain_netflow_repair", "40 4 * * *", "backfill_netflow_factor.py", ["--hours", "720"],
      "资产净流因子每日深修复（回看 30d 重算，兜 >7d 极端迟到行）", "core"),
+    # 净流异动告警（2026-10-07 剂量-反应回测落地）：
+    #   「单日净流 ≥5% 市值」= 事件日级（上币/解锁/迁移/巨鲸异动），次日大概率跑输 BTC ≈2%，
+    #   语义 = 异动提示 + 「次日勿追高」风控，不做多空断言。每 30 分钟扫描 24h 窗口，
+    #   同资产 24h 冷却（biz.netflow_alert_log 留痕去重）。需净流因子先回填（:20 之后跑）。
+    ("netflow_alert", "*/30 * * * *", "scan_netflow_alert.py", ["--window-hours", "24"],
+     "净流异动告警（24h 窗口，≥1%市值关注/≥5%事件日级，24h冷却；每 30 分钟）", "core"),
     # seed_exchange_wallets 已弃用（2026-08-28），由 collect_exchange_wallets 替代
     # ("seed_exchange_wallets", "0 3 * * 1", "seed_exchange_wallets_auto.py", [], "交易所钱包地址自动采集（每周一）", "core"),
     # P0-2 修复：净流轴从仅 ETH 扩展到 ETH+BSC+TRON

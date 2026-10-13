@@ -277,7 +277,7 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
             stop_loss_pct=p["SL"] * 100 if p.get("SL") else 0,
             take_profit_pct=p["TP"] * 100 if p.get("TP") else 0,
             # ⚠️ 不再挂原生 TRAILING_STOP_MARKET：TR 由软件 _trail_check 接管
-            #（对齐回测「峰值=入场后已收盘 1h bar max high」语义，2026-10-12）。
+            #（对齐回测「峰值=入场后已收盘 5m/15m/1h bar max high」语义，2026-10-12）。
             # p["TR"] 仍保留在 params 落库，供 _trail_check 按 tr_pct 回调判定。
             trailing_stop_pct=0,
         )
@@ -353,14 +353,22 @@ def _filled_order(client, symbol: str, order_id) -> dict | None:
 
 
 def _trail_check(client, conn) -> int:
-    """软件跟踪止盈（对齐回测 1h bar 峰值回撤语义，--watch 每轮调用）。
+    """软件跟踪止盈（对齐回测峰值回撤语义，--watch 每轮调用）。
 
     回测（backtest_trade_params.py）TR 判定：
-        ph = 入场后各已收盘 1h bar 的滚动最高 high（不含入场 bar、不含当前判定 bar）
+        ph = 入场后各已收盘 bar 的滚动最高 high（不含入场 bar、不含当前判定 bar）
         触发 = low <= ph × (1-tr)，出场价 = ph×(1-tr)
-    实盘对齐：峰值 = biz.asset_klines 中入场后**已收盘** 1h bar 的 MAX(high_px)
-    （当前未收盘 bar 不计入，等同回测「1 PRECEDING」语义；空单用 MIN(low_px)），
-    每轮轮询最新价，触及 峰值×(1-tr)（多单）/ 谷值×(1+tr)（空单）→ 市价平仓。
+    实盘对齐：峰值 = biz.asset_klines 中入场后**已收盘** 5m/15m/1h bar（任一可用）
+    的 MAX(high_px)（未收盘 bar 不计入，等同回测「1 PRECEDING」语义；空单用
+    MIN(low_px)），每轮轮询最新价，触及 峰值×(1-tr)（多单）/ 谷值×(1+tr)（空单）
+    → 市价平仓。
+
+    ⚠️ 峰值周期（2026-10-13 DOSUSDT 教训）：原实现只取**已收盘 1h bar** —— 入场后
+    第一根符合条件的 1h bar 可能在一小时后才收盘，期间价格暴涨暴跌对 TR 完全盲区
+    （DOSUSDT 21:08 入场、21:40 冲到 +102%、21:45 一根 5m 崩 −65%，TR 峰值恒为 0，
+    全程无感）。改为 5m/15m/1h **任一已收盘 bar** 取峰：活跃币 5m bar 每 5 分钟收盘，
+    入场后 5 分钟即有峰值，盲区从「~1 小时」缩到「~5 分钟」，且仍保持「仅已收盘
+    bar、峰值 bar 自身不触发」的回测语义。
 
     与原生 TRAILING_STOP_MARKET 的关键差异（2026-10-12 对齐原因）：
     原生 TR 从「挂单时最新价（入场价）」激活，入场后回调 ≥3% 立即触发；回测峰值
@@ -368,7 +376,7 @@ def _trail_check(client, conn) -> int:
     「入场即回调≥3%再突破」的币回测能吃到突破、原生 TR 却在回调中被打掉。
     本函数复刻回测判定，消除该乐观偏差。
 
-    ⚠️ 近似：触发判定用每轮轮询时刻价格（默认 5min），回测用 1h bar 的 low——
+    ⚠️ 近似：触发判定用每轮轮询时刻价格（默认 5min），回测用 bar 的 low——
     轮询间隔内的瞬时触达可能漏检（价格快速跌破触发线又拉回）。回调 3% 多为趋势性
     回撤，5min 采样大概率能捕捉；可调小 --interval 提高灵敏度。
 
@@ -378,13 +386,17 @@ def _trail_check(client, conn) -> int:
         cur.execute(
             "SELECT t.id, t.symbol, t.direction, t.tr_pct, t.open_ts, t.protective_orders, "
             "       (SELECT COALESCE(MAX(k.high_px), 0) FROM biz.asset_klines k "
-            "         WHERE k.symbol = t.symbol AND k.interval = '1h' "
-            "           AND k.open_time > t.open_ts "
-            "           AND k.open_time + interval '1 hour' <= NOW()) AS peak, "
+            "         WHERE k.symbol = t.symbol AND k.open_time >= t.open_ts "
+            "           AND ((k.interval = '5m'  AND k.open_time + interval '5 minutes'  <= NOW())"
+            "             OR (k.interval = '15m' AND k.open_time + interval '15 minutes' <= NOW())"
+            "             OR (k.interval = '1h'  AND k.open_time + interval '1 hour'     <= NOW()))) "
+            "       AS peak, "
             "       (SELECT COALESCE(MIN(k.low_px), 1e18) FROM biz.asset_klines k "
-            "         WHERE k.symbol = t.symbol AND k.interval = '1h' "
-            "           AND k.open_time > t.open_ts "
-            "           AND k.open_time + interval '1 hour' <= NOW()) AS trough "
+            "         WHERE k.symbol = t.symbol AND k.open_time >= t.open_ts "
+            "           AND ((k.interval = '5m'  AND k.open_time + interval '5 minutes'  <= NOW())"
+            "             OR (k.interval = '15m' AND k.open_time + interval '15 minutes' <= NOW())"
+            "             OR (k.interval = '1h'  AND k.open_time + interval '1 hour'     <= NOW()))) "
+            "       AS trough "
             "FROM biz.v2_trade_log t "
             "WHERE t.close_ts IS NULL AND t.exit_order_id IS NULL "
             "  AND t.origin = 'bot' AND COALESCE(t.tr_pct, 0) > 0 "
@@ -619,8 +631,8 @@ def _ensure_protective(client, conn, settings) -> int:
        stop_loss 是 error 或缺 orderId，如子账户 -4120 历史裸奔单）→ 按 sl_pct 重新
        补挂（binance_futures 已走 Algo Order API）。部署后首轮即给存量裸奔仓补挂 SL。
        存量「按数量」SL（closePosition=false，仓位页不显示止损价）一并重挂为 Close-All。
-       **跟踪止盈由软件 TR 接管（_trail_check，峰值=入场后已收盘 1h bar 的 max high，
-       回调 tr_pct 触发），不再挂原生 TRAILING_STOP_MARKET** —— 2026-10-12 对齐回测：
+       **跟踪止盈由软件 TR 接管（_trail_check，峰值=入场后已收盘 5m/15m/1h bar 的
+       max high，回调 tr_pct 触发），不再挂原生 TRAILING_STOP_MARKET** —— 2026-10-12 对齐回测：
        回测峰值从「入场后 bar 的 high」累积、实盘原生 TR 从「入场价」激活，导致
        「入场即回调≥3%再突破」的币实盘被 TR 打掉而回测吃到突破，故改用软件复刻回测。
 

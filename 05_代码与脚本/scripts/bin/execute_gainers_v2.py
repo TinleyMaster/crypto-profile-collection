@@ -276,10 +276,13 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
             entry_price=None, leverage=lev,
             stop_loss_pct=p["SL"] * 100 if p.get("SL") else 0,
             take_profit_pct=p["TP"] * 100 if p.get("TP") else 0,
-            # ⚠️ 不再挂原生 TRAILING_STOP_MARKET：TR 由软件 _trail_check 接管
-            #（对齐回测「峰值=入场后已收盘 5m/15m/1h bar max high」语义，2026-10-12）。
-            # p["TR"] 仍保留在 params 落库，供 _trail_check 按 tr_pct 回调判定。
-            trailing_stop_pct=0,
+            # 原生 TRAILING_STOP_MARKET（2026-10-13 重启，交易所侧即时兜底）：
+            #   callbackRate=TR%、activationPrice=入场价×1.05 —— 涨过 5% 才激活，
+            #   之后回调 TR% 由**交易所瞬间接住**（轮询式软件 TR 对 5 分钟级崩盘
+            #   无能为力，DOSUSDT 21:45 一根 5m 崩 −65% 教训）。
+            # 软件 _trail_check 仍保留负责回测对齐的慢速回撤出场；两者竞争先触发者胜。
+            trailing_stop_pct=p["TR"] * 100 if p.get("TR") else 0,
+            trailing_activation_pct=BREAKEVEN_TRIGGER_PCT if p.get("TR") else 0,
         )
         order_id = r.get("orderId")
         # 全量留痕：开仓单原始响应（剔除内部下划线字段）+ 各保护单原始响应（含 orderId）
@@ -303,8 +306,9 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
         # ⚠️ 开仓后保护单校验（2026-10-12 教训：SUSDT/WUSDT 静默裸奔、DOSUSDT −45%）：
         #   ① 校验硬止损是否**真的挂上了**（响应须含 algoId/clientAlgoId 且无 error）；
         #   ② 没挂上 → 补挂一次；
-        #   ③ 补挂仍失败（或其它保护单仍有错）→ 回滚：未成交撤单 / 已成交市价全平，
-        #      并邮件告警。绝不留下「开仓成功但无止损」的裸奔持仓。
+        #   ③ 补挂仍失败 → 回滚：未成交撤单 / 已成交市价全平 + 邮件告警。
+        #      **止损是必选保护**，绝不留下「开仓成功但无止损」的裸奔持仓。
+        #   原生 TR / TP 是可选增强：失败仅降级/告警，不阻断（SL 仍在，软件 _trail_check 兜底）。
         need_sl = bool(p.get("SL"))
         if need_sl and not _prot_ok(protective.get("stop_loss")):
             print(f"  [verify] {sig['symbol']} 止损未挂上"
@@ -318,10 +322,8 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
             except Exception as e:  # noqa: BLE001
                 print(f"  [verify] {sig['symbol']} 补挂止损异常: {type(e).__name__}: {e}")
                 protective["stop_loss"] = {"error": f"retry_failed: {type(e).__name__}: {e}"}
-        # 校验结论：该有的止损必须确实在挂，且不得残留其它保护单错误（TP/TR）
-        residual = [k for k, v in protective.items() if isinstance(v, dict) and "error" in v]
-        if (need_sl and not _prot_ok(protective.get("stop_loss"))) or residual:
-            p_err = r.get("_protective_error") or f"止损校验未通过 residual={residual}"
+        if need_sl and not _prot_ok(protective.get("stop_loss")):
+            p_err = r.get("_protective_error") or "止损两次未挂上"
             rb_ok, rb_msg = _rollback_entry(client, sig["symbol"], order_id)
             rec.update(decision="aborted", order=order_id,
                        reason=f"protective_failed: {p_err} | rollback={rb_msg}",
@@ -331,6 +333,14 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
             print(f"  [ROLLBACK] {sig['symbol']} 止损两次未挂上→回滚开仓: {p_err} | {rb_msg}")
             _alert_protective_failed(settings, sig, p_err, rb_msg)
             return rec
+        # 可选保护降级：原生 TR 失败 → 标注软件 TR 接管（_trail_check）；TP 失败 → 仅告警
+        trl = protective.get("trailing_stop")
+        if isinstance(trl, dict) and "error" in trl:
+            print(f"  [verify] {sig['symbol']} 原生 TR 挂单失败，降级软件 TR: {trl['error']}")
+            protective["trailing_stop"] = {"mode": "software", "tr_pct": p.get("TR") or 0}
+        tp = protective.get("take_profit")
+        if isinstance(tp, dict) and "error" in tp:
+            print(f"  [verify] {sig['symbol']} TP 挂单失败（SL/TR 仍在，继续）: {tp['error']}")
         rec.update(decision="ordered", order=order_id, reason="ok", order_id=order_id,
                    client_order_id=r.get("clientOrderId"),
                    open_price=avg, open_qty=qty,
@@ -688,8 +698,10 @@ def _ensure_protective(client, conn, settings) -> int:
                 # 清残留挂单（避免同侧多张 closePosition 单 -4045 冲突）
                 _cancel_protective_orders(client, t["symbol"], prot)
                 new_prot = prot.copy()
-                new_prot["trailing_stop"] = {"mode": "software",
-                                             "tr_pct": float(t.get("tr_pct") or 0)}
+                # 保留已生效的原生 TR 记录（algoId 等）；仅当无有效原生 TR 时才标注软件 TR 接管
+                if not _prot_ok(prot.get("trailing_stop") or {}):
+                    new_prot["trailing_stop"] = {"mode": "software",
+                                                 "tr_pct": float(t.get("tr_pct") or 0)}
                 if (t.get("sl_pct") or 0) > 0:
                     try:
                         r = client.place_sltp(t["symbol"], direction, entry,

@@ -322,6 +322,7 @@ class BinanceFuturesClient:
         close_position: bool = False,
         position_side: str | None = None,
         callback_rate: float | None = None,
+        activation_price: float | None = None,
         new_client_order_id: str | None = None,
         working_type: str = "CONTRACT_PRICE",
     ) -> dict:
@@ -351,6 +352,11 @@ class BinanceFuturesClient:
             if callback_rate is None:
                 raise BinanceFuturesError("TRAILING_STOP_MARKET 必须传 callback_rate（%）")
             params["callbackRate"] = f"{callback_rate:.1f}"
+            if activation_price is not None:
+                # 激活价：价格达到该值后跟踪止盈才生效。用于「涨过入场价 X% 后才开始
+                # 跟踪」，避免入场后 3% 回调就把跟踪止盈打掉（2026-10-13 原生 TR 启用）。
+                params["activationPrice"] = _round_price_to_tick(
+                    float(activation_price), info["tick_size"])
         if working_type:
             params["workingType"] = working_type
         if new_client_order_id:
@@ -404,7 +410,7 @@ class BinanceFuturesClient:
         direction: str,  # long / short
         callback_rate: float,  # 回调比例 %，如 3.0 = 3%
         quantity: float | None = None,
-        close_position: bool = True,
+        activation_price: float | None = None,
     ) -> dict:
         """挂跟踪止盈平仓单（TRAILING_STOP_MARKET，走 Algo Order API）。
 
@@ -414,13 +420,20 @@ class BinanceFuturesClient:
         ⚠️ 2025-12-09 起币安条件单全量走 /fapi/v1/algoOrder（普通接口 -4120）；
         TRAILING_STOP_MARKET **不支持 closePosition**（-4136 / 官方文档），
         必须传 quantity（配合 positionSide + 反向 side 表达平仓）。
+        ⚠️ 2026-10-13 修正：本方法此前默认 close_position=True 传给 place_algo_order，
+        而 place_algo_order 里 closePosition 分支优先于 quantity → 实际发出的仍是
+        closePosition=true（会被 -4136 拒）。因 2026-10-12 起原生 TR 未启用（死代码）
+        从未暴露；现启用原生 TR 必须先保证 close_position=False 走 quantity 分支。
+
+        activation_price：价格达到该值后跟踪止盈才激活（否则不触发）。配合
+        「涨过入场价 5% 才开始跟踪」的语义，避免入场后小幅回调打掉 TR。
 
         Args:
             symbol: 合约代码
             direction: long / short（持仓方向，平仓 side 与之相反）
             callback_rate: 回调比例 %（如 3.0 表示 3%）
             quantity: 平仓数量（必须传，TRAILING 不支持 closePosition）
-            close_position: 保留参数（TRAILING 下恒为 False，仅兼容旧签名）
+            activation_price: 激活价（可选）；达到后才开始跟踪
         """
         if quantity is None:
             raise BinanceFuturesError(
@@ -428,11 +441,13 @@ class BinanceFuturesClient:
             )
         close_side = "SELL" if direction == "long" else "BUY"
         position_side = "LONG" if direction == "long" else "SHORT"
-        cid = f"trl{direction[:1]}{callback_rate:.0f}"
+        # ⚠️ clientAlgoId 唯一（同 place_sltp）：追加毫秒后缀，避免撤旧重挂同 ID 被拒
+        cid = f"trl{direction[:1]}{callback_rate:.0f}{int(time.time() * 1000) % 10 ** 7}"
         return self.place_algo_order(
             symbol=symbol, side=close_side, order_type="TRAILING_STOP_MARKET",
             quantity=quantity, position_side=position_side,
-            callback_rate=callback_rate, new_client_order_id=cid,
+            callback_rate=callback_rate, activation_price=activation_price,
+            new_client_order_id=cid, close_position=False,
         )
 
     def open_position(
@@ -445,6 +460,7 @@ class BinanceFuturesClient:
         stop_loss_pct: float = 0.0,
         take_profit_pct: float = 0.0,
         trailing_stop_pct: float = 0.0,
+        trailing_activation_pct: float = 0.0,
     ) -> dict:
         """开仓（做多/做空）。
 
@@ -453,7 +469,12 @@ class BinanceFuturesClient:
         - entry_price 为空时用市价单，否则用限价单挂在进场价
         - 自动设置杠杆；可选附带固定止损/止盈/跟踪止盈
         - 传入的止损、跟踪止盈、止盈**全部挂出**（互不排斥）：固定止损走
-          STOP_MARKET(closePosition)，跟踪止盈走 TRAILING_STOP_MARKET(closePosition)
+          STOP_MARKET(closePosition)，跟踪止盈走 TRAILING_STOP_MARKET
+          （quantity + 可选 activation_price，TR 不支持 closePosition）
+        - trailing_activation_pct：跟踪止盈激活价 = 入场价 × (1±pct/100)
+          （2026-10-13 原生 TR 重启：涨过入场价 5% 后才开始跟踪，避免入场后
+          小幅回调打掉 TR，同时让交易所侧即时接住闪崩——软件 _trail_check
+          轮询式 TR 对 5 分钟级崩盘无能为力）
         """
         side = "BUY" if direction == "long" else "SELL"
         position_side = "LONG" if direction == "long" else "SHORT"
@@ -485,9 +506,6 @@ class BinanceFuturesClient:
         entry_used = order_price or cur
 
         # 保护性平仓单：固定止损 / 跟踪止盈 / 固定止盈 —— 三者**相互独立、全部挂出**。
-        # 币安允许 STOP_MARKET(closePosition) 与 TRAILING_STOP_MARKET(closePosition) 同时
-        # 存在于同一持仓侧；只有「GTE_GTC + closePosition」才限一张（-4130）。原实现把
-        # 跟踪止盈与固定止损写成 if/else 互斥，导致 TR>0 时硬止损被静默跳过（实盘裸奔）。
         # ⚠️ 2026-10-12 防裸奔：任一保护单失败**不得静默**——失败信息汇总到
         #    result["_protective_error"]（不抛出，由调用方决定回滚/告警），
         #    禁止「开仓成功但无保护单」裸奔落地。
@@ -502,7 +520,13 @@ class BinanceFuturesClient:
                 p_errs.append(f"stop_loss: {e}")
         if trailing_stop_pct and trailing_stop_pct > 0:
             try:
-                trl = self.place_trailing_stop(symbol, direction, trailing_stop_pct, quantity=qty)
+                act = None
+                if trailing_activation_pct and trailing_activation_pct > 0:
+                    act = entry_used * (1 + trailing_activation_pct / 100) \
+                        if direction == "long" \
+                        else entry_used * (1 - trailing_activation_pct / 100)
+                trl = self.place_trailing_stop(symbol, direction, trailing_stop_pct,
+                                               quantity=qty, activation_price=act)
                 result["_trailing_stop"] = trl
             except BinanceFuturesError as e:
                 result["_trailing_stop"] = {"error": str(e)}

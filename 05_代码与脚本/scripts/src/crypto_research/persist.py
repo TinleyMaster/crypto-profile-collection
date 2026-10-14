@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 
@@ -232,3 +233,123 @@ def persist_contract_security(conn, asset_id: int, chain: str, contract: str,
              meta.get("contract_name"), meta.get("creator_addr"),
              meta.get("contract_verified"), meta.get("reputation"),
              raw_json_str))
+
+
+# ════════════════════════════════════════════════════════════════
+# 投研报告归档（research_report，结构化结论 + 原文全文 + 前向跟踪）
+# ════════════════════════════════════════════════════════════════
+def _jd(v, default=None):
+    """安全 JSON 序列化（非 ASCII 直出；不可序列化对象转字符串）。None → default。"""
+    if v is None:
+        return None if default is None else json.dumps(default, ensure_ascii=False)
+    return json.dumps(v, ensure_ascii=False, default=str)
+
+
+def _fetch_as_of_price(conn, asset_id: int):
+    """取建仓基准价：`market_date <= 北京今日` 的最近可得收盘价（同 thesis_forward_track 口径）。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT price_usd FROM biz.asset_market_daily
+            WHERE asset_id = %s
+              AND source_code IN ('cmc', 'cmc_historical')
+              AND market_date <= (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date
+              AND price_usd IS NOT NULL AND price_usd > 0
+            ORDER BY market_date DESC,
+                     CASE source_code WHEN 'cmc' THEN 0 ELSE 1 END
+            LIMIT 1
+            """, (asset_id,))
+        row = cur.fetchone()
+    if not row:
+        return None
+    val = row["price_usd"] if isinstance(row, dict) else row[0]
+    return float(val) if val is not None else None
+
+
+def persist_research_report(conn, asset_id: int, symbol: str, report: dict,
+                            report_md: str, name: str | None = None,
+                            report_path: str | None = None,
+                            engine: str = "加密投研助手",
+                            subject: str | None = None,
+                            email_status: str | None = None,
+                            email_error: str | None = None,
+                            meta: dict | None = None,
+                            as_of_date=None) -> dict:
+    """投研报告落库：结构化结论 + 原文全文归档 + 前向跟踪建仓行。
+
+    report 期望字段（缺失一律留空，不臆造）：
+      title, stance(bullish/bearish/neutral), score(0-10), confidence(0-1),
+      summary(核心判断一句话), thesis(核心论点 list), drivers_up(上行驱动 list),
+      drivers_down(下行风险 list), tracking(跟踪清单 list/dict),
+      key_metrics(dict), risks(list), catalysts(list), dimensions(dict), sources(list)
+
+    设计：
+      - 结构化 + 原文写入 biz.research_report；幂等键 (asset_id, report_sha256)：
+        同内容重跑只更新邮件状态/元数据，不重复建行。
+      - 前向跟踪：写 biz.thesis_forward_track 建仓行（asset_id, as_of, price_at），
+        由既有日级任务回填 T+7/30/90 收益 —— 复用现成链路，不新增任务；
+        与既有行冲突时只补空值，不覆盖（COALESCE）。
+
+    返回 {report_id, sha256, archived(bool), forward_track(bool)}。
+    """
+    md = report_md or ""
+    sha = hashlib.sha256(md.encode("utf-8")).hexdigest() if md else None
+    out = {"report_id": None, "sha256": sha, "archived": False, "forward_track": False}
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO biz.research_report
+                (asset_id, symbol, name, title, engine, stance, score, confidence,
+                 summary, thesis_json, drivers_up_json, drivers_down_json, tracking_json,
+                 key_metrics_json, risks_json, catalysts_json, dimensions_json, sources_json,
+                 report_path, report_md, report_sha256, subject, email_status, email_error,
+                 meta_json)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s::jsonb,
+                    %s::jsonb,%s::jsonb,%s::jsonb,%s::jsonb,%s::jsonb,
+                    %s,%s,%s,%s,%s,%s,%s::jsonb)
+            ON CONFLICT (asset_id, report_sha256) DO UPDATE SET
+                engine         = EXCLUDED.engine,
+                stance         = EXCLUDED.stance,
+                score          = EXCLUDED.score,
+                confidence     = EXCLUDED.confidence,
+                summary        = EXCLUDED.summary,
+                report_path    = EXCLUDED.report_path,
+                subject        = EXCLUDED.subject,
+                email_status   = EXCLUDED.email_status,
+                email_error    = EXCLUDED.email_error,
+                meta_json      = EXCLUDED.meta_json,
+                updated_at     = NOW()
+            RETURNING report_id
+            """,
+            (asset_id, symbol, name, report.get("title"), engine,
+             report.get("stance"), report.get("score"), report.get("confidence"),
+             report.get("summary"),
+             _jd(report.get("thesis"), []),
+             _jd(report.get("drivers_up")), _jd(report.get("drivers_down")),
+             _jd(report.get("tracking")),
+             _jd(report.get("key_metrics")), _jd(report.get("risks")),
+             _jd(report.get("catalysts")), _jd(report.get("dimensions")),
+             _jd(report.get("sources")),
+             report_path, md, sha, subject, email_status, email_error,
+             _jd(meta, {})))
+        row = cur.fetchone()
+        if row:
+            out["report_id"] = row["report_id"] if isinstance(row, dict) else row[0]
+            out["archived"] = True
+
+        # 前向跟踪建仓行（复用既有日级回填任务；冲突只补空值不覆盖）
+        price_at = _fetch_as_of_price(conn, asset_id)
+        cur.execute(
+            """
+            INSERT INTO biz.thesis_forward_track
+                (thesis_id, asset_id, as_of, price_at)
+            VALUES (NULL, %s, COALESCE(%s, (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date), %s)
+            ON CONFLICT (asset_id, as_of) DO UPDATE SET
+                price_at  = COALESCE(biz.thesis_forward_track.price_at, EXCLUDED.price_at)
+            """,
+            (asset_id, as_of_date, price_at))
+        out["forward_track"] = True
+
+    return out
+

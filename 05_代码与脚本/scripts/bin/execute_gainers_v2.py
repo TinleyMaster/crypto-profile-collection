@@ -362,6 +362,55 @@ def _filled_order(client, symbol: str, order_id) -> dict | None:
         return None
 
 
+def _attribution_from_trades(client, t: dict, prot: dict) -> tuple[dict | None, str]:
+    """algo 保护单触发归因（2026-10-14 BTWUSDT 复盘补充）：SL/TR/TP 现走 Algo Order
+    API，记录里只有 algoId 没有 orderId，_filled_order 恒查不到 → 平仓全部落
+    manual_or_unknown、close_price=None。改为取 open_ts 后该 symbol 的**平仓方向**
+    成交，补 close_price，并按「成交均价 vs 保护单触发价」启发式判定 exit_reason：
+      - 成交价 ≈ SL triggerPrice（±10% 容差，覆盖闪崩滑点）→ sl
+      - 成交价 ≈ TP triggerPrice（±2%）→ tp（当前策略无 TP，预留）
+      - 成交价 > 入场价×0.97 → trail（TR 激活价=入场价×1.05，峰值≥激活价，
+        触发价=峰值×0.97 下界≈入场价×1.0185；激活价错位的存量数据放宽到 0.97）
+      - 其余 → manual_or_unknown（保留 close_price，reason 如实标注未知）
+    启发式无法区分「手动盈利平仓」与 TR，属推断口径（比全 unknown 有用，且 close_price
+    必补）。返回 (出场成交记录 dict | None, exit_reason)。
+    """
+    try:
+        start_ms = int(t["open_ts"].replace(tzinfo=timezone.utc).timestamp() * 1000)
+        trades = client.get_user_trades(t["symbol"], start_ms=start_ms)
+    except Exception as e:  # noqa: BLE001
+        print(f"  [reconcile] {t['symbol']} 归因拉成交失败: {type(e).__name__}: {e}")
+        return None, "manual_or_unknown"
+    is_long = str(t["direction"]).upper() == "LONG"
+    close_side = "SELL" if is_long else "BUY"
+    closes = [x for x in trades if str(x.get("side")) == close_side]
+    if not closes:
+        return None, "manual_or_unknown"
+    tot_q = sum(float(x.get("qty") or 0) for x in closes)
+    if tot_q <= 0:
+        return None, "manual_or_unknown"
+    avg = sum(float(x.get("price") or 0) * float(x.get("qty") or 0) for x in closes) / tot_q
+    last = max(closes, key=lambda x: float(x.get("time") or 0))
+    last["_close_avg_price"] = avg  # 加权均价给 close_price（防拆单）
+    entry = float(t["open_price"] or 0)
+    sl = prot.get("stop_loss") or {}
+    tp = prot.get("take_profit") or {}
+    reason = "manual_or_unknown"
+    sl_trig = float(sl.get("triggerPrice") or sl.get("stopPrice") or 0)
+    if sl_trig > 0 and avg > 0 and abs(avg - sl_trig) / sl_trig <= 0.10:
+        reason = "sl"
+    else:
+        tp_trig = float(tp.get("triggerPrice") or 0) if isinstance(tp, dict) else 0
+        if tp_trig > 0 and avg > 0 and abs(avg - tp_trig) / tp_trig <= 0.02:
+            reason = "tp"
+        elif entry > 0 and ((is_long and avg > entry * 0.97)
+                            or (not is_long and avg < entry * 1.03)):
+            # 多单 TR 触发价 ≥ 峰值×0.97 通常 > 入场价（深幅盈利币可远超）；
+            # 空单对称：触发价 ≤ 谷值×1.03 通常 < 入场价。按方向分别放宽边界。
+            reason = "trail"
+    return last, reason
+
+
 def _trail_check(client, conn) -> int:
     """软件跟踪止盈（对齐回测峰值回撤语义，--watch 每轮调用）。
 
@@ -505,14 +554,18 @@ def _reconcile_closed(client, settings, conn) -> int:
 
     出场判定（全量留痕）：
     - 到期平仓（close_expired 已写入 exit_order_id）：出场单已知，直接用其 orderId 取成交；
-    - TRAIL/SL/TP 触发：从记录的保护单里找哪张 status=FILLED → 即出场单。
+    - TRAIL/SL/TP 触发：先按记录里的 orderId 查（普通单路径）；algo 条件单没有
+      orderId（只有 algoId），退回 _attribution_from_trades 用平仓成交启发式归因
+      （2026-10-14 BTWUSDT 复盘：algo 单触发后原逻辑恒落 manual_or_unknown、
+      close_price=None）。
     再按出场单 orderId 拉 userTrades，**把盈亏精确定位到本笔订单**（realizedPnl，
     手续费取负），从而剔除同币手动单对 income 的污染。无保护单成交（运维手动平仓）
     才回退按 symbol 时间窗 income，并标 exit_reason='manual_or_unknown' 以区分口径。
     返回本次回填笔数。"""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, symbol, open_ts, protective_orders, order_id, exit_order_id, exit_reason "
+            "SELECT id, symbol, direction, open_ts, open_price, protective_orders, "
+            "       order_id, exit_order_id, exit_reason "
             "FROM biz.v2_trade_log WHERE close_ts IS NULL ORDER BY open_ts")
         rows = [dict(zip([d.name for d in cur.description], r)) for r in cur.fetchall()]
     n = 0
@@ -543,6 +596,10 @@ def _reconcile_closed(client, settings, conn) -> int:
                     if filled:
                         exit_order, exit_reason = filled, reason
                         break
+                if exit_order is None:
+                    # algo 保护单（SL/TR/TP）只有 algoId 没有 orderId，_filled_order 查不到
+                    # → 用 open_ts 后平仓成交启发式归因（close_price 必补，reason 尽力）
+                    exit_order, exit_reason = _attribution_from_trades(client, t, prot)
 
             close_price = None
             close_resp = None
@@ -550,7 +607,8 @@ def _reconcile_closed(client, settings, conn) -> int:
             if exit_order is not None:
                 exit_order_id = exit_order.get("orderId") or exit_order_id
                 close_resp = exit_order
-                close_price = float(exit_order.get("avgPrice") or 0) or None
+                close_price = float(exit_order.get("_close_avg_price")
+                                    or exit_order.get("avgPrice") or 0) or None
                 trades = client.get_user_trades(t["symbol"], order_id=exit_order_id)
                 if not trades:
                     continue  # 成交明细尚未就绪，下轮再回填（避免误写 0 盈亏）

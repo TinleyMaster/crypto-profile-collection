@@ -9,6 +9,16 @@ import time
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+
+# ===== 停用保护（2026-10-13 用户决策）=====
+# B4 AI 噪声清理用 LLM 逐条判噪音，token 消耗大，已被规则式治理脚本
+# clean_doc_source_entry.py 替代。默认停用；如需临时启用：
+#   AI_NOISE_CLEAN_ENABLED=1 python phase_b2_ai_noise_clean_auto.py
+import os as _os
+if _os.environ.get("AI_NOISE_CLEAN_ENABLED") != "1":
+    print("[disabled] B4 AI 噪声清理已停用（规则式 clean_doc_source_entry.py 替代），不消耗 LLM token。")
+    sys.exit(0)
+
 BATCH_LIMIT = 2000       # 每批条数（AI 批内速度够快，可以加大）
 MAX_ROUNDS = 100         # 安全上限
 TOTAL_LIMIT = 100000     # 总处理上限

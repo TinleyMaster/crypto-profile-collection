@@ -33,10 +33,14 @@ SELECT a.asset_id, a.canonical_symbol, a.canonical_name, a.asset_type,
 FROM core.asset a
 LEFT JOIN biz.coin_basic cb ON cb.asset_id = a.asset_id
 WHERE a.status = 'active'
-  AND (%(by_id)s OR UPPER(a.canonical_symbol) = %(sym_upper)s
-       OR UPPER(a.canonical_name) = %(sym_upper)s
-       OR EXISTS (SELECT 1 FROM biz.asset_binance_pair p
-                  WHERE p.asset_id = a.asset_id AND UPPER(p.base_symbol) = %(sym_upper)s))
+  AND (
+        (%(by_id)s AND a.asset_id = %(id_val)s)
+        OR (NOT %(by_id)s AND (
+              UPPER(a.canonical_symbol) = %(sym_upper)s
+              OR UPPER(a.canonical_name) = %(sym_upper)s
+              OR EXISTS (SELECT 1 FROM biz.asset_binance_pair p
+                         WHERE p.asset_id = a.asset_id AND UPPER(p.base_symbol) = %(sym_upper)s)))
+      )
 ORDER BY a.market_cap_rank NULLS LAST, a.asset_id
 LIMIT 20
 """
@@ -262,7 +266,9 @@ def main() -> int:
 
     settings = get_settings(require_database=True)
     with get_connection(settings.database_url) as conn:
-        candidates = resolve_asset(conn, args.symbol)
+        raw_query = args.symbol
+        q = int(raw_query) if raw_query.isdigit() else raw_query
+        candidates = resolve_asset(conn, q)
         if not candidates:
             print(f"[health] 未找到资产: {args.symbol}")
             return 1

@@ -1802,6 +1802,16 @@ MAJOR_EVENT_MIN_MOVE = 5.0            # 利好型门槛：事件前 24h |异动|
 MAJOR_EVENT_MIN_IMPORTANCE = 55.0     # 市场显著性门槛（类型权重 × 资产权重）
 MAJOR_EVENT_COOLDOWN_HOURS = 12       # 同一资产 12h 内只发一次（事件级去重）
 MAJOR_EVENT_MAX_PER_RUN = 5           # 单轮上限，配合「日均 ≤5 条」目标
+# 2026-10-13（用户方案 ②）：安全事件「重大」金额门槛 —— 损失 <$1000 万**且**项目非头部
+# （交易所/L1/L2/大额稳定币）→ 降级「中小安全事件」；头部项目或损失 ≥ 该值才按重大事件发送。
+# 判据见 _filter_minor_security_events：金额从标题/摘要/正文抽取，头部项目只看标题。
+MAJOR_EVENT_MIN_LOSS_USD = 10_000_000.0
+# 2026-10-14（用户口径：重大竞争利空）：市场已确认「价格冲击」直通门槛 —— 与标的直接相关的
+# 结构性/竞争性变化（合作落选、份额转移、竞争格局变化等）即便类型权重×市值权重够不到
+# importance 门槛，只要单日 |change_24h| ≥ 该值即入选。样例：2026-10-02 Robinhood 美国永续
+# 选择 Bitstamp（非 Lighter）→ Lighter 单日 -15% 的重大竞争利空；中市值标的按「合作45/上新62
+# × 0.45~0.62 = 20~38」的类型权重路线永远到不了 55，必须靠价格冲击直通。
+MAJOR_EVENT_MIN_SHOCK = 10.0
 _MAJOR_BEARISH_TYPES = ("security", "delisting")  # 利空型：不以涨幅确认，权重直达
 
 
@@ -1809,11 +1819,18 @@ def _recent_major_events(conn, hours: int = 24,
                          limit: int = MAJOR_EVENT_MAX_PER_RUN) -> list[dict]:
     """过去 N 小时发布的「重大事件」候选（每资产留重要性最高一条）。
 
-    入选条件（缺一不可）：
+    入选路径（「权重闸门」与「价格冲击直通」满足其一即可；路径内条件缺一不可）：
+    【路径 A · 权重闸门】
     - `importance >= MAJOR_EVENT_MIN_IMPORTANCE`：类型权重（**市场显著性**）× 资产权重
     - `is_bearish OR (|prelaunch_ret_24h| >= MAJOR_EVENT_MIN_MOVE
       AND prelaunch_penalty = 0)`：利空型（security/delisting/bearish）由事件类型权重
       直达、不以涨幅为准；利好型要求事件前市场已确认（**双向绝对值**，不限涨跌）
+    【路径 B · 价格冲击直通】（2026-10-14，用户口径）
+    - 单日 `|change_24h| >= MAJOR_EVENT_MIN_SHOCK`（10%）即入选，**绕过 importance 闸门**：
+      接住与标的直接相关的结构性/竞争性变化（合作落选、份额转移…）——中市值标的的
+      类型权重×市值权重只能到 20~38，够不到 55。样例：2026-10-02 Robinhood 美国永续
+      选 Bitstamp、Lighter 落选 → 单日 -15% 的重大竞争利空
+    【两路径共用硬约束】
     - `category <> 'market_update'`：剔除行情播报（负 alpha）
     - `catalyst_kind <> 'noise'`：剔除噪音
     - 标题非占位（'null' 等）且非「要闻汇总/日报」聚合帖
@@ -1830,13 +1847,36 @@ def _recent_major_events(conn, hours: int = 24,
     审计 2026-10-09 P1（A+B+C 组合修复，仅作用于本通道、不影响周报）：
     - B 非事件降级：观点帖（发文表示/预计/预测/评论称…）、个人案例（社区用户/某用户…）、
       月度汇总（每月/月报/盘点…）、媒体自宣（launched its own/self-、推出自有…）
-      统一降级 other——这类「非单一资产事件」此前被 ai/rule 误判 security/listing 后，
+      统一降级哨兵类别 'downgraded'——这类「非单一资产事件」此前被 ai/rule 误判 security/listing 后，
       凭大市值权重（asset_w=1.0）以 62~95 分过线（实测 5 封误发邮件全部命中该缺陷）。
     - C 兜底收紧：etf 关键词要求「事件性」表述（获批/上市/提交/招股…），排除单日资金流
       这类常规数据（仅凭 'etf' 一词即可 85×asset_w 过线，属周报口径复用过宽）。
     - A security 实锤门槛：category=security 时要求标题命中真实攻击词或权威分≥60。
       实测权威分无法单独区分真攻击与观点帖（「79th Vault 被盗 1,251 万」与「Vitalik 警告」
       同为 auth=40），故采用「实锤词 OR 高权威」双通道，真攻击不误杀。
+
+    审计 2026-10-13（用户方案，仅作用于本通道、不影响周报）：
+    - ① 研究/数据报告降级（SQL）：标题含回顾性报告关键词（报告/研究/found that/数据商名…）
+      且无价格异动、非实锤攻击 → 降级哨兵 'downgraded'（如 SOL 三明治机器人 Bitquery 报告，行业洞察）
+    - ② 中小安全事件降级（Python 后置）：security 类损失 <$1000 万且项目非头部 → 剔除；
+      非头部 + 「理赔/索赔/恢复」后续处理跟进 → 无金额也剔除
+      （判据见 _filter_minor_security_events，如 Payy 跨链合约被盗：USDC 版 180 万、ETH 重述版仅理赔跟进）
+    - ③ 跨市场宏观/股票评论降级（SQL）：标题含「非加密市场标记 + 资金流/评论语境」且无加密
+      原生事件线索 → 降级哨兵 'downgraded'（如高盛解读美股回购被误挂到 HYPE，资产零相关性）
+    - ④ 回顾性/假设性安全披露降级（SQL）：标题含安全词 + 假设/回顾标记（或致/可能/未知/
+      此前/could have…）+ 资产无 24h 异动且无明确金额 → 降级哨兵 'downgraded'（如 XRP 账本漏洞：
+      9/25 已修复、无人利用、10/9 才披露的复盘，无资金损失、无价格异动）
+
+    审计 2026-10-14（用户口径：重大竞争利空 → 入选端补直通，仅作用于本通道）：
+    - 新增「市场已确认（价格冲击）直通」（路径 B）：单日 `|change_24h| >= MAJOR_EVENT_MIN_SHOCK`
+      （10%）即入选，绕过 importance 闸门。样例：2026-10-02 Robinhood 美国永续选择 Bitstamp
+      （非 Lighter）→ Lighter 单日 -15%；中市值标的按权重路线 45~62 × 0.45~0.62 = 20~38，
+      永远够不到 55，旧闸门必然漏报（同日通道 0 封）。
+    - 降级行由 'other' 改为**哨兵类别 'downgraded'**：在 gated 中硬排除
+      （`category <> 'downgraded'`），使四条降级规则 + 观点/汇总降级**不参与价格冲击直通**——
+      否则 -12% 的高盛/HYPE 跨界评论、有异动的回顾报告会被大异动误捞（用户明确这些非重大事件）。
+    - 直通仍受 12h 资产冷却 + 单轮 ≤5 + DISTINCT ON 资产 约束；**风险**：系统性普跌（BTC 暴跌
+      带动全市场 |异动| ≥10%）可能同时命中多条，需靠冷却与单轮上限收敛，必要时再收紧阈值。
     """
     # 类型权重表 → SQL CASE（复用周报权重，避免第二份口径）
     weight_case = "\n                    ".join(
@@ -1904,12 +1944,43 @@ def _recent_major_events(conn, hours: int = 24,
         categorized AS (
             SELECT *,
                 CASE
+                    -- 研究/数据报告降级（2026-10-13，用户方案 ①）：回顾性研究报告（Bitquery/
+                    -- Nansen/Glassnode/DefiLlama…数据商报告、found that/report/data shows 等）在
+                    -- 「无价格异动 + 非实锤攻击（≈无新资金损失）」时降级哨兵 'downgraded' —— 如 SOL 三明治
+                    -- 机器人报告（11 个月 $2970 万、96%% 命中 Pump.fun）属行业洞察，非市场级重大事件。
+                    -- 标题含实锤攻击词（可能是新资金损失）或资产 24h 已异动（市场已确认）则保留。
+                    WHEN head ~ '报告|研究|调查|统计|数据显示|数据表明|报告显示|分析显示|found that|report|research|survey|study|data shows|bitquery|nansen|messari|glassnode|defillama|dune analytics|coinglass|intotheblock|santiment|chainalysis|elliptic|cryptoquant'
+                         AND head !~ 'hack|exploit|stolen|steal|breach|drain|被盗|被黑|遭攻击|漏洞|rug ?pull|被转走|被钓鱼|钓鱼攻击|被窃取'
+                         AND ABS(COALESCE(change_24h, 0)) < {MAJOR_EVENT_MIN_MOVE:g}
+                        THEN 'downgraded'
+                    -- 跨市场宏观/股票评论降级（2026-10-13，用户方案 ③）：美股/股票市场评论被 LLM
+                    -- 误挂到加密资产（如「高盛解读：AI巨头忙着扩建，谁在接过美股回购的接力棒？」被挂到
+                    -- HYPE——全文讲标普/英伟达/云服务商回购，HYPE 仅出现在编者按类比里，资产零相关性）。
+                    -- 判据：标题同时含「非加密市场标记 + 资金流/评论语境」，且**无加密原生事件线索**
+                    -- （ETF/现货/协议/质押/btc/eth…）。不设价格门槛——内容不在加密市场时，价格是否
+                    -- 异动都无关（该文在任何价格下都不构成该资产的重大事件）。
+                    WHEN head ~ '美股|标普|股票|股市|纳斯达克|纳指|道琼斯|道指|英伟达|nvidia|华尔街|港股|A股|美国股市|stock'
+                         AND head ~ '回购|买盘|资金|资本开支|扩建|接力|巨头|解读|评论|看多|卖压|现金流|净利润|营收|buyback'
+                         AND head !~ 'ETF|现货|期货|代币化|rwa|主网|链上|协议|质押|挖矿|hack|exploit|被盗|遭攻击|漏洞|上线|上市|代币|coin|btc|eth|token'
+                        THEN 'downgraded'
+                    -- 回顾性/假设性安全披露降级（2026-10-13，用户方案 ④）：头部资产的重述/复盘类
+                    -- 安全新闻——如 XRP 账本漏洞（9/25 已修复、无人利用、10/9 才披露、标题
+                    -- 「未知…漏洞或致万亿增发」），无资金损失、无价格异动，属行业深度分析而非
+                    -- 市场级重大事件。判据：标题含安全词 + 假设/回顾标记（或致/可能/未知/此前/
+                    -- could have/previously…）+ 资产无 24h 异动。**有明确金额（X 万/亿 或 数亿）的
+                    -- 损失不在本分支降级**——金额交给 Rule 2 判定（头部保留、非头部按额度）。
+                    WHEN head ~ 'hack|exploit|breach|drain|漏洞|遭攻击|被盗|被黑|被钓鱼|rug ?pull'
+                         AND head ~ '或致|或曾|或造成|或引发|或导致|或影响|可能|潜在|疑似|未知|此前|当时|曾|上月|上周|回顾|复盘|已修复|修复后|could have|could create|could lead|may have|potentially|potential|previously|had been|was vulnerable|at the time|was patched|patched|fixed|disclosed'
+                         AND ABS(COALESCE(change_24h, 0)) < {MAJOR_EVENT_MIN_MOVE:g}
+                         AND head !~ '[0-9][0-9.,]*\s*(亿|万)'
+                         AND head !~ '数亿|过亿|上亿|亿级|数十亿'
+                        THEN 'downgraded'
                     -- 关键词只匹配**标题**（ai_summary 过长，会在无关事件里蹭到关键词）
                     -- 审计 2026-10-09 P1（方案 B）：重大事件通道混入「非单一资产事件」——观点帖
                     -- （Vitalik 警告 AI 密码学风险 / Immunefi 评论）、个人案例（机场 WiFi 钓鱼）、
                     -- 月度汇总（零时月报）、媒体自宣（Decrypt 自家 Money Accounts），被 ai/rule 误判
                     -- security/listing 后，凭大市值权重（asset_w=1.0）以 62~95 分过线。
-                    -- 此处统一降级 other（type_w=32，大市值也过不了 55 阈值）：
+                    -- 此处统一降级哨兵 'downgraded'（在 gated 中硬排除，不再参与任何入选路径）：
                     --   观点帖：发文/发推/发帖 + 表示/称/警告/提醒/呼吁，以及 预计/预测/观点/评论称/分析称
                     --   个人案例：社区用户/某用户/有用户称/有网友/用户发文
                     --   汇总帖：每月/月度/月报/盘点/回顾
@@ -1934,7 +2005,7 @@ def _recent_major_events(conn, hours: int = 24,
                         -- （如「国庆假期错过的消息：OKX 完成融资」）也非单一事件，不受宣布词保护
                         OR head ~ '每月|月度|月报|盘点|回顾|错过的消息'
                         OR head ~ 'launched its (own |self[- ])'
-                        THEN 'other'
+                        THEN 'downgraded'
                     -- 实锤攻击 → security（真安全事件优先于 opinion 降级/其他归类）
                     WHEN head ~ 'hack|exploit|stolen|steal|breach|drain|被盗|被黑|遭攻击|漏洞|rug ?pull'
                         THEN 'security'
@@ -1992,6 +2063,9 @@ def _recent_major_events(conn, hours: int = 24,
                     AS importance
             FROM scored
             WHERE category <> 'market_update'
+              AND category <> 'downgraded'
+              -- 哨兵 'downgraded'（2026-10-14）：四条降级规则 + 观点/汇总降级统一归入此类并硬排除，
+              -- 使其**不参与下方「价格冲击直通」**——避免「回顾/报告/跨界评论」借单日大异动回潮。
               -- 审计 2026-10-09 P1（方案 A）：security 类要求「实锤」——标题命中真实攻击词
               -- （hack/exploit/被盗/被黑/遭攻击/漏洞/rug/被转走/被钓鱼/被窃取），或权威分≥60
               -- （官方公告/权威媒体背书）。实测权威分无法单独区分：真攻击「79th Vault 被盗 1,251 万」
@@ -2017,10 +2091,16 @@ def _recent_major_events(conn, hours: int = 24,
                    second_order_confidence, second_order_count,
                    category AS event_type_norm, is_bearish, importance
             FROM gated
-            WHERE importance >= %s
-              AND (is_bearish
-                   OR (ABS(COALESCE(prelaunch_ret_24h, 0)) >= %s
-                       AND COALESCE(prelaunch_penalty, 0) = 0))
+            WHERE (
+                    (importance >= %s
+                     AND (is_bearish
+                          OR (ABS(COALESCE(prelaunch_ret_24h, 0)) >= %s
+                              AND COALESCE(prelaunch_penalty, 0) = 0)))
+                    -- 市场已确认「价格冲击」直通（2026-10-14，用户口径）：单日 |change_24h| ≥ 阈值
+                    -- 即入选，绕过 类型权重×市值权重 闸门（中市值竞争利空 45~62×0.45~0.62 到不了 55）。
+                    -- 打印的 SQL 与下方参数按位置一一对应。
+                    OR ABS(COALESCE(change_24h, 0)) >= %s
+                  )
               AND NOT EXISTS (
                   SELECT 1
                   FROM biz.catalyst_notification_log nl
@@ -2035,7 +2115,8 @@ def _recent_major_events(conn, hours: int = 24,
         ORDER BY t.importance DESC, t.composite_score DESC NULLS LAST
         LIMIT %s
     """, (hours, MAJOR_EVENT_MIN_IMPORTANCE, MAJOR_EVENT_MIN_MOVE,
-          NTYPE_MAJOR_EVENT, MAJOR_EVENT_COOLDOWN_HOURS, limit)).fetchall()
+          MAJOR_EVENT_MIN_SHOCK, NTYPE_MAJOR_EVENT, MAJOR_EVENT_COOLDOWN_HOURS,
+          limit)).fetchall()
 
 
 # ---- 重大事件「传导逻辑」渲染（输出层优化：只解释机制，不给买卖建议）----
@@ -2457,6 +2538,121 @@ def _major_event_detail_block(summary: str, body: str) -> str:
     return "".join(parts)
 
 
+# ---- 中小安全事件降级（2026-10-13，用户方案 ②）----
+# security 类重大事件候选里，损失 <$1000 万且项目非头部（交易所/L1/L2/大额稳定币）的
+# 「中小安全事件」不按重大事件发送（如 Payy 跨链合约被盗、累计赔付约 180 万 USDC）。
+# 判据要点：
+#   · 受损金额从「标题+摘要+正文」抽取，取最大值（保守：宁可不降级也不低估大额损失）；
+#   · 头部项目**只看标题**——避免「USDC 赔付」这类以稳定币结算的小项目被误判为头部
+#     （Payy 标题不含 USDC，而 USDC 作为赔付币只出现在正文/摘要，故按非头部降级）。
+#   · 非头部项目 + 「理赔/索赔/恢复」等**后续处理跟进** → 无金额也降级（2026-10-13 加固）：
+#     同一 Payy 事件被挂到 ETH 的重述版（PANews 理赔流程报道）不包含损失金额，仅凭
+#     「理赔跟进 + 项目非头部」即可判定中小——首次披露的攻击（标题含攻击词）不受影响。
+#   · 大额词（数亿/过亿/亿级…）视为 ≥$1000 万 → 保留（防止无具体数字的大案被误降级）。
+#   · 其余抽不到金额 → 保守保留（不臆造降级，宁多勿漏）。
+# 金额写法（中文 + $ 前缀两种）：
+#   $2970 万 / $1.8M / $18M / 1200 万美元 / 180 万枚 USDC / 1.8 亿 USDT
+_RE_LOSS_CN = re.compile(
+    r"(?<!\d)(\d+(?:\.\d+)?)\s*(亿|万)\s*(?:枚\s*)?"
+    r"(美元|美金|usdt|usdc|usd|tether|dai|fdusd|busd|pyusd)",
+    re.IGNORECASE,
+)
+_RE_LOSS_USD = re.compile(
+    r"\$\s*(\d+(?:\.\d+)?)\s*(亿|万|b|m|k)?",
+    re.IGNORECASE,
+)
+_CN_UNIT_MULT = {"亿": 1e8, "万": 1e4}
+_USD_UNIT_MULT = {"亿": 1e8, "万": 1e4, "b": 1e9, "m": 1e6, "k": 1e3}
+# 头部项目清单（安全事件语境下才算「重大」）：头部交易所 + 主流 L1/L2 + 大额稳定币。
+_TOP_TIER_SECURITY_RE = re.compile(
+    r"binance|币安|coinbase|okx|欧易|bitfinex|kraken|bybit|bitget|gate\.?io|htx|huobi|火币|"
+    r"kucoin|crypto\.?com|upbit|bithumb|mexc|deribit|backpack|bitstamp"
+    r"|btc|bitcoin|比特币|eth|ethereum|以太坊|sol|solana|ada|cardano|xrp|ripple|dot|polkadot|"
+    r"avax|avalanche|ltc|litecoin|莱特币|matic|polygon|ton|aptos|sui|near|arbitrum|arb|optimism|"
+    r"base network|bsc|binance chain|tron|trx|波场|doge|dogecoin|link|chainlink|uni|uniswap|"
+    r"aave|lido|ldo|curve|mkr|maker|injective|sei|celestia|tia|wormhole"
+    r"|usdt|tether|泰达|usdc|dai|fdusd|busd|usde",
+    re.IGNORECASE,
+)
+# 安全事件「后续处理/理赔」跟进标记：命中说明是已发生攻击的后续报道（理赔/索赔/恢复/追回…），
+# 而非攻击首次披露——对非头部项目不构成重大事件（2026-10-13 加固：Payy 被挂 ETH 的重述版）。
+_FOLLOWUP_SECURITY_RE = re.compile(
+    r"理赔|索赔|赔付|补偿|退款|追回|恢复|重启|后续|进展|受影响用户|补偿方案|善后|救济|refund|"
+    r"claim|claims|compensation|recover|recovered|restor",
+    re.IGNORECASE,
+)
+# 大额词：无具体数字但明确「上亿级」损失 → 视为 ≥$1000 万，不得降级（防止大案被误杀）。
+_BIG_LOSS_RE = re.compile(
+    r"数亿|过亿|上亿|亿级|数十亿|hundreds? of millions|tens of millions|billions?",
+    re.IGNORECASE,
+)
+
+
+def _extract_loss_usd(r: dict) -> float | None:
+    """从安全事件标题/摘要/正文抽取受损金额（USD），抽不到返回 None。"""
+    texts = [
+        r.get("title_cn") or "", r.get("catalyst_title") or "",
+        r.get("ai_summary") or "", r.get("catalyst_body") or "",
+    ]
+    best, found = 0.0, False
+    for t in texts:
+        if not t:
+            continue
+        for m in _RE_LOSS_CN.finditer(t):
+            found = True
+            num, unit = m.group(1), m.group(2)
+            best = max(best, float(num) * _CN_UNIT_MULT[unit])
+        for m in _RE_LOSS_USD.finditer(t):
+            found = True
+            num, unit = m.group(1), m.group(2)
+            mult = _USD_UNIT_MULT.get(unit, 1.0) if unit else 1.0
+            best = max(best, float(num) * mult)
+    return best if found else None
+
+
+def _filter_minor_security_events(rows: list[dict]) -> list[dict]:
+    """重大事件后置过滤：security 类「中小损失 + 项目非头部」降级，不按重大事件发送。
+
+    判定顺序（2026-10-13 加固）：
+      ① 头部项目（标题命中）→ 保留（用户规则：头部项目即重大）
+      ② 损失 ≥$1000 万（或含「数亿/过亿」等大额词）→ 保留
+      ③ 非头部 + 「理赔/索赔/恢复」后续处理跟进 → 降级（无金额也可判，如 Payy→ETH 重述版）
+      ④ 非头部 + 可抽金额 <$1000 万 → 降级
+      ⑤ 非头部 + 无金额且非跟进 → 保守保留（宁多勿漏，防大案无数字被误杀）
+    """
+    out = []
+    for r in rows:
+        if r.get("event_type_norm") != "security":
+            out.append(r)
+            continue
+        title = " ".join(x for x in (r.get("title_cn"), r.get("catalyst_title")) if x)
+        # ① 头部项目（交易所/L1/L2/大额稳定币）→ 重大（不论金额、是否跟进）
+        if title and _TOP_TIER_SECURITY_RE.search(title):
+            out.append(r)
+            continue
+        all_text = " ".join([title, r.get("ai_summary") or "", r.get("catalyst_body") or ""])
+        loss = _extract_loss_usd(r)
+        # ② 大额：可抽金额 ≥$1000 万，或含大额词（数亿/过亿…）→ 重大（防止大案被误降级）
+        if (loss is not None and loss >= MAJOR_EVENT_MIN_LOSS_USD) or _BIG_LOSS_RE.search(all_text):
+            out.append(r)
+            continue
+        # ③ 非头部 + 「理赔/索赔/恢复」后续处理跟进 → 中小（无金额也可判）
+        if _FOLLOWUP_SECURITY_RE.search(title + " " + (r.get("ai_summary") or "")):
+            logger.info(
+                "重大事件降级为中小安全事件 sig=%s %s：后续处理/理赔跟进且项目非头部，不发送",
+                r.get("signal_id"), r.get("symbol"))
+            continue
+        # ⑤ 首次披露但抽不到金额 → 保守保留（宁多勿漏）
+        if loss is None:
+            out.append(r)
+            continue
+        # ④ 非头部 + 可抽金额 <$1000 万 → 中小
+        logger.info(
+            "重大事件降级为中小安全事件 sig=%s %s：损失约 $%.2fM、项目非头部，不发送",
+            r.get("signal_id"), r.get("symbol"), loss / 1e6)
+    return out
+
+
 def send_major_event_alerts(conn, hours: int = 24) -> dict:
     """重大事件通道：对「重要性高且市场已确认」的事件发送独立通报邮件。
 
@@ -2473,6 +2669,9 @@ def send_major_event_alerts(conn, hours: int = 24) -> dict:
 
     try:
         rows = _recent_major_events(conn, hours=hours)
+        # 2026-10-13（用户方案 ②）：中小安全事件（损失 <$1000 万且项目非头部）后置降级，
+        # 与 SQL 侧「研究/数据报告」降级互补，二者都不进入 major_event 发送。
+        rows = _filter_minor_security_events(rows)
     except Exception as e:
         logger.warning("查询重大事件候选失败: %s", e, exc_info=True)
         return {"sent": 0, "skipped": 0, "failed": 0, "signals": [], "reason": str(e)}

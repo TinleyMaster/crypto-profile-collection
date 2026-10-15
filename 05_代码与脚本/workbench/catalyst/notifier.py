@@ -1825,11 +1825,15 @@ def _recent_major_events(conn, hours: int = 24,
     - `is_bearish OR (|prelaunch_ret_24h| >= MAJOR_EVENT_MIN_MOVE
       AND prelaunch_penalty = 0)`：利空型（security/delisting/bearish）由事件类型权重
       直达、不以涨幅为准；利好型要求事件前市场已确认（**双向绝对值**，不限涨跌）
-    【路径 B · 价格冲击直通】（2026-10-14，用户口径）
+    【路径 B · 价格冲击直通】（2026-10-14，用户口径；2026-10-15 加相关性校验）
     - 单日 `|change_24h| >= MAJOR_EVENT_MIN_SHOCK`（10%）即入选，**绕过 importance 闸门**：
       接住与标的直接相关的结构性/竞争性变化（合作落选、份额转移…）——中市值标的的
-      类型权重×市值权重只能到 20~38，够不到 55。样例：2026-10-02 Robinhood 美国永续
-      选 Bitstamp、Lighter 落选 → 单日 -15% 的重大竞争利空
+      类型权重×市值权重只能到 20~38，够不到 55。样例：2026-09-30 Robinhood 发布美国永续
+      选 Bitstamp、Lighter 落选 → LIT 单日 -14.3%、事件内跌逾 20%
+    - **且 `is_related` 必须为真**（2026-10-15）：标题/标题译名/AI 摘要里要出现该资产的
+      名称首词或符号。直通绕过了所有语义闸门，只靠价格异动会让「同名 ticker 的无关新闻」
+      与「正文蹭词的宏观稿」跟着大异动一起进来（实测 ACN：埃森哲收购 Sagacity 被挂到撞
+      ticker 的 AITECH Cloud Network，importance 19.5，全靠 -11.8% 直通）
     【两路径共用硬约束】
     - `category <> 'market_update'`：剔除行情播报（负 alpha）
     - `catalyst_kind <> 'noise'`：剔除噪音
@@ -1877,6 +1881,18 @@ def _recent_major_events(conn, hours: int = 24,
       否则 -12% 的高盛/HYPE 跨界评论、有异动的回顾报告会被大异动误捞（用户明确这些非重大事件）。
     - 直通仍受 12h 资产冷却 + 单轮 ≤5 + DISTINCT ON 资产 约束；**风险**：系统性普跌（BTC 暴跌
       带动全市场 |异动| ≥10%）可能同时命中多条，需靠冷却与单轮上限收敛，必要时再收紧阈值。
+
+    审计 2026-10-15（校准闭环：实例只读 A/B → 确定性判据落码，仅作用于本通道）：
+    7 天窗口 A/B（切 MAJOR_EVENT_MIN_SHOCK=10 / 999 求差集，净增 n=8）暴露三类噪音，逐条落码：
+    - ① 同名 ticker 误挂（ACN，埃森哲新闻 → AITECH Cloud Network）：路径 B 增 `is_related`
+      相关性硬校验（标题/标题译名/AI 摘要须出现资产名首词或符号）。命中 1 条，原动机
+      LIT/Lighter 案例（2026-09-30）经回归确认仍入选。
+    - ② 英文 KOL 观点帖（GRASS，-14.2% 直通但事件本身只是 KOL 评述）：并入既有「观点帖
+      降级」分支，要求 KOL 标记 + 观点动词同现（保留「宣布动作词」护栏）。
+    - ③ `DISTINCT ON` 完全并列不可复现（USDC 两条 importance/composite_score 均为 95.0/40，
+      候选集里加一条其它资产即翻转留哪条）：`ORDER BY` 补 `published_at DESC, catalyst_id DESC`。
+    - 验证方式（可复现）：workbench 只读 A/B 探针逐条打印净增样本的 is_related 取值 +
+      skill《催化剂影响力校准》第五节静态断言（`%s`=7 / `THEN 'downgraded'`=4 / 裸 `%`=0）。
     """
     # 类型权重表 → SQL CASE（复用周报权重，避免第二份口径）
     weight_case = "\n                    ".join(
@@ -1902,6 +1918,13 @@ def _recent_major_events(conn, hours: int = 24,
                    so.second_order_symbols, so.second_order_sector,
                    so.second_order_confidence, so.second_order_count,
                    LOWER(COALESCE(ac.title_cn, '') || ' ' || COALESCE(ac.title, '')) AS head,
+                   -- 相关性校验用文本（标题 + 标题译名 + AI 摘要，**不含正文**）：路径 B 只靠价格异动
+                   -- 放行，必须确认新闻本身就在讲这个资产，否则「同名 ticker / 蹭词型正文」会被大异动
+                   -- 捞进来（2026-10-15：ACN「AITECH Cloud Network」被埃森哲收购新闻顶到大异动直通）。
+                   -- 不含正文的依据：正文提及常是顺带举例（ZAMA 那篇法国自托管申报法案在正文第 337 字符
+                   -- 才提到 Zama），标题/摘要不提即说明该新闻不是这个资产的事件。
+                   LOWER(COALESCE(ac.title_cn, '') || ' ' || COALESCE(ac.title, '') || ' '
+                         || COALESCE(ac.ai_summary, '')) AS head_core,
                    COALESCE(ac.ai_event_type, ac.rule_event_type, 'other') AS raw_event_type
             FROM biz.catalyst_signal s
             JOIN core.asset a ON s.asset_id = a.asset_id
@@ -1997,6 +2020,13 @@ def _recent_major_events(conn, hours: int = 24,
                                 head ~ '发文表示|发推表示|发文称|发推称|发文指出|发推指出|发文警告|发推警告|发文提醒|发推提醒|发文呼吁|发推呼吁|发帖表示|发帖称|警告称|提醒称|评论称|预计|预测|观点|分析称|呼吁'
                                 OR head ~ '社区用户|某用户|有用户称|一位用户|有网友|用户发文|用户称|小号钱包'
                                 OR head ~ 'said that|warns? that|warned that|urged|called for|argued that|believes that|said an unnamed|said in a memo|said in a post|said on X|wrote in a memo|said during|estimated that|estimates that'
+                                -- 2026-10-15：英文 KOL/分析师帖子此前漏网 —— 「Crypto KOL Ansem said
+                                -- Grass has built infrastructure…」不含 'said that' 这类双词形式，被
+                                -- ai_event_type=partnership 放行后靠 -14%% 异动从路径 B 直通（实测 7 天
+                                -- 窗口净增样本之一）。此处要求「KOL 标记 + 观点动词」同时命中；
+                                -- 真事件仍由下方「宣布动作词」护栏保护（宣布/推出/上线/…）。
+                                OR (head ~ '\\mkol\\M'
+                                    AND head ~ 'said|says|claimed|noted|believes|\\m称|表示|认为|指出|评论|预期')
                             )
                             AND head !~ 'hack|exploit|breach|drain|漏洞|rug ?pull|遭攻击|被黑|被钓鱼|钓鱼攻击'
                             AND head !~ '宣布|推出|上线|发布|公布|获批|批准|通过|完成|上市|启动|实施|落地|达成|签署|收购|launch|announc|approv|filed|completed|integrates'
@@ -2035,7 +2065,24 @@ def _recent_major_events(conn, hours: int = 24,
                     WHEN (head ~ '涨幅' AND head ~ '%%') OR head ~ '价格突破|暴涨'
                         THEN 'market_update'
                     ELSE raw_event_type
-                END AS category
+                END AS category,
+                -- 事件-标的相关性（2026-10-15，**只用于路径 B 价格冲击直通**）：
+                -- 标题/摘要文本里必须出现该资产的名称首词或符号，否则不认这次大异动。
+                -- 判据①：canonical_name 首词（中文/含非 ASCII 时 2 字起，纯 ASCII 需 ≥3 字符，
+                --        避免 'The'/'Best' 这类首词误命中），按子串匹配；
+                -- 判据②：symbol（base 里 a.canonical_symbol 的别名）为 2~12 位纯字母数字时
+                --        按词边界匹配（不做正则转义，故先限定符号本身无元字符，避免 $ 注入正则）。
+                -- 实测（7 天窗口）剔除 ACN（埃森哲新闻误挂到撞 ticker 的 AITECH Cloud Network，
+                -- 标题/摘要零提及），保留原动机 2026-09-30「Robinhood 选 Bitstamp、Lighter 落选致
+                -- LIT -20%%」；ZAMA 那类正文才蹭到词的记录同样被判为不相关。
+                (
+                    ((LENGTH(SPLIT_PART(LOWER(COALESCE(canonical_name, '')), ' ', 1)) >= 3
+                      OR SPLIT_PART(LOWER(COALESCE(canonical_name, '')), ' ', 1) ~ '[^[:ascii:]]')
+                     AND POSITION(SPLIT_PART(LOWER(COALESCE(canonical_name, '')), ' ', 1)
+                                  IN head_core) > 0)
+                    OR (LOWER(COALESCE(symbol, '')) ~ '^[a-z0-9]{{2,12}}$'
+                        AND head_core ~ ('\\m' || LOWER(COALESCE(symbol, '')) || '\\M'))
+                ) AS is_related
             FROM base
         ),
         scored AS (
@@ -2098,8 +2145,13 @@ def _recent_major_events(conn, hours: int = 24,
                               AND COALESCE(prelaunch_penalty, 0) = 0)))
                     -- 市场已确认「价格冲击」直通（2026-10-14，用户口径）：单日 |change_24h| ≥ 阈值
                     -- 即入选，绕过 类型权重×市值权重 闸门（中市值竞争利空 45~62×0.45~0.62 到不了 55）。
+                    -- 2026-10-15 追加「相关性」硬校验（is_related）：直通绕过了全部语义闸门，
+                    -- 必须同时满足标题/摘要提到该资产，否则同名 ticker 的无关新闻（ACN）或正文
+                    -- 蹭词型宏观稿会被大异动误捞。原动机 LIT/Lighter 案例（标题含「Lighter 落选」）
+                    -- 仍入选。
                     -- 打印的 SQL 与下方参数按位置一一对应。
-                    OR ABS(COALESCE(change_24h, 0)) >= %s
+                    OR (ABS(COALESCE(change_24h, 0)) >= %s
+                        AND is_related)
                   )
               AND NOT EXISTS (
                   SELECT 1
@@ -2110,9 +2162,15 @@ def _recent_major_events(conn, hours: int = 24,
                     AND nl.status = 'sent'
                     AND nl.sent_at > NOW() - (%s::int * INTERVAL '1 hour')
               )
-            ORDER BY asset_id, importance DESC, composite_score DESC NULLS LAST
+            -- 2026-10-15：并列时补 published_at / catalyst_id 兜底排序。此前 (importance,
+            -- composite_score) 完全并列（实测 USDC 两条均为 95.0 / 40）时 DISTINCT ON 取值
+            -- 依赖排序不稳定性 —— 候选集里加/减一条其它资产就会翻转留哪条（A/B 探针里同一
+            -- 资产在两轮分别留到不同 catalyst_id），使「同一时刻跑两次」结果不可复现。
+            ORDER BY asset_id, importance DESC, composite_score DESC NULLS LAST,
+                     published_at DESC, catalyst_id DESC
         ) t
-        ORDER BY t.importance DESC, t.composite_score DESC NULLS LAST
+        ORDER BY t.importance DESC, t.composite_score DESC NULLS LAST,
+                 t.published_at DESC, t.catalyst_id DESC
         LIMIT %s
     """, (hours, MAJOR_EVENT_MIN_IMPORTANCE, MAJOR_EVENT_MIN_MOVE,
           MAJOR_EVENT_MIN_SHOCK, NTYPE_MAJOR_EVENT, MAJOR_EVENT_COOLDOWN_HOURS,

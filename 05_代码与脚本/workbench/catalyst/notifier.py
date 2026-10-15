@@ -1812,6 +1812,15 @@ MAJOR_EVENT_MIN_LOSS_USD = 10_000_000.0
 # 选择 Bitstamp（非 Lighter）→ Lighter 单日 -15% 的重大竞争利空；中市值标的按「合作45/上新62
 # × 0.45~0.62 = 20~38」的类型权重路线永远到不了 55，必须靠价格冲击直通。
 MAJOR_EVENT_MIN_SHOCK = 10.0
+# 2026-10-15（时间对齐修复，路径 B 专用）：价格冲击必须取「事件时点对齐」的日线，不能取
+# 「最新一条日线」——否则长窗口回看会把**当前**异动安到旧事件上（实测 cid=19283 LIT：
+# 事件 2026-09-30，最新日线 -6.35%% 判为未达阈值，事件日实为 -14.32%%，原动机案例永远进不来）。
+# 取值窗口 = 事件 UTC 日 ~ +MAJOR_EVENT_SHOCK_LAG_DAYS 日，取窗口内 |change_24h| 最大的一条。
+# 为什么窗口要留 1 天（不能取 0）：CMC 日线是「当日 04/12/20 UTC 三个快照里的 20:00 那条」
+# 的 rolling 24h 变化，故 UTC 20:00 之后发生的事件，其日内异动只能由**次日**那条日线承载
+# （实测 cid=31186 STRK 事件 2026-10-11 23:09 UTC：事件日那条 -19.74%% 落在 10-12）。
+# 窗口内无日线（如当日新事件尚未落库）→ 对齐值为 NULL → 路径 B 不成立，只能走路径 A。
+MAJOR_EVENT_SHOCK_LAG_DAYS = 1
 _MAJOR_BEARISH_TYPES = ("security", "delisting")  # 利空型：不以涨幅确认，权重直达
 
 
@@ -1825,11 +1834,13 @@ def _recent_major_events(conn, hours: int = 24,
     - `is_bearish OR (|prelaunch_ret_24h| >= MAJOR_EVENT_MIN_MOVE
       AND prelaunch_penalty = 0)`：利空型（security/delisting/bearish）由事件类型权重
       直达、不以涨幅为准；利好型要求事件前市场已确认（**双向绝对值**，不限涨跌）
-    【路径 B · 价格冲击直通】（2026-10-14，用户口径；2026-10-15 加相关性校验）
-    - 单日 `|change_24h| >= MAJOR_EVENT_MIN_SHOCK`（10%）即入选，**绕过 importance 闸门**：
-      接住与标的直接相关的结构性/竞争性变化（合作落选、份额转移…）——中市值标的的
-      类型权重×市值权重只能到 20~38，够不到 55。样例：2026-09-30 Robinhood 发布美国永续
-      选 Bitstamp、Lighter 落选 → LIT 单日 -14.3%、事件内跌逾 20%
+    【路径 B · 价格冲击直通】（2026-10-14，用户口径；2026-10-15 加相关性校验 + 时间对齐）
+    - 「事件时点对齐日线」的单日 `|event_change_24h| >= MAJOR_EVENT_MIN_SHOCK`（10%）即入选，
+      **绕过 importance 闸门**：接住与标的直接相关的结构性/竞争性变化（合作落选、份额转移…）
+      ——中市值标的的类型权重×市值权重只能到 20~38，够不到 55。样例：2026-09-30 Robinhood
+      发布美国永续选 Bitstamp、Lighter 落选 → LIT 单日 -14.3%、事件内跌逾 20%
+      （`event_change_24h` 见 base 的 `mev`：取事件 UTC 日 ~ +MAJOR_EVENT_SHOCK_LAG_DAYS 天内
+      |change_24h| 最大的一条；窗口内无日线 → NULL → 本路径不成立）
     - **且 `is_related` 必须为真**（2026-10-15）：标题/标题译名/AI 摘要里要出现该资产的
       名称首词或符号。直通绕过了所有语义闸门，只靠价格异动会让「同名 ticker 的无关新闻」
       与「正文蹭词的宏观稿」跟着大异动一起进来（实测 ACN：埃森哲收购 Sagacity 被挂到撞
@@ -1893,6 +1904,34 @@ def _recent_major_events(conn, hours: int = 24,
       候选集里加一条其它资产即翻转留哪条）：`ORDER BY` 补 `published_at DESC, catalyst_id DESC`。
     - 验证方式（可复现）：workbench 只读 A/B 探针逐条打印净增样本的 is_related 取值 +
       skill《催化剂影响力校准》第五节静态断言（`%s`=7 / `THEN 'downgraded'`=4 / 裸 `%`=0）。
+      （上句 n=8 为落码前基准；加 is_related + KOL 分支后复算为 5。）
+
+    审计 2026-10-15（路径 B 时间对齐修复，仅作用于本通道；7 天窗口只读 A/B 复算）：
+    - 缺陷：路径 B 用 `md.change_24h`（**最新一条日线**）判异动。实时场景「最新日线」≈事件附近
+      的日线，偏差不大；但长窗口回看 / 历史补发时它是**当前**异动，会安到旧事件头上——
+      ① 原动机案例 cid=19283（LIT，事件 2026-09-30 07:13 UTC）最新日线仅 -6.35%%、事件日实为
+      -14.32%%，**旧口径下该案例在回看里永远进不来**；② 反向同样错：AVA 把当日 +41.92%% 安到
+      10-08 的旧事件、龙虾 把 -39.51%% 安到 10-10 的旧事件，对齐后两者都失去路径 B 资格。
+    - 修复：新增事件时点对齐 LATERAL（`mev` → `event_change_24h`），取事件 UTC 日 ~
+      +MAJOR_EVENT_SHOCK_LAG_DAYS(=1) 天内 |change_24h| 最大的一条，并改走单源视图
+      `biz.v_asset_market_daily_primary`（三源同日最多 3 行、价格差可达百倍，旧写法取值不确定）。
+      窗口留 1 天的依据：CMC 日线 = 当日 04/12/20 UTC 快照里 20:00 那条的 rolling 24h，
+      故 UTC 20:00 之后的事件只能由**次日**那条承载（实测 cid=29880 AERO 事件 10-09 21:51 →
+      次日那条 +16.73%%）；窗口内无日线（当日新事件尚未落库，实测 cid=35585 ZAMA）→ 对齐值
+      NULL → 路径 B 不成立，待日线落库后仍可在 24h 窗口内补发。
+    - 净增复算（切 MAJOR_EVENT_MIN_SHOCK=10/999，hours=168、limit=99）：**净增 5 → 12**，
+      方向不是「多筛掉」而是「换掉错的那批」——12 条里 10 条在旧口径下 V0<10%%（真事件被当日
+      最新日线盖住而漏报，如 cid=29165 KAIA 事件日 +44.35%% vs 最新日线 -5.58%%），
+      对齐后 11/12 条扣 β 后 |excess| 仍 ≥10%%（同日 BTC 仅 ±2%%），属标的自身冲击而非大盘同动。
+    - 边界（**不**等于证明因果）：新口径只保证日期对齐，同日全市场普跌仍可能同时命中多条；
+      该风险与旧口径同源，仍靠 12h 资产冷却 + 单轮 ≤5 收敛。若仍偏多，下一步单变量 patch
+      应把判据从「|异动|」升级为「扣 β 超额 |excess|」，而不是继续调阈值。
+    - 同一提交内**未修**的同类消费点（另立 patch）：① `md`（渲染用 current_price/change_7d/
+      volume_24h）仍不过单源视图，三源同日任取；② 两条降级规则用 `change_24h` 判「资产 24h
+      有无异动」，长窗口回看同样错位；③ 通道回看窗口固定 24h，而事件日线要等当日 22:15 UTC
+      才落库，UTC 20:00 后的事件会贴着窗口边缘（必要时再拉长窗口）。
+    - 校验基线（本 patch 后）：`sql` 18330 字符 / `%s`=8 / `%%`=7 / `THEN 'downgraded'`=4 /
+      裸 `%`=0；`event_change_24h` 与 `is_related` 在位；同参数连跑两轮候选集一致。
     """
     # 类型权重表 → SQL CASE（复用周报权重，避免第二份口径）
     weight_case = "\n                    ".join(
@@ -1915,6 +1954,7 @@ def _recent_major_events(conn, hours: int = 24,
                    ci.impact_direction, ci.impact_strength,
                    md.price_usd AS current_price, md.change_24h, md.change_7d,
                    md.volume_24h,
+                   mev.change_24h AS event_change_24h,
                    so.second_order_symbols, so.second_order_sector,
                    so.second_order_confidence, so.second_order_count,
                    LOWER(COALESCE(ac.title_cn, '') || ' ' || COALESCE(ac.title, '')) AS head,
@@ -1940,6 +1980,24 @@ def _recent_major_events(conn, hours: int = 24,
                 ORDER BY m.market_date DESC
                 LIMIT 1
             ) md ON TRUE
+            -- 事件时点对齐的日线异动（2026-10-15 时间对齐修复，**只供路径 B 判定**）：
+            -- 上面那行 `md` 取的是「最新一条日线」（渲染用，须保留），长窗口回看时会把
+            -- **当前**异动安到旧事件头上 —— 实测 cid=19283（LIT，事件 2026-09-30）最新日线
+            -- 只有 -6.35%%，而事件日实为 -14.32%%，旧口径下原动机案例在回看里永远进不来。
+            -- 这里改为「事件 UTC 日起、最多滞后 MAJOR_EVENT_SHOCK_LAG_DAYS 天」的窗口，
+            -- 取窗口内 |change_24h| 最大的一条（窗口留 1 天的理由见常量注释）。
+            -- 走单源视图（cmc > cmc_historical > binance_klines）：三源同日最多 3 行且价格
+            -- 差可达百倍，不过视图取值不确定。窗口内无日线（如当日新事件尚未落库）→
+            -- 对齐值为 NULL → 路径 B 不成立，只能走路径 A。
+            LEFT JOIN LATERAL (
+                SELECT m.change_24h
+                FROM biz.v_asset_market_daily_primary m
+                WHERE m.asset_id = s.asset_id
+                  AND m.market_date >= (ac.published_at AT TIME ZONE 'UTC')::date
+                  AND m.market_date <= (ac.published_at AT TIME ZONE 'UTC')::date + (%s::int)
+                ORDER BY ABS(m.change_24h) DESC NULLS LAST, m.market_date
+                LIMIT 1
+            ) mev ON TRUE
             LEFT JOIN LATERAL (
                 -- 二阶/板块传导：同 catalyst 下、本资产之外的其他受益标的（只消费已有数据）
                 SELECT
@@ -2143,14 +2201,16 @@ def _recent_major_events(conn, hours: int = 24,
                      AND (is_bearish
                           OR (ABS(COALESCE(prelaunch_ret_24h, 0)) >= %s
                               AND COALESCE(prelaunch_penalty, 0) = 0)))
-                    -- 市场已确认「价格冲击」直通（2026-10-14，用户口径）：单日 |change_24h| ≥ 阈值
+                    -- 市场已确认「价格冲击」直通（2026-10-14，用户口径）：单日异动 ≥ 阈值
                     -- 即入选，绕过 类型权重×市值权重 闸门（中市值竞争利空 45~62×0.45~0.62 到不了 55）。
+                    -- 2026-10-15 起异动值改用 `event_change_24h`（事件时点对齐日线，见 base 的 mev）；
+                    -- 此前用当前资产的「最新日线」，长窗口回看会把当前异动安到旧事件上。
                     -- 2026-10-15 追加「相关性」硬校验（is_related）：直通绕过了全部语义闸门，
                     -- 必须同时满足标题/摘要提到该资产，否则同名 ticker 的无关新闻（ACN）或正文
                     -- 蹭词型宏观稿会被大异动误捞。原动机 LIT/Lighter 案例（标题含「Lighter 落选」）
                     -- 仍入选。
                     -- 打印的 SQL 与下方参数按位置一一对应。
-                    OR (ABS(COALESCE(change_24h, 0)) >= %s
+                    OR (ABS(COALESCE(event_change_24h, 0)) >= %s
                         AND is_related)
                   )
               AND NOT EXISTS (
@@ -2172,9 +2232,9 @@ def _recent_major_events(conn, hours: int = 24,
         ORDER BY t.importance DESC, t.composite_score DESC NULLS LAST,
                  t.published_at DESC, t.catalyst_id DESC
         LIMIT %s
-    """, (hours, MAJOR_EVENT_MIN_IMPORTANCE, MAJOR_EVENT_MIN_MOVE,
-          MAJOR_EVENT_MIN_SHOCK, NTYPE_MAJOR_EVENT, MAJOR_EVENT_COOLDOWN_HOURS,
-          limit)).fetchall()
+    """, (MAJOR_EVENT_SHOCK_LAG_DAYS, hours, MAJOR_EVENT_MIN_IMPORTANCE,
+          MAJOR_EVENT_MIN_MOVE, MAJOR_EVENT_MIN_SHOCK, NTYPE_MAJOR_EVENT,
+          MAJOR_EVENT_COOLDOWN_HOURS, limit)).fetchall()
 
 
 # ---- 重大事件「传导逻辑」渲染（输出层优化：只解释机制，不给买卖建议）----

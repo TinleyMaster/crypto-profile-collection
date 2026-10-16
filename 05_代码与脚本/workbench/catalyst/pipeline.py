@@ -316,7 +316,7 @@ def _match_project_name_to_assets(conn, title: str) -> list[dict]:
         return []
     rows = conn.execute(
         """
-        SELECT a.asset_id, a.canonical_symbol, a.canonical_name, a.market_cap_rank
+        SELECT a.asset_id, a.canonical_symbol AS symbol, a.canonical_name, a.market_cap_rank
         FROM core.asset a
         WHERE (
             LOWER(a.canonical_symbol) = ANY(%s::text[])

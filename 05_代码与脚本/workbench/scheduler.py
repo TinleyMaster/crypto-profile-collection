@@ -284,6 +284,12 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # P1-2/P1-6: 摄入+AI+thesis 每12h（DeepSeek 额度有限），决策管道慢通道每4h
     # 快通道（原每15分钟）已迁移为独立常驻进程 catalyst_fast_daemon（supervisord 管理）
     ("catalyst_run_all", "0 */12 * * *", "catalyst_run_all.py", [], "催化剂全链路：摄入→AI预处理→thesis重生（每 12 小时）", "core"),
+    # 交易所上新公告（2026-10-16 数据源诊断补口）：原催化剂源 source_url 域 99.8% 来自
+    #   币安（KOL 二手转述），**零外部交易所源**。OKX/Bitget/Bybit 公告为一手/免费/免 key/
+    #   分钟级/标题自带 symbol（可经 linker 直接落 asset_id，实测归属率 83%）。
+    #   对时延敏感，故独立每 30 分钟调度（catalyst_run_all 的 12h 全源摄入太慢）；
+    #   只打 3 个轻量端点，压力可忽略。⚠️ 服务器需 git pull + 重启 supervisor 才生效。
+    ("exchange_announcements", "*/30 * * * *", "ingest_exchange_announcements.py", [], "交易所上新公告（OKX/Bitget/Bybit，每 30 分钟）", "core"),
     # P1-6: 决策管道慢通道独立调度（4h 一次，仅跑二阶展开+G3G5+巡检，不消耗 LLM 额度）
     ("catalyst_slow_pipeline", "30 */4 * * *", "phase_catalyst_pipeline.py", ["--slow"], "催化剂决策管道慢通道（每 4 小时）", "core"),
     # 审计 2026-09-29 P2-3：重大事件此前只随慢通道（4h）/catalyst_run_all（12h）/快 daemon 发送，

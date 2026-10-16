@@ -22,7 +22,12 @@ import re
 from datetime import datetime
 
 from .models import CatalystItem
-from .linker import map_pairs_to_asset_ids, extract_pairs_from_text, extract_base_symbol
+from .linker import (
+    map_pairs_to_asset_ids,
+    extract_pairs_from_text,
+    extract_base_symbol,
+    is_bare_symbol,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +38,19 @@ _STABLE_BASES = frozenset({
 })
 _UNSEEN = 10 ** 9
 
+# 组织词候选停用词（P3-C-B，2026-10-16）：原提取正则带 `re.I` ⇒ 英语虚词/泛词也成候选，
+# 实测三条 FP（负样本被误连）：
+#   · cid 14411「Bank Indonesia Governor… and Finance Minister」→ word='and'
+#     → canonical_name 词边界命中 `Ape and Pepe`/`Space and Time`/`Trading and Payment`；
+#   · cid 15073「Grok Bot has launched a new Finance integration」→ word='new'
+#     → 命中 `Sun [New]`/`BitTorrent [New]`/`Pundi X (New)`；
+#   · cid 26917「Creditors to Hertz… at least two groups」→ word='two' → 命中 `Arena Two`。
+# 处置：① 提取正则去 `re.I`（只认首字母大写词，虚词天然落空）；② 再叠加本停用词表兜底。
+_ORG_WORD_STOPWORDS = frozenset({
+    "AND", "OR", "NEW", "OLD", "TOP", "THE", "FOR", "ALL", "ANY",
+    "TWO", "ONE", "SIX", "TEN", "NEXT", "LAST", "LIVE", "FROM", "WITH", "NOT",
+})
+
 
 def _symbol_pos(text_lower: str, base: str) -> int:
     """base 在文本中首次出现位置（词边界、大小写不敏感）；未出现返回 _UNSEEN。"""
@@ -40,6 +58,64 @@ def _symbol_pos(text_lower: str, base: str) -> int:
         return _UNSEEN
     m = re.search(r"(?<![a-z0-9])" + re.escape(base.lower()) + r"(?![a-z0-9])", text_lower)
     return m.start() if m else _UNSEEN
+
+
+# 标题中允许紧随 base 的 quote 后缀（pairs 给裸 `CT`、而标题写 `CTUSDT`）
+_TITLE_QUOTE_TAIL = r"USDT|USDC|BUSD|TUSD|USDP|FDUSD|USD"
+
+
+def _title_has_token(title: str | None, pair: str) -> bool:
+    """pair 是否作为**独立 token** 出现在标题中（弱信号 pair 的佐证条件）。
+
+    同时接受：① **连写的交易对形态** —— pairs 给裸 `CT` 而标题写 `CTUSDT`（实测 cid 20597）；
+    ② 尾部标点/空格 —— `(W)` / `W 现报` / `CT 代币`。
+    例：`CT` 命中「币安将上线 CTUSDT 永续」；`V` **不**命中「Visa 公布的新数据」。
+    """
+    if not title or not pair:
+        return False
+    p = re.escape(pair.strip())
+    pat = r"(?<![A-Za-z0-9])" + p + r"(?=$|[^A-Za-z0-9]|" + _TITLE_QUOTE_TAIL + r")"
+    return bool(re.search(pat, title))
+
+
+def _needs_title_proof(pair: str) -> bool:
+    """pair 是否属**弱信号**（裸 symbol，或**单字符 base**）—— 须标题独立 token 佐证。
+
+    单字符 base 与美股单字母代码撞名：实测 `VUSDT`(Visa) / `CUSDT`(花旗 Citigroup) /
+    `MUSDT`(梅西 Macy's) / `AUSDT` 共 7 行被误连；而真币单字符（`G`=Gravity /
+    `W`=Wormhole / `Q`=Quack AI / `O`=o1.exchange）标题均含该符号。
+    """
+    if not pair:
+        return True
+    b = extract_base_symbol(pair)
+    if b is None:
+        return True
+    return is_bare_symbol(pair) or len(b) == 1
+
+
+def _filter_bare_pairs(pairs: list[str], title: str | None) -> list[str]:
+    """弱信号 pair 护栏（P3-C1a'，2026-10-16）：须标题佐证，否则丢弃。
+
+    背景：币安广场对美股/宏观/商品稿同样标裸 ticker 或单字符 ticker —— 实测 crypto_gap
+    桶负样本 50 行被误连，实例：SHY(美债ETF)/B3(巴西证交所)/GM(通用)/MS(摩根士丹利)/
+    ACN(埃森哲)/PEP(百事)/RTX(雷神)/V(Visa)/C(花旗)/M(梅西)/BLK(贝莱德)/ON(安森美)/
+    CAG(康尼格拉)/RBLX(Roblox)/HTZ(赫兹)/TLT/IEF/AGG/HD/XRT/CRUS/SYNA。
+    规则：**有 quote 后缀且 base ≥2 字符者（强信号）不受限；其余须标题独立 token 佐证**。
+    代价：标题不含该符号的少数真新闻会漏（如 `DGrid AI` 稿未写 `DGAI`）—— 漏连优于错连。
+    """
+    if not pairs:
+        return []
+    out: list[str] = []
+    for p in pairs:
+        if not _needs_title_proof(p):
+            out.append(p)
+            continue
+        # ⚠️ 用 **base**（`WUSDT`→`W`）而非原始 pair 去匹配标题 —— 标题写的是
+        # `W 现报` / `Wormhole (W)`，不会出现 `WUSDT` 连写。
+        base = extract_base_symbol(p) or p
+        if _title_has_token(title, base):
+            out.append(p)
+    return out
 
 
 def _order_pairs_by_salience(pairs: list[str], title: str | None, body: str | None) -> list[str]:
@@ -237,6 +313,8 @@ def _merge_catalyst(
     ctx = " ".join(str(x) for x in (
         item.title, item.body_text,
         existing.get("title"), existing.get("body_text")) if x)
+    # 裸 symbol 护栏（P3-C1a'）：与 _resolve_asset_ids 同口径
+    all_pairs = _filter_bare_pairs(all_pairs, item.title or existing.get("title"))
     all_pairs = _order_pairs_by_salience(all_pairs, ctx, None)
     asset_ids = map_pairs_to_asset_ids(all_pairs, conn, context_text=ctx)
     _update_asset_links(catalyst_id, asset_ids, link_source, conn)
@@ -261,6 +339,9 @@ def _resolve_asset_ids(
         pairs = extract_pairs_from_text(item.title + " " + item.body_text)
         if pairs:
             link_source = "cashtag"
+
+    # 裸 symbol 护栏（P3-C1a'，2026-10-16）：无 quote 后缀者是弱信号，须标题独立 token 佐证
+    pairs = _filter_bare_pairs(pairs, item.title)
 
     # 项目方名 → 代币前置（审计 2026-10-08 P0）：币安广场帖子的 tradingPairsV2 标注
     # 常把事件挂到「被提及的大市值代币」而非项目方本体（Solv Protocol 事件被挂 BTC、
@@ -300,16 +381,21 @@ def _match_project_name_to_assets(conn, title: str) -> list[dict]:
     """
     try:
         title = title or ""
+        # P3-C-B：**去 `re.I`** —— 候选词必须首字母大写（`[A-Z]`），英语虚词/泛词
+        # （and/new/two…）因此天然落空；组织词部分用内联 `(?i:...)` 保持大小写不敏感，
+        # 以免 "Solv Protocol"（大写 P）被漏掉。
         words = set(
             re.findall(
-                r"([A-Z][A-Za-z0-9\-\.]{2,})\s+(?:protocol|foundation|labs?|network|dao|chain|swap|finance|capital|group|token)\b",
-                title, flags=re.I,
+                r"([A-Z][A-Za-z0-9\-\.]{2,})\s+(?i:protocol|foundation|labs?|network|dao|chain|swap|finance|capital|group|token)\b",
+                title,
             )
         )
         # 复合词：XxxDAO / XxxChain / XxxSwap（无空格分隔的组织词）
         words |= set(
             re.findall(r"([A-Z][A-Za-z0-9\-\.]{2,})(?:DAO|Chain|Swap|Finance|Network|Protocol)\b", title)
         )
+        # 停用词兜底（大写虚词/泛词）
+        words = {w for w in words if w.upper() not in _ORG_WORD_STOPWORDS}
     except Exception:
         return []
     if not words:
@@ -321,10 +407,13 @@ def _match_project_name_to_assets(conn, title: str) -> list[dict]:
         WHERE (
             LOWER(a.canonical_symbol) = ANY(%s::text[])
             OR EXISTS (
-                -- canonical_name 词边界精确匹配（"Arbitrum" ↔ Arbitrum，防 Bitcoin Cash 误配）
+                -- canonical_name **首词**匹配（P3-C-B，2026-10-16）：原任意位置词边界匹配
+                -- 过宽 —— 实测 word='Gravity' 命中 `Gravity`/`Gravity Finance`、
+                -- word='Cycle' 命中 `Cycle`/`Burn Cycle`/`$FYC`，使 cid 7862/7851/7855/
+                -- 15158 各多连 2 个资产（共 8 个 FP）。改 `^word` 只认名称开头。
                 SELECT 1 FROM unnest(%s::text[]) w
                 WHERE LOWER(COALESCE(a.canonical_name, '')) ~
-                      ('(^|[^a-z])' || LOWER(w) || '([^a-z]|$)')
+                      ('^' || LOWER(w) || '([^a-z]|$)')
             )
         )
           AND LOWER(a.canonical_symbol) NOT IN
@@ -332,7 +421,7 @@ def _match_project_name_to_assets(conn, title: str) -> list[dict]:
           AND LOWER(COALESCE(a.canonical_name, '')) !~ 'bridged|wrapped|intents|staked|second chance|base coin|trophy|tomato'
           AND a.market_cap_rank IS NOT NULL
         ORDER BY a.market_cap_rank ASC, a.asset_id
-        LIMIT 3
+        LIMIT 1
         """,
         ([w.lower() for w in words], [w.lower() for w in words]),
     ).fetchall()

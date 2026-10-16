@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 # symbol(大写) -> asset_id 缓存
 _symbol_asset_cache: dict[str, int | None] = {}
 
+# 已确认在 core.asset_source_map 中**无数据**的 source_code（P3-C1c，2026-10-16）：
+# 避免每条 pairs 都白查一次 JOIN（全量 ≈ 十万次）。仅进程级记忆，补数据后需重启才失效。
+_empty_source_hints: set[str] = set()
+
 # 非加密资产名称黑名单（SQL 正则，与 catalyst/asset_filter.py CRYPTO_FILTER_SQL 同步）。
 # 命中即视为「美股 tokenized stock / 商品衍生」，不参与 crypto 催化剂信号映射。
 # 线上审计 2026-09-15：582 条信号错连到 xStock / Robinhood Token / Backpack /
@@ -85,6 +89,14 @@ _EQUITY_TICKER_COLLISIONS = frozenset({
               # cid 13722「Brazil's central bank cut its 2026 growth forecast」
     "UBER",   # Uber Technologies Inc.（NYSE: UBER）—— cid 1642；且与
               # 「Uber Technologies, Inc. • Robinhood Token」（xStock）同名
+    # ── 以下为 2026-10-16 P3-C 评测集实测 FP（撞名小币）──
+    "SNPS",   # Synopsys Inc.（NASDAQ: SNPS）—— cid 32835/32844/33231
+              # 「Bitget 上线 SNPS（Synopsys）股票永续合约」误连 Snaps(#23857)
+    "RTX",    # RTX Corporation（NYSE: RTX）—— cid 1636「RTX has teamed up with
+              # fusion-energy startup Xcimer…」误连同名小币
+    "B3",     # 巴西证券交易所 B3（B3 S.A. - Brasil, Bolsa, Balcão）—— cid 29937
+              # 「推出代币化资产平台」；该稿已由「代币化」语义剔除拦截（见严格 gate 注释），
+              # 列入清单作双重保险
 })
 
 # 门禁正则四条硬约束（都是只读复算 prod 后踩出来的，改动前请先跑
@@ -152,6 +164,71 @@ def has_crypto_context(text: str | None) -> bool:
     return bool(text and _CRYPTO_CONTEXT_RE.search(text))
 
 
+# ── P3-C-B（2026-10-16）：歧义消歧专用「严格加密语境」+ pairs 字面剥离 ─────────────
+# 背景：直接用 `has_crypto_context` 做消歧 gate 会**恒放行**，实测两条成因（均为 FP）：
+#   ① pairs 回响 —— `related_pairs` 的 `XAUUSDT` 经 context_text 传回，而宽口径正则含
+#      `[A-Z0-9]{2,15}USDT` 支 ⇒ gate 由 pairs 自身点亮；
+#   ② 词表含 TradFi 稿同样高频的词 —— 实测：
+#      · 「现货黄金失守 4,150 美元/盎司」→ `现货` 过闸 → XAU 误连（cid 33958）
+#      · 「现货钯金突破 1,300 美元」    → `现货` 过闸 → XPD 误连（cid 5852）
+#      · 「韩国交易所启动熔断机制」      → `交易所` 过闸 → XAU 误连（cid 35922）
+#      · 「Bitget 上线 ZCSH/SNPS 股票永续合约」→ `合约` 过闸 → SNPS 误连（cid 32835/32844/33231）
+#      · 「Oil prices fell… Spot gold also declined」→ `spot` 过闸（cid 26975）
+# 处置：消歧 gate 改用**严格词表**（剔除 现货/合约/交易所/spot/perpetual/listing），判定前
+# 先**剥离 base 的字面形态**（`$XAU` / `XAUUSDT` / `XAU/USDT` / 裸 `XAU`）。
+# ⚠️ `has_crypto_context` 保持宽口径不变 —— 其它调用方（gold 采样器护栏）依赖它。
+_CRYPTO_CONTEXT_STRICT_RE = re.compile(
+    r"\$(?=[A-Za-z0-9]{2,10}(?![A-Za-z0-9]))(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{2,10}"
+    r"|(?<![A-Za-z0-9])[A-Z0-9]{2,15}USDT(?![A-Za-z0-9])"    # XXXUSDT
+    r"|(?<![A-Za-z0-9])[A-Z0-9]{2,15}/USDT(?![A-Za-z0-9])"   # XXX/USDT
+    r"|(?<![A-Za-z])(?:token(?!i[sz])|memecoin|meme|crypto|blockchain|on-?chain|onchain"
+    r"|defi|dex|cex|airdrop|staking|stablecoin|altcoin|wallet|whale"
+    r"|mainnet|testnet|validator|halving|protocol"
+    r"|solana|ethereum|tron|chainlink|optimism|aptos|arweave|starknet|sui"
+    r"|stacks(?!\s+of\b)"
+    r"|bouncebit|bedrock|myshell|blynex|distribute\.ai"
+    r")(?![A-Za-z])"
+    r"|代币(?!化)|加密|链上|空投|质押|主网|巨鲸|钱包",   # 已剔 现货|合约|交易所
+    re.IGNORECASE,
+)
+# ⚠️ 严格 gate **另需剔除**:
+#   · TradFi 稿高频词 —— 现货/合约/交易所/spot/perpetual/listing；
+#   · **交易所名与信源名** —— binance/okx/bybit/coinbase/kraken/uniswap/aave/hyperliquid
+#     + 中文「币安」，以及 lookonchain/arkham/nansen/coindesk/cointelegraph/defillama/
+#     coingecko/coinmarketcap。理由：它们只证明「报道方是加密机构」，**不证明该 symbol
+#     本身是加密资产** —— 实测 cid 33231「Bybit 新增新思科技（SNPS USDT）…股票永续」
+#     正是靠 `Bybit` 过闸而误连 SNPS。
+#   · **RWA 代币化语义** —— `代币化` / `tokenized` / `tokenization`（`token(?!i[sz])`、
+#     `代币(?!化)`）。「巴西证券交易所 B3 推出**代币化**资产平台」（cid 29937）、
+#     「使用**代币化**美国国债的三方回购」（cid 35116）说的是真实世界资产上链，
+#     **不是某个币的事件**；而真加密新闻的「代币」多接上市/申领/空投。
+
+# 剥离时豁免的“非 ticker”串（避免把 `USD` 之类当 symbol 处理）
+_STRIP_SKIP = frozenset({"USD", "USDT", "USDC", "BUSD", "TUSD", "USDP", "FDUSD"})
+
+
+def strip_symbol_literals(text: str | None, base: str | None) -> str:
+    """剥离文本中 base 的交易对/cashtag 字面形态（歧义 gate 的前置处理）。
+
+    消除 `related_pairs` 经 context_text 传回造成的「pairs 自身点亮 gate」回响。
+    例：base=XAU → `$XAU` / `XAUUSDT` / `XAU/USDT` / 裸 `XAU` 全部替换为空格。
+    """
+    if not text or not base or base.upper() in _STRIP_SKIP:
+        return text or ""
+    b = re.escape(base)
+    pattern = (
+        r"\$?" + b + r"\s*/\s*(?:USDT|USDC|BUSD|FDUSD|TUSD|USDP|USD)\b"
+        r"|\$" + b + r"(?![A-Za-z0-9])"
+        r"|(?<![A-Za-z0-9])" + b + r"(?![A-Za-z0-9])"
+    )
+    return re.sub(pattern, " ", text, flags=re.IGNORECASE)
+
+
+def has_strict_crypto_context(text: str | None, base: str | None = None) -> bool:
+    """严格加密语境判定（**歧义 gate 专用**）：先剥离 base 字面，再查严格词表。"""
+    return bool(_CRYPTO_CONTEXT_STRICT_RE.search(strip_symbol_literals(text, base)))
+
+
 
 def _resolve_canonical_top(conn, base: str) -> int | None:
     """白名单符号 → 真实主网资产（market_cap_rank 非空，取排名最小）。"""
@@ -173,23 +250,68 @@ _QUOTE_ASSETS = (
     "USDT", "USDC", "BUSD", "TUSD", "USDP", "FDUSD",
     "BTC", "ETH", "BNB", "SOL", "XRP",
 )
+# 稳定币 quote：`WUSDT` → base=`W` 合法（单字符 ticker 是真实币）
+_STABLE_QUOTES = frozenset({"USDT", "USDC", "BUSD", "TUSD", "USDP", "FDUSD"})
+
+
+# 裸 ticker 形态（无 quote 后缀）：`related_pairs` 常直接给 `CT` / `NEAR` / `CASHCAT`
+# 这类**裸 symbol**（源未拼 USDT），原实现一律返回 None ⇒ 全部漏连。
+# 实测（P3-C，2026-10-16）：CT / CASHCAT×3 / PUFFER×2 / AEON×2 / DGAI×2 / DRV / NEAR×2 /
+# WBTC 等 14 条正样本因此漏连，且全部在 core.asset 有 market_cap_rank（本可正确归属）。
+_BARE_SYMBOL_RE = re.compile(r"^[A-Z0-9]{1,10}$")
+# 裸串里不作 base 的稳定币/法币（作为事件主语无意义）
+_BARE_SYMBOL_SKIP = frozenset({"USD", "USDT", "USDC", "BUSD", "TUSD", "USDP", "FDUSD"})
+
+
+def _split_quote(pair_upper: str) -> tuple[str, str] | None:
+    """按 quote 后缀拆分交易对；返回 (base, quote)，不匹配返回 None。
+
+    ⚠️ 两类 quote 的 base 长度下限不同（P3-C1b，2026-10-16）：
+      · **稳定币 quote**（USDT…）→ base ≥ 1：`WUSDT`→`W`、`GUSDT`→`G` 是真实币；
+      · **币本位 quote**（BTC/ETH/BNB/SOL/XRP）→ base ≥ 2，否则 `WBTC` 会被错拆成
+        `W`+`BTC`（Wormhole），而它其实是 wrapped BTC 的符号本身。
+    """
+    for quote in _QUOTE_ASSETS:
+        if pair_upper.endswith(quote) and len(pair_upper) > len(quote):
+            base = pair_upper[: -len(quote)]
+            min_len = 1 if quote in _STABLE_QUOTES else 2
+            if len(base) >= min_len and any(c.isalpha() for c in base):
+                return base, quote
+    return None
 
 
 def extract_base_symbol(pair: str) -> str | None:
     """从交易对中提取 base symbol（大写）。
 
-    优先匹配已知 quote 后缀，匹配不到返回 None。
+    ① 优先按 quote 后缀拆分（`XXXUSDT` → `XXX`）；
+    ② 无后缀时，若整串是合法 ticker 形态（`^[A-Z0-9]{1,10}$` 且含字母）则返回自身（裸 symbol）。
     """
     if not pair:
         return None
     pair = pair.upper().strip()
-    for quote in _QUOTE_ASSETS:
-        if pair.endswith(quote) and len(pair) > len(quote):
-            base = pair[: -len(quote)]
-            # 至少 2 个字符，且不全是数字
-            if len(base) >= 2 and any(c.isalpha() for c in base):
-                return base
+    sp = _split_quote(pair)
+    if sp:
+        return sp[0]
+    # P3-C1a：裸 symbol 兜底
+    if (
+        2 <= len(pair) <= 10
+        and _BARE_SYMBOL_RE.match(pair)
+        and any(c.isalpha() for c in pair)
+        and pair not in _BARE_SYMBOL_SKIP
+    ):
+        return pair
     return None
+
+
+def is_bare_symbol(pair: str) -> bool:
+    """pair 是否为**裸 symbol**（无 quote 后缀）—— 弱信号，调用方需额外佐证。
+
+    币安广场对美股/宏观/商品稿同样标裸 ticker（实测 SHY/B3/GM/MS/ACN/PEP/RTX/V/C/M/
+    BLK/ON/CAG/RBLX/HTZ/TLT/IEF/AGG 等），故裸 symbol 不可仅凭 pairs 认领。
+    """
+    if not pair:
+        return False
+    return _split_quote(pair.upper().strip()) is None
 
 
 def extract_pairs_from_text(text: str) -> list[str]:
@@ -215,6 +337,20 @@ def extract_pairs_from_text(text: str) -> list[str]:
     for m in re.finditer(r"\b([A-Z0-9]{2,20})USDT\b", text):
         base = m.group(1)
         # 过滤明显不是币种的
+        if not any(c.isalpha() for c in base):
+            continue
+        if base in ("USD", "USDC", "BUSD", "TUSD", "USDP", "FDUSD"):
+            continue
+        pair = base + "USDT"
+        if pair not in seen:
+            seen.add(pair)
+            pairs.append(pair)
+
+    # 模式 3：斜杠形态 `CT/USDT`（P3-C1，2026-10-16）—— 正文/标题常见，
+    # 原实现只认 `$CT` 与 `CTUSDT`，实测 cid 19112「OKX 将于 9 月 30 日上线
+    # CT/USDT 现货交易」因此漏连。
+    for m in re.finditer(r"\b([A-Z0-9]{2,20})/USDT\b", text):
+        base = m.group(1)
         if not any(c.isalpha() for c in base):
             continue
         if base in ("USD", "USDC", "BUSD", "TUSD", "USDP", "FDUSD"):
@@ -257,12 +393,29 @@ def map_pairs_to_asset_ids(
         if not base:
             continue
 
-        # 同名消歧：商品/常用词 symbol 与**美股 ticker 撞名**者，需正文含加密语境，
+        # 白名单优先（CAT-LINKER-DIRTY）：主流符号强制取真实主网币。
+        # ⚠️ P3-C1d（2026-10-16）：白名单**先于**歧义 gate —— `_CANONICAL_TOP_SYMBOLS` 与
+        #    `_EQUITY_TICKER_COLLISIONS` 有交集（SOL/LINK/TRX/APT/SUI/OP），实测
+        #    `SOLUSDT` 被 gate 误杀（cid 21875/21862「SOL holdings」稿无加密语）。权衡：
+        #    白名单仅 36 个主流币，其撞名股票均为小盘股、新闻量远小于加密侧；
+        #    **漏连是确定损失、误连是小概率**，故白名单内一律取真币、不进 gate。
+        if base in _CANONICAL_TOP_SYMBOLS:
+            aid = _resolve_canonical_top(conn, base)
+            _symbol_asset_cache[base] = aid
+            if aid is not None and aid not in seen:
+                seen.add(aid)
+                asset_ids.append(aid)
+            continue
+
+        # 同名消歧：商品/常用词 symbol 与**美股 ticker 撞名**者，需正文含**严格**加密语境，
         # 否则视为宏观商品新闻 / 美股快讯误标（后者见 `_EQUITY_TICKER_COLLISIONS`）。
+        # P3-C-B（2026-10-16）：改用 `has_strict_crypto_context`（先剥离 pairs 字面、再查严格
+        # 词表）—— 原 `has_crypto_context` 会被 pairs 回响与「现货/合约/交易所/spot」等
+        # TradFi 稿高频词恒放行（5 类实测 FP 见 `_CRYPTO_CONTEXT_STRICT_RE` 注释）。
         ambiguous = (base in _COMMODITY_AMBIGUOUS_SYMBOLS
                      or base in _EQUITY_TICKER_COLLISIONS)
-        if ambiguous and context_text and not has_crypto_context(context_text):
-            logger.info("同名消歧：跳过商品/美股同名 symbol %s（正文无加密语境）", base)
+        if ambiguous and context_text and not has_strict_crypto_context(context_text, base):
+            logger.info("同名消歧：跳过商品/美股同名 symbol %s（正文无严格加密语境）", base)
             continue
 
         # 查缓存（歧义符号不缓存，避免跨文污染）
@@ -273,35 +426,37 @@ def map_pairs_to_asset_ids(
                 asset_ids.append(aid)
             continue
 
-        # 白名单优先（CAT-LINKER-DIRTY）：主流符号强制取真实主网币
-        if base in _CANONICAL_TOP_SYMBOLS:
-            aid = _resolve_canonical_top(conn, base)
-            _symbol_asset_cache[base] = aid
-            if aid is not None and aid not in seen:
-                seen.add(aid)
-                asset_ids.append(aid)
-            continue
-
         # 查库：优先 source_hint 来源的 source_asset_key
         # （同 key 多条时按 CMC 排名升序选最靠前的，防止脏映射）
+        #
+        # ⚠️ P3-C1c 实测（2026-10-16，只读复算 prod）：`core.asset_source_map` 中
+        #    **没有任何源以 ticker 为 key** —— cg 是 slug（`bitcoin`…）、cmc/dl 是数字 id
+        #    （`1`/`2786`…）、cm 是小写 slug（24 行，形如 `ltc`/`doge` 尚可当 ticker）。
+        #    而调用方传的 `source_hint='binance'` **表内 0 行** ⇒ 本路对 ticker 输入**恒空**。
+        #    ⇒ 原工单的「改 source_hint 回落」经实测**判为无解**（无 ticker key 源可回落），
+        #      改为「空源记忆」短路：首次查空即记档，后续跳过（保留本路以备将来补数据）。
         # 注意：第一路精确 key 匹配也要排除 tokenized stock / 商品衍生资产。
         #       历史设计是「美股·商品通道合法资产，发送层过滤」，但线上审计 2026-09-15
         #       确认美股快讯（如 "Nvidia said ..."）经 cashtag 兜底会把 NVDA 连到
         #       NVDAX (xStock) / NVIDIA • Robinhood Token，产生 582 条错连信号，
         #       已定性为脏数据（CAT-CLEANUP v5.1 ③），故在映射源头直接排除。
-        row = conn.execute(
-            f"""
-            SELECT a.asset_id
-            FROM core.asset a
-            JOIN core.asset_source_map m ON a.asset_id = m.asset_id
-            WHERE m.source_code = %s
-              AND UPPER(m.source_asset_key) = %s
-              AND LOWER(COALESCE(a.canonical_name, '')) !~ '{_NON_CRYPTO_NAME_SQL}'
-            ORDER BY a.market_cap_rank ASC NULLS LAST, a.asset_id
-            LIMIT 1
-            """,
-            (source_hint, base),
-        ).fetchone()
+        row = None
+        if source_hint not in _empty_source_hints:
+            row = conn.execute(
+                f"""
+                SELECT a.asset_id
+                FROM core.asset a
+                JOIN core.asset_source_map m ON a.asset_id = m.asset_id
+                WHERE m.source_code = %s
+                  AND UPPER(m.source_asset_key) = %s
+                  AND LOWER(COALESCE(a.canonical_name, '')) !~ '{_NON_CRYPTO_NAME_SQL}'
+                ORDER BY a.market_cap_rank ASC NULLS LAST, a.asset_id
+                LIMIT 1
+                """,
+                (source_hint, base),
+            ).fetchone()
+            if row is None:
+                _empty_source_hints.add(source_hint)
         if row:
             aid = row["asset_id"]
             _symbol_asset_cache[base] = aid

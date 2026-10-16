@@ -87,3 +87,39 @@ python scripts/bin/attr_eval.py --predict --bucket crypto_gap
 | 假阴性（召回≈0） | 真加密对**全部漏连** | `CT`/`W`/`CASHCAT`/`PUFFER`/`SOL`/`G`/`NEAR`/`AEON`/`DGAI`/`DRV` |
 
 > 任何 P3-C 改动必须报告本表，且以 **同集** 对比：F1 不得劣于 0.037、负样本保持率不得低于 96.7%。
+
+---
+
+## Baseline v2（2026-10-16，P3-C 落地后 · 同集 329 条）
+
+| 指标 | v1（改前） | **v2（改后）** | 变化 |
+|---|---|---|---|
+| precision | 0.042 | **1.000** | ↑ 23.8× |
+| recall | 0.033 | **0.867** | ↑ 26.3× |
+| **F1** | 0.037 | **0.929** | **↑ 25.1×** |
+| TP / FP / FN | 1 / 23 / 29 | **26 / 0 / 4** | FP 清零 |
+| **负样本保持为空** | 96.7% | **299/299 = 100.0%** | ✅ |
+
+分桶（v2，全部桶 FP=0）：`crypto_gap` TP=25 FN=4 · `no_pairs` TP=1 · `tradfi_only` 50/50 · `unknown_mixed` 45/45。
+
+### P3-C 修复清单（`linker.py` + `pipeline.py`）
+
+| 编号 | 修复 | 依据 |
+|---|---|---|
+| **B1** | 歧义 gate 改用 `has_strict_crypto_context`（先剥离 pairs 字面，再查**严格**词表） | 原 `has_crypto_context` 被 pairs 回响 +「现货/合约/交易所/spot」等 TradFi 高频词**恒放行**；剔除「现货×2、交易所、合约、spot」→ 拦 5 行 |
+| **B1b** | 严格词表**剔除交易所名/信源名**（binance/okx/bybit/… + 币安 + coindesk/cointelegraph/…） | 「Bybit 新增新思科技（SNPS USDT）股票永续」靠 `Bybit` 过闸 → 误连 SNPS（cid 33231） |
+| **B1c** | 严格词表**剔除 RWA 语义** `代币(?!化)` / `token(?!i[sz])` | 「巴西证交所 B3 推出**代币化**资产平台」（cid 29937）、「使用**代币化**美国国债」（cid 35116）说的是 RWA 上链，非某个币 |
+| **B2** | `_EQUITY_TICKER_COLLISIONS` 补 `SNPS` / `RTX` / `B3` | 评测集实测 FP |
+| **B3** | 项目名通道：提取正则**去 `re.I`**（只认首字母大写词）+ `_ORG_WORD_STOPWORDS` 停用词 | `and`/`new`/`two` 曾成活候选 → 命中 `Ape and Pepe`/`Sun [New]`/`Arena Two` |
+| **B4** | 项目名通道 `canonical_name` 匹配改 **`^word` 首词**，`LIMIT 3 → 1` | `Gravity` 命中 `Gravity`+`Gravity Finance`、`Cycle` 命中 `Cycle`+`Burn Cycle`+`$FYC` → 8 个 FP |
+| **C1a** | `extract_base_symbol` 支持**裸 symbol**（`CT`/`CASHCAT`/`NEAR`） | 原一律返回 `None` ⇒ 14 条正样本漏连 |
+| **C1a'** | **弱信号护栏** `_filter_bare_pairs`：裸 symbol 或单字符 base 须**标题独立 token** 佐证 | 放开裸 symbol 后，美股/美债 ticker（SHY/B3/GM/MS/ACN/PEP/V/C/M/BLK/…）全线误连（50 行） |
+| **C1b** | 单字符 base 合法（`WUSDT→W`），但 quote 拆分区分稳定币/币本位 | `WBTC` 曾被错拆成 `W`+`BTC`（Wormhole）；`W`/`G`/`Q`/`O` 是真实币 |
+| **C1c** | 严格 gate **白名单优先** | `SOLUSDT` 因 `_EQUITY_TICKER_COLLISIONS` 交集被 gate 误杀 |
+| **C1d** | `XXX/USDT` 形态纳入 cashtag 提取 | cid 19112「上线 CT/USDT 现货交易」漏连 |
+| **C1e** | `asset_source_map` **空源记忆**短路 | 实测该表**无任何以 ticker 为 key 的源**（cg=slug / cmc/dl=数字 id / cm=24 行小写）⇒ `source_hint='binance'` 恒空；原工单「改 source_hint 回落」**判为无解** |
+
+**残余 FN 4 条（已知、可接受）**：`WBTC`（真 wrapped 被名称过滤排除）· `DGAI`×2（标题写项目名 `DGrid AI` 而非 ticker）· `牛来`（中文 ticker）。
+
+**回归测试**：`python tests/test_attr_guards.py` → **34/34 全绿**（注入用例覆盖 A 商品同名 / B 美股撞名 / C 强信号召回 / D 门禁不破）。
+

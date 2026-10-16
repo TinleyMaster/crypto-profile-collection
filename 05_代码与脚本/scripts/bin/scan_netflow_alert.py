@@ -334,15 +334,19 @@ def _fmt_attr(a: dict) -> str:
         # 仅 own_n 有计数而 events 为空（归因层的 48h 同赛道推断，不一定有自身事件）
         parts.append(f"同赛道催化剂×{own_n}")
 
-    # 2) 解锁事件
+    # 2) 解锁事件（忽略 unlock_type='unspecified' 和 risk=NULL，避免展示噪音）
     for u in (attr.get("unlocks") or [])[:2]:
         ds = u["date"].strftime("%m-%d") if hasattr(u.get("date"), "strftime") else str(u.get("date", ""))
         ratio = u.get("ratio")
         ratio_s = f"占流通{ratio*100:.1f}%" if ratio is not None else ""
-        risk = u.get("risk") or ""
-        risk_s = f", {risk}" if risk else ""
-        utype = u.get("unlock_type") or ""
-        parts.append(f"解锁{ds}{ratio_s}{risk_s}{(' [' + utype + ']') if utype else ''}")
+        risk = (u.get("risk") or "").strip()
+        risk_s = f", {risk}" if risk and risk.lower() not in ("null", "unknown") else ""
+        utype = (u.get("unlock_type") or "").strip()
+        utype_s = f" [{utype}]" if utype and utype.lower() != "unspecified" else ""
+        if ratio_s or risk_s or utype_s:
+            parts.append(f"解锁{ds}{ratio_s}{risk_s}{utype_s}")
+        else:
+            parts.append(f"解锁{ds}")
 
     # 3) 上币事件
     for ls in (attr.get("listings") or [])[:2]:

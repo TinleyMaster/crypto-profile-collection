@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -233,6 +234,115 @@ def _sweep_stale_temp_files(max_age_hours: int = 24) -> None:
             pass
 
 
+def _run_chain(chain: str, assets: list[dict], args) -> tuple[int, int, int]:
+    """跑一条链的全部资产采集，返回 (success_count, fail_count, 本次触发熔断时的连续失败数)。
+
+    按 args.workers 决定模式：
+      workers == 1：顺序跑 —— 每币间 args.delay 延迟 + 连续失败熔断（与历史逻辑一致）
+      workers >= 2：并发 —— ThreadPoolExecutor 跑多个 run_single 子进程；
+                   按 "完成一个提交下一个" 的滑动窗口方式保持并发度，不预创建全部 future；
+                   连续失败熔断仍生效（全局共享一个 consec_fail 计数器）。
+    """
+    n_assets = len(assets)
+    timeout_base = args.timeout if chain != "solana" else max(args.timeout, 120)
+
+    if args.workers <= 1:
+        return _run_chain_sequential(chain, assets, args, timeout_base)
+    return _run_chain_parallel(chain, assets, args, timeout_base)
+
+
+def _run_chain_sequential(chain: str, assets: list[dict], args, timeout_base: int
+                          ) -> tuple[int, int, int]:
+    chain_success = 0
+    chain_fail = 0
+    consec_fail = 0
+    for i, asset in enumerate(assets, 1):
+        asset_id = asset["asset_id"]
+        symbol = asset.get("symbol", "?")
+        print(f"  [{i}/{len(assets)}] asset_id={asset_id} {symbol} ... ",
+              end="", flush=True)
+        ok, reason = run_single(asset_id, chain, timeout=timeout_base)
+        if ok:
+            chain_success += 1
+            consec_fail = 0
+            print("OK")
+        else:
+            chain_fail += 1
+            consec_fail += 1
+            print(f"FAIL ({reason})")
+            if args.max_consec_fail > 0 and consec_fail >= args.max_consec_fail:
+                print(f"\n  [熔断] {chain} 连续失败 {consec_fail} 次，"
+                      f"判定上游故障，中止本轮（保留已成功 {chain_success} 条）")
+                break
+        if i < len(assets) and args.delay > 0:
+            time.sleep(args.delay)
+    return chain_success, chain_fail, consec_fail
+
+
+def _run_chain_parallel(chain: str, assets: list[dict], args, timeout_base: int
+                        ) -> tuple[int, int, int]:
+    """并发模式：滑动窗口 + 熔断。
+
+    每币完成一个就提交下一个，窗口大小 = workers；
+    全局共享 consec_fail 计数器（需要线程锁）。
+    """
+    import threading
+    lock = threading.Lock()
+    success = fail = consec_fail = 0
+    halted = threading.Event()
+
+    def _one(i: int, asset: dict):
+        nonlocal success, fail, consec_fail
+        asset_id = asset["asset_id"]
+        symbol = asset.get("symbol", "?")
+        ok, reason = run_single(asset_id, chain, timeout=timeout_base)
+        with lock:
+            if ok:
+                success += 1
+                consec_fail = 0
+                print(f"  [{i}/{len(assets)}] asset_id={asset_id} {symbol} OK", flush=True)
+            else:
+                fail += 1
+                consec_fail += 1
+                print(f"  [{i}/{len(assets)}] asset_id={asset_id} {symbol} FAIL ({reason})", flush=True)
+                if args.max_consec_fail > 0 and consec_fail >= args.max_consec_fail:
+                    halted.set()
+        if args.delay > 0 and not halted.is_set():
+            time.sleep(args.delay)
+        return ok
+
+    max_workers = max(2, args.workers)
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        pending = iter(enumerate(assets, 1))
+        futures = set()
+        # 预填初始窗口
+        for _ in range(max_workers):
+            try:
+                futures.add(ex.submit(_one, *next(pending)))
+            except StopIteration:
+                break
+
+        # 外层 while：不断用 as_completed 收割，有空间就塞下一个
+        while futures:
+            # as_completed 返回迭代器，每次 yield 一个已完成 future
+            for fut in as_completed(list(futures)):
+                futures.discard(fut)
+                try:
+                    fut.result()
+                except Exception as e:
+                    print(f"  [worker] 异常: {e}", flush=True)
+                    fail += 1
+                if halted.is_set():
+                    continue
+                try:
+                    i, a = next(pending)
+                except StopIteration:
+                    continue
+                futures.add(ex.submit(_one, i, a))
+
+    return success, fail, consec_fail
+
+
 def run_single(asset_id: int, chain: str, timeout: int = 30) -> tuple[bool, str]:
     """运行单币持仓快照采集，返回 (是否成功, 失败原因)。
 
@@ -308,9 +418,12 @@ def main():
     parser.add_argument("--timeout", type=int, default=30,
                         help="单币超时时间（秒）")
     parser.add_argument("--delay", type=float, default=0.5,
-                        help="每币之间延迟（秒，避免触发限流）")
+                        help="每币之间延迟（秒，避免触发限流；并发模式下指 worker 内币间延迟）")
     parser.add_argument("--max-consec-fail", type=int, default=20,
                         help="单链连续失败超过该阈值即熔断本轮（防上游整体故障时整轮烧满 12h 槽位，0=禁用）")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="每链并发 scrape worker 数（>1 时多个 phase_chain_holder_scrape.py 并行；"
+                             "适合 base/arb 等 Blockscout 劣化严重的链，bsc/eth 保持 1 即可）")
     args = parser.parse_args()
 
     _sweep_stale_temp_files()
@@ -331,6 +444,7 @@ def main():
     print("链上持仓快照批量采集")
     print(f"目标链: {chains}")
     print(f"每链限制: {args.limit if args.limit > 0 else '不限'}")
+    print(f"每链并发 worker: {args.workers}")
     print("=" * 60)
 
     total_success = 0
@@ -388,42 +502,8 @@ def main():
             total_skipped += 1
             continue
 
-        chain_success = 0
-        chain_fail = 0
-        consec_fail = 0
-
-        for i, asset in enumerate(assets, 1):
-            asset_id = asset["asset_id"]
-            symbol = asset.get("symbol", "?")
-            print(f"  [{i}/{len(assets)}] asset_id={asset_id} {symbol} ... ",
-                  end="", flush=True)
-
-            # Solana 仅走 Helius（秒级，已摘除 Playwright/Solscan 回退），但仍保留
-            # 一个较宽的兜底超时：Helius 偶发网络抖动时单次 RPC 会重试 3 次 ×30s。
-            # 原值 300s 是为 Solscan(Playwright) 留的，现下调至 120s —— 既容得下 RPC
-            # 重试，又避免个别卡死币白占 5 分钟（300 币全卡即 25h，曾被判 stuck）。
-            timeout = args.timeout if chain != "solana" else max(args.timeout, 120)
-            ok, reason = run_single(asset_id, chain, timeout=timeout)
-            if ok:
-                chain_success += 1
-                consec_fail = 0
-                print("OK")
-            else:
-                chain_fail += 1
-                consec_fail += 1
-                print(f"FAIL ({reason})")
-                # 熔断（2026-10-03）：上游整体故障（限流/网络劣化）时，单币逐个打满超时
-                # 会让整轮跑数小时甚至被 12h 硬超时收割、占死唯一 chain 槽位（10-01/10-02
-                # 实况：eth/bsc 全灭后 base/arb 排队 8h、solana 排队 10h）。连续失败超阈值
-                # 立即止损，等下一次调度重试。
-                if args.max_consec_fail > 0 and consec_fail >= args.max_consec_fail:
-                    print(f"\n  [熔断] {chain} 连续失败 {consec_fail} 次，"
-                          f"判定上游故障，中止本轮（保留已成功 {chain_success} 条）")
-                    break
-
-            if i < len(assets) and args.delay > 0:
-                time.sleep(args.delay)
-
+        chain_success, chain_fail, consec_fail = _run_chain(
+            chain, assets, args)
         total_success += chain_success
         total_fail += chain_fail
         print(f"  本链完成: 成功 {chain_success}, 失败 {chain_fail}")

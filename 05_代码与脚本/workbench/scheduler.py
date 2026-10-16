@@ -93,12 +93,12 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     #   改为一链一任务后，两条链各自独立提交、独立占用 chain 槽位：base 超时被收割也不会
     #   再吞掉 arb 的轮次（arb 在其后排队，base 结束/被杀即开跑）。与 bsc/eth/solana
     #   的既有「一链一任务」形态一致。
-    ("chain_holder_snapshot_base", "40 14 * * *", "phase_chain_holder_batch.py", ["--chains", "base", "--limit", "800", "--delay", "0.3", "--timeout", "90"], "链上持仓快照 - Base 链（每日 14:40，单轮上限 800 防超时；长尾跨日轮转）", "chain"),
-    ("chain_holder_snapshot_arb", "50 14 * * *", "phase_chain_holder_batch.py", ["--chains", "arb", "--limit", "800", "--delay", "0.3", "--timeout", "90"], "链上持仓快照 - Arbitrum 链（每日 14:50，单轮上限 800 防超时；长尾跨日轮转）", "chain"),
+    ("chain_holder_snapshot_base", "40 14 * * *", "phase_chain_holder_batch.py", ["--chains", "base", "--limit", "800", "--delay", "0.3", "--timeout", "90", "--workers", "3"], "链上持仓快照 - Base 链（每日 14:40，并发 3× 缓减 Blockscout 58s/币劣化，单轮上限 800 防超时）", "chain"),
+    ("chain_holder_snapshot_arb", "50 14 * * *", "phase_chain_holder_batch.py", ["--chains", "arb", "--limit", "800", "--delay", "0.3", "--timeout", "90", "--workers", "3"], "链上持仓快照 - Arbitrum 链（每日 14:50，并发 3× 缓减 Blockscout 劣化，单轮上限 800）", "chain"),
     ("chain_holder_snapshot_solana", "0 15 * * *", "phase_chain_holder_batch.py", ["--chains", "solana", "--limit", "300", "--delay", "0.5", "--timeout", "60"], "链上持仓快照 - Solana 链（每日 15:00，单轮上限 300 防超时；长尾跨日轮转）", "chain"),
     ("contract_security_scan", "0 8 * * *", "phase_chain_contract_security.py", ["--limit", "100"], "合约安全扫描 - GoPlus/RugCheck（每日 100 币）", "chain"),
     ("meme_risk_daily", "30 8 * * *", "phase_meme_risk_labels.py", ["--limit", "100"], "Meme 五维风险标签（每日 08:30）", "core"),
-    ("lifecycle_daily", "0 9 * * *", "phase_meme_lifecycle.py", ["--limit", "100"], "Meme 四阶段生命周期（每日 09:00）", "core"),
+    ("lifecycle_daily", "0 9 * * *", "phase_meme_lifecycle.py", ["--limit", "300"], "资产生命周期（meme+非meme，每日 09:00，catalyst 池优先）", "core"),
     ("insider_cluster_weekly", "30 4 * * mon", "phase_chain_insider_clusters.py", ["--limit", "9999"],
      "Meme insider 钱包聚类 - Solana（每周一 04:30，RugCheck /report）", "chain"),
 

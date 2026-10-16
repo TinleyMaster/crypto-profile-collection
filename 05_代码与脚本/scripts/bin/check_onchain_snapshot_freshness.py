@@ -47,27 +47,38 @@ MAX_STALE_DAYS = 2
 REALERT_INTERVAL_H = 6
 BJ = ZoneInfo("Asia/Shanghai")
 
+# 本脚本**只**监控 phase_chain_holder_batch 每日实际跑的链。
+# collect_onchain_fundamentals.py（--chain 默认 robinhood）或手工回测可能往
+# biz.onchain_holder_snapshot 写入"野生链"行，GROUP BY 全表会让它们被误判为滞后。
+# 监控集合与 scheduler.py 的 5 条 holder_snapshot 调度严格对齐（bsc/eth/base/arb/solana）。
+# 链名用 DB 实际存值（ethereum 而非 eth，arbitrum 而非 arb）。
+MONITORED_CHAINS = ["arbitrum", "base", "bsc", "ethereum", "solana"]
+
 
 def _collect_items(conn) -> list[dict]:
-    """按链查最新快照日，返回 [{chain, mx, age_days, stale}]（按北京时间「今日」算龄，避免 UTC 偏差）。"""
+    """按链查最新快照日，返回 [{chain, mx, age_days, stale}]（按北京时间「今日」算龄，避免 UTC 偏差）。
+
+    只返回 MONITORED_CHAINS 中的链；从未有过快照的链也会纳入（mx=None → stale），
+    便于第一时间发现「某链整体没跑起来」的问题。
+    """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             "SELECT chain, MAX(snapshot_date) AS mx "
-            "FROM biz.onchain_holder_snapshot GROUP BY chain ORDER BY chain")
-        rows = cur.fetchall()
+            "FROM biz.onchain_holder_snapshot "
+            "WHERE chain = ANY(%s) "
+            "GROUP BY chain ORDER BY chain",
+            (list(MONITORED_CHAINS),))
+        db_rows = {r["chain"]: r["mx"] for r in cur.fetchall()}
 
     today = datetime.now(BJ).date()
     items: list[dict] = []
-    for r in rows:
-        mx = r["mx"]
+    for chain in MONITORED_CHAINS:
+        mx = db_rows.get(chain)      # None = 从未有过快照
         age_days = None if mx is None else (today - mx).days
         items.append({
-            "chain": r["chain"], "mx": mx, "age_days": age_days,
+            "chain": chain, "mx": mx, "age_days": age_days,
             "stale": age_days is None or age_days > MAX_STALE_DAYS,
         })
-    if not items:
-        # 表整表为空 = 采集从未成功（比「滞后」更严重），按滞后告警而非静默通过。
-        items.append({"chain": "（全部链无记录）", "mx": None, "age_days": None, "stale": True})
     return items
 
 

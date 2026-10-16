@@ -447,6 +447,43 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # 避免用户遗忘验证节点。09:40 错开早报(09:00)/edge邮件(08:20)槽位。
     ("linkage_validation", "40 9 * * *", "validate_linkage_factor.py", [],
      "联动因子效果验证+通知（每日 09:40，样本≥25 且 7 天冷却外才发信）", "core"),
+
+    # ═══ 投研多维指标物化（P1.6/P1.7/P1.8/P1.9，2026-10-16 补注册）═══
+    # 背景：价格弹性 / 解锁反应 / 资金流因子 三条指标体系上线时只跑过一次全量
+    #   `--batch` 落库（329 / 549 / 927 资产），**没有任何心跳** → 与「catalyst_outcome
+    #   停摆 15 天」（2026-10-02 P0-1）、「biz.liquidation_history 手动回填当天即停更」
+    #   （CGV4-002）同一类事故：脚本落地 ≠ 通路活着。本块把三条 --batch + 物化视图刷新
+    #   接进日更，让看板/选币能按当日数据筛。
+    #
+    # 为什么排在夜间 21:40–22:40（而非早高峰）：
+    #   ① 上游全部就绪：解锁事件来自 token_unlocks_batch(07:00)、日线来自
+    #      binance_daily_refresh(08:00) / etl_asset_market_daily(每 6h)、催化剂结局来自
+    #      catalyst_outcome_collect(每 4h，末班 20:15)、盘口深度来自 coinglass_ob_depth(04:10)。
+    #   ② 避开 06:00–06:45 的 data_sync_daily（其「资产同名去重」会 DELETE core.asset
+    #      并级联 ~42 张 FK 子表）——三条指标都按 asset_id 写 biz 表、MV 还要读 core.asset，
+    #      贴太近会撞锁（史实：derivatives_batch 06:30 撞锁致整条日同步 failed，2026-09-29）。
+    #   ③ 避开 01:00–05:30 的 CoinGlass 作业带与 10:00 的四个 core 任务堆叠。
+    #   三任务串行错峰（不再同一分钟抢 core 槽位），as_of = 当日，供次日投研/看板直接读。
+    ("asset_price_elasticity_batch", "40 21 * * *", "asset_price_elasticity.py", ["--batch"],
+     "价格弹性批量物化（每日 21:40，P1.6 → biz.asset_price_elasticity）", "core"),
+    # CMC 下次解锁抓取（P1.7 补强）：**必须排在 asset_unlock_reaction_batch 之前**——
+    #   reaction v3 的 next_unlock_beneficiary 会读 biz.asset_unlock_next_cmc 兜底。
+    #   纯 HTTP 翻页 ~14 页 × 1s ≈ 40s；robots.txt 未屏蔽该路径。
+    ("cmc_unlock_ingest", "50 21 * * *", "ingest_cmc_unlocks.py", ["--sleep", "0.8"],
+     "CMC 下次解锁抓取（每日 21:50，P1.7 补强 → biz.asset_unlock_next_cmc，reaction 前）", "core"),
+    ("asset_unlock_reaction_batch", "55 21 * * *", "asset_unlock_reaction.py", ["--batch"],
+     "解锁表现批量物化（每日 21:55，P1.7 → biz.asset_unlock_reaction）", "core"),
+    ("asset_flow_factor_batch", "10 22 * * *", "asset_flow_factor.py", ["--batch"],
+     "资金流因子批量物化（每日 22:10，P1.8 → biz.asset_flow_factor）", "core"),
+    # 物化视图刷新必须排在三条 --batch 之后（22:30）；CONCURRENTLY 不阻塞看板读。
+    ("asset_screen_mv_refresh", "30 22 * * *", "refresh_asset_screen_mv.py", [],
+     "多维筛选物化视图刷新（每日 22:30，P1.9 biz.mv_asset_screen，跟三条 batch 之后）", "core"),
+    # 事件级受益人下沉（P1.7 补齐）：从 app.tokenomics.com 解锁页 hero 抓「下一次解锁」
+    #   的类别构成（tokenomist.ai 被 Cloudflare 拦，不可用）。~470 币 × ~1s + 限速 ≈ 15 min。
+    #   源站按「下一期」渲染，故每天跑才跟得上解锁日推进；幂等 upsert + 只覆盖
+    #   beneficiary_source='tokenomics_unlock_hero' 的行（不回写历史事件）。
+    ("unlock_recipients_backfill", "40 22 * * *", "backfill_unlock_recipients.py", ["--sleep", "0.4"],
+     "解锁事件级受益人抓取（每日 22:40 → biz.asset_unlock_recipient_mix + 回填事件行）", "core"),
 ]
 
 # 注：一次性「国庆后待办·评估 volume_surge_24h 加回 Tier 2 白名单（R3-1）」提醒

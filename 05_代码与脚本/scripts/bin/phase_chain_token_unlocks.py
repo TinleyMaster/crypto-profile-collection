@@ -499,6 +499,25 @@ def _scrape_variant(slug: str, variant: dict, is_fallback: bool, context,
         result["unlock_events"] = events
         _log(f"  Unlock Events: {len(events)} 条")
 
+        # 事件级受益人（下一次解锁的类别构成）——页面上唯一给出百分比的来源。
+        # 挂到最近的 upcoming 事件上，随 unlock_events_json 一并落库，无需新表。
+        recips = _extract_unlock_recipients(page)
+        if recips:
+            result["next_unlock_recipients"] = recips
+            _log("  受益人构成: " + ", ".join(f"{r['name']} {r['pct']}%" for r in recips))
+            upcoming_r = [e for e in events if e.get("is_upcoming")]
+            if upcoming_r:
+                from datetime import datetime as _dtr
+                def _pdr(s):
+                    s = (s or "").replace("Next", "").strip()
+                    for fmt in ("%b %d, %Y", "%B %d, %Y", "%d %b %Y", "%d %B %Y"):
+                        try:
+                            return _dtr.strptime(s, fmt)
+                        except Exception:
+                            continue
+                    return _dtr(2000, 1, 1)
+                min(upcoming_r, key=lambda e: _pdr(e["date"]))["recipients"] = recips
+
         # P1-2: overview 的 next_unlock_value/amount 摊到最近的 upcoming 事件
         # （新站事件表常无 value 列，overview 的 Next Unlock 摘要包含 USD 值）
         ov = result["overview"]
@@ -753,6 +772,43 @@ def _extract_unlocks_overview(page) -> dict:
         ov["next_unlock_pct_mcap"] = float(m.group(1))
 
     return ov
+
+
+def _extract_unlock_recipients(page) -> list[dict]:
+    """提取 Unlocks 页 hero「Unlock Recipients」区块的类别构成（下一次解锁）。
+
+    app.tokenomics.com 解锁页 hero 结构（SSR，静态 DOM 即含，无需点击）：
+        <section aria-label="Unlock recipients">
+          <ul>
+            <li ...>...<span>Private Investors</span>
+                    <span class="font-semibold tabular-nums text-content-1">35.0%</span></li>
+            ...
+          </ul>
+        </section>
+
+    返回 [{"name": "Private Investors", "pct": 35.0}, ...]；无该区块时返回 []。
+
+    这是页面上**唯一给出事件级受益人百分比**的位置——下方 Unlock Schedule
+    Details 表格的「Unlock Recipients」列只有「N Recipients」计数 + 颜色圆点
+    （类别名与百分比要 hover/点击才出），故精确构成只能从 hero 取。
+    """
+    try:
+        html = page.content()
+    except Exception:
+        return []
+    m = re.search(r'aria-label="Unlock recipients"(.{0,4000}?)</section>', html, re.S)
+    if not m:
+        return []
+    out: list[dict] = []
+    for name, pct in re.findall(
+        r'>([A-Za-z][^<]{1,60}?)<span class="font-semibold[^"]*">([\d.]+)%</span>',
+        m.group(1),
+    ):
+        try:
+            out.append({"name": name.strip(), "pct": float(pct)})
+        except ValueError:
+            continue
+    return out
 
 
 def _extract_allocation(page) -> list[dict]:

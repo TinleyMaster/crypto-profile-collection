@@ -307,6 +307,15 @@ _EVENT_TYPE_CN = {
 }
 
 
+# 解锁类型 → 中文短标签（邮件行内展示用）
+_UNLOCK_TYPE_CN = {
+    "unspecified": "未分类", "linear_inflation": "线性释放",
+    "ico_tge": "ICO TGE", "protected_ico_yt_maturity": "ICO YT到期",
+    "allo_season2_flatiron": "ALLO Season2", "investor_cliff_expiry": "投资人Cliff到期",
+    "public_sale": "公募",
+}
+
+
 def _fmt_attr(a: dict) -> str:
     """归因 → 中文摘要（行内展示，带具体事件标题）。"""
     attr = a.get("attr") or {}
@@ -334,19 +343,17 @@ def _fmt_attr(a: dict) -> str:
         # 仅 own_n 有计数而 events 为空（归因层的 48h 同赛道推断，不一定有自身事件）
         parts.append(f"同赛道催化剂×{own_n}")
 
-    # 2) 解锁事件（忽略 unlock_type='unspecified' 和 risk=NULL，避免展示噪音）
+    # 2) 解锁事件（全部展示，类型做中文映射保持可读）
     for u in (attr.get("unlocks") or [])[:2]:
         ds = u["date"].strftime("%m-%d") if hasattr(u.get("date"), "strftime") else str(u.get("date", ""))
         ratio = u.get("ratio")
         ratio_s = f"占流通{ratio*100:.1f}%" if ratio is not None else ""
         risk = (u.get("risk") or "").strip()
-        risk_s = f", {risk}" if risk and risk.lower() not in ("null", "unknown") else ""
+        risk_s = f", {risk}" if risk else ""
         utype = (u.get("unlock_type") or "").strip()
-        utype_s = f" [{utype}]" if utype and utype.lower() != "unspecified" else ""
-        if ratio_s or risk_s or utype_s:
-            parts.append(f"解锁{ds}{ratio_s}{risk_s}{utype_s}")
-        else:
-            parts.append(f"解锁{ds}")
+        utype_cn = _UNLOCK_TYPE_CN.get(utype.lower(), utype) if utype else ""
+        utype_s = f" [{utype_cn}]" if utype_cn else ""
+        parts.append(f"解锁{ds}{ratio_s}{risk_s}{utype_s}")
 
     # 3) 上币事件
     for ls in (attr.get("listings") or [])[:2]:

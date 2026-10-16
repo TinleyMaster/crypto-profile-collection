@@ -287,24 +287,76 @@ def enrich_events(conn, alerts: list[dict]) -> list[dict]:
     return out
 
 
+def _short_title(s: str, maxlen: int = 28) -> str:
+    """事件标题 → 短标签（首 28 字 + 省略号）。"""
+    s = (s or "").strip()
+    if len(s) <= maxlen:
+        return s
+    return s[:maxlen - 1] + "…"
+
+
+# 事件类型 → 中文短标签（邮件归因列 13px 行内展示，需短）
+_EVENT_TYPE_CN = {
+    "listing": "上币", "delisting": "下币", "funding": "融资",
+    "partnership": "合作", "tech_upgrade": "技术升级", "audit": "审计",
+    "regulation": "监管", "hack": "安全事件", "burn": "销毁",
+    "rebranding": "改名", "fork": "分叉", "airdrop": "空投",
+    "nft_event": "NFT", "community": "社区", "team": "团队",
+    "market_maker": "做市", "macro": "宏观", "unlock": "解锁",
+    "roadmap": "路线图", "competitor": "竞品", "meme": "meme",
+}
+
+
 def _fmt_attr(a: dict) -> str:
-    """归因 → 一句话中文摘要（用于邮件行内展示）。"""
+    """归因 → 中文摘要（行内展示，带具体事件标题）。"""
     attr = a.get("attr") or {}
     if not attr:
         return ""
-    if attr.get("is_event"):
-        parts = []
-        if attr.get("own_n"):
-            parts.append(f"催化剂×{attr['own_n']}")
-        if attr.get("unlocks"):
-            u = attr["unlocks"][0]
-            parts.append(f"解锁{u['date']:%m-%d}" +
-                         (f"(占流通{u['ratio']*100:.1f}%)" if u.get("ratio") else ""))
-        if attr.get("listings"):
-            parts.append("上币事件")
-        kind = attr.get("event_kind", "事件型充提")
-        return f"{kind}：{'、'.join(parts) if parts else '近7d有事件'}"
-    return attr.get("event_kind", "纯交易型充提")
+    if not attr.get("is_event"):
+        return attr.get("event_kind", "纯交易型充提")
+
+    parts: list[str] = []
+
+    # 1) 催化剂事件（取前 2 条，最相关的放前面）
+    events = attr.get("events") or []
+    own_n = attr.get("own_n") or 0
+    if events:
+        for e in events[:2]:
+            t_cn = _EVENT_TYPE_CN.get(e.get("type") or "", e.get("type") or "事件")
+            ttl = _short_title(e.get("title", ""))
+            dt = e.get("published_at")
+            ds = f"{dt:%m-%d}" if dt else ""
+            parts.append(f"{t_cn}·{ttl}({ds})")
+        # 若还有更多，末尾补计数
+        if len(events) > 2:
+            parts[-1] += f" 等{len(events)}条"
+    elif own_n:
+        # 仅 own_n 有计数而 events 为空（归因层的 48h 同赛道推断，不一定有自身事件）
+        parts.append(f"同赛道催化剂×{own_n}")
+
+    # 2) 解锁事件
+    for u in (attr.get("unlocks") or [])[:2]:
+        ds = u["date"].strftime("%m-%d") if hasattr(u.get("date"), "strftime") else str(u.get("date", ""))
+        ratio = u.get("ratio")
+        ratio_s = f"占流通{ratio*100:.1f}%" if ratio is not None else ""
+        risk = u.get("risk") or ""
+        risk_s = f", {risk}" if risk else ""
+        utype = u.get("unlock_type") or ""
+        parts.append(f"解锁{ds}{ratio_s}{risk_s}{(' [' + utype + ']') if utype else ''}")
+
+    # 3) 上币事件
+    for ls in (attr.get("listings") or [])[:2]:
+        dt = ls.get("published_at")
+        ds = f"{dt:%m-%d}" if dt else ""
+        parts.append(f"上币·{_short_title(ls.get('title',''))}({ds})")
+
+    # 若三者都为空但 is_event=True（理论不该发生，留兜底）
+    if not parts:
+        parts.append("近7d有事件")
+
+    # 事件型充提 前缀，后跟换行 + 要点（HTML 渲染为行内，但 <br> 后可换行）
+    kind = attr.get("event_kind", "事件型充提")
+    return f"<b>{kind}</b><br>" + "<br>".join(f"· {p}" for p in parts)
 
 
 def _build_html(alerts: list[dict], window_h: int) -> str:

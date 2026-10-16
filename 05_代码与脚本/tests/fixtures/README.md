@@ -123,3 +123,49 @@ python scripts/bin/attr_eval.py --predict --bucket crypto_gap
 
 **回归测试**：`python tests/test_attr_guards.py` → **34/34 全绿**（注入用例覆盖 A 商品同名 / B 美股撞名 / C 强信号召回 / D 门禁不破）。
 
+---
+
+## Baseline v3（2026-10-16，P3-C-B3 项目名通道收紧后 · 同集 329 条）
+
+**指标与 v2 逐项相同（未劣化）**：precision **1.000** / recall **0.867** / F1 **0.929**；
+TP/FP/FN = 26/0/4；负样本 **299/299 = 100.0%**。
+⇒ 本轮回归零，属**纯精度加固**（不影响评测集可覆盖的场景）。
+
+### 为什么改：把「只有评测集」换成「真实存量」
+
+v2 的评测集（329 条）**覆盖不到项目名通道的垃圾** —— 它是靠 `attr_backfill_impact.py`
+扫 **1,500 条真实未关联催化剂**才暴露出来的：18 行 project_name 新增中 **8 行（≈47%）是误连**。
+
+| 病因 | 实例（实测） | 处置 |
+|---|---|---|
+| **泛词候选**（地理/国别/产品词本身就是候选） | `Asia`→`Asia Coin`(cid 149) · `Japan`→`Japan Coin`(870) · `Liquid`→`Liquid Agent`(58/81，来自「Binance **Liquid** Swap」) · `Simple`→`Simple coin`(218，来自「**Simple**Swap」) | 新增 `_GENERIC_PROJECT_WORDS` 停用表 |
+| **符号对应过松**（只比 `canonical_symbol`，不看资产名） | `BSC`（「BSC chain」）→ **BowsCoin**(1111) · `Ant`（「Ant Group」）→ **Autonomi**(1396) | 符号对应须**资产名以该词开头** |
+| 名称对应过宽（任意位置词边界） | `Asia`→`Asia Coin`、`Gravity`→`Gravity Finance` | 改「**完全同名**」或「**候选词 + 组织词**」 |
+
+**改后实测**（同 1,500 条样本）：project_name 参与 15 条 **13 条正确**，垃圾 **8 → 2**（47% → 13%）。
+
+**残余 2 条（记录，未纳入断言）**：
+1. `Cafe de Coral Group` → `CORAL`（"Coral" 是港式快餐品牌词；但 Coral Protocol 是真实项目，故不拉黑 `CORAL`）；
+2. `Alibaba Group Holding` → `BABA`（**rank=NULL** 资产；经 `map_pairs_to_asset_ids` 的
+   `canonical_symbol` 兜底路径进入。⚠️ 该路径**不能**加 rank 约束 —— 否则新上市无排名的真币
+   （如 `MARSCOIN`）会全军覆没）。
+
+**回归测试**：`python tests/test_attr_guards.py` → **46/46 全绿**（新增 E 组 12 条项目名通道用例）。
+
+---
+
+## P3-F：`backfill_catalyst_links.py` 单一真相收敛
+
+该脚本原**内联复制**了 linker 全套（~260 行，注明「手动同步」），P3-C 改造后即成**落后副本**
+（宽 gate + 裸 symbol 死门 + 旧撞名清单）—— 一旦重跑会**以旧 bug 覆盖新护栏**。
+现改为 `import` 生产的同一代码路径（`pipeline._resolve_asset_ids` + `_update_asset_links`
++ `catalyst.db.get_conn()`），**471 → 244 行**，归属结果与生产摄入逐字节一致。
+
+> ⚠️ 连接工厂必须用 `catalyst.db.get_conn()`（`dict_row`）：改用
+> `crypto_research.db.conn.get_connection`（`tuple_row`）会因生产代码用 `row["asset_id"]`
+> 取值而一跑即 `TypeError: tuple indices must be integers`。
+
+新增只读预检工具 `scripts/bin/attr_backfill_impact.py`：算「新增关联 / 失效关联（stale）」
+并标注弱信号参与度，作为**写库授权的前置材料**（`--out` 落 JSONL 供逐条复核）。
+
+

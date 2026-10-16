@@ -51,6 +51,29 @@ _ORG_WORD_STOPWORDS = frozenset({
     "TWO", "ONE", "SIX", "TEN", "NEXT", "LAST", "LIVE", "FROM", "WITH", "NOT",
 })
 
+# 泛词候选停用词（P3-C-B3，2026-10-16）：**候选词本身是通用词**时，即使「符号/名称严格
+# 对应」也照样误连 —— 因为库里真有叫 `Asia Coin`(ASIA) / `Liquid Agent`(LIQUID) /
+# `Japan Coin`(JAPAN) / `Simple coin`(SIMPLE) 的小币。实测（1500 条未关联样本）：
+#   · cid 58/81 「Binance **Liquid** Swap Upgrades Pool Prices」→ Liquid Agent(#7140)
+#   · cid 149   「…suing a Dymon **Asia** Capital employee…」  → Asia Coin(#4390)
+#   · cid 218   「**Simple**Swap said its fixed-rate…」        → Simple coin(#9196)
+#   · cid 870   「**Japan** Finance Minister Satsuki…」        → Japan Coin(#8752)
+# ⇒ 18 行 project_name 新增中 8 行为此类垃圾（≈47%）。
+# 处置：**地理/国别/区域词 + 实测产品泛词**一律不作候选。
+# ⚠️ 本表是**有界清单、非全量**（与 `_EQUITY_TICKER_COLLISIONS` 同一定位）：
+#    宁可漏几个（后果=该事件无归属，属"沉默"），不可误连（后果=假事件进报告）。
+_GENERIC_PROJECT_WORDS = frozenset({
+    # 地理 / 国别 / 区域
+    "ASIA", "ASIAN", "EUROPE", "EUROPEAN", "AMERICA", "AMERICAN", "AFRICA", "AFRICAN",
+    "CHINA", "CHINESE", "JAPAN", "JAPANESE", "KOREA", "KOREAN", "INDIA", "INDIAN",
+    "HONG", "KONG", "TAIWAN", "SINGAPORE", "RUSSIA", "RUSSIAN", "UKRAINE", "ISRAEL",
+    "IRAN", "IRAQ", "BRAZIL", "CANADA", "MEXICO", "GERMANY", "FRANCE", "ITALY",
+    "SPAIN", "TURKEY", "EGYPT", "GLOBAL", "PACIFIC", "ATLANTIC", "NATIONAL",
+    "FEDERAL", "CENTRAL", "INTERNATIONAL", "WORLD", "WORLDWIDE",
+    # 通用产品 / 描述词（实测见上）
+    "LIQUID", "SIMPLE",
+})
+
 
 def _symbol_pos(text_lower: str, base: str) -> int:
     """base 在文本中首次出现位置（词边界、大小写不敏感）；未出现返回 _UNSEEN。"""
@@ -394,8 +417,12 @@ def _match_project_name_to_assets(conn, title: str) -> list[dict]:
         words |= set(
             re.findall(r"([A-Z][A-Za-z0-9\-\.]{2,})(?:DAO|Chain|Swap|Finance|Network|Protocol)\b", title)
         )
-        # 停用词兜底（大写虚词/泛词）
-        words = {w for w in words if w.upper() not in _ORG_WORD_STOPWORDS}
+        # 停用词兜底（大写虚词/泛词）+ 泛词候选（地理/国别/产品词，P3-C-B3）
+        words = {
+            w for w in words
+            if w.upper() not in _ORG_WORD_STOPWORDS
+            and w.upper() not in _GENERIC_PROJECT_WORDS
+        }
     except Exception:
         return []
     if not words:
@@ -404,16 +431,26 @@ def _match_project_name_to_assets(conn, title: str) -> list[dict]:
         """
         SELECT a.asset_id, a.canonical_symbol AS symbol, a.canonical_name, a.market_cap_rank
         FROM core.asset a
-        WHERE (
-            LOWER(a.canonical_symbol) = ANY(%s::text[])
-            OR EXISTS (
-                -- canonical_name **首词**匹配（P3-C-B，2026-10-16）：原任意位置词边界匹配
-                -- 过宽 —— 实测 word='Gravity' 命中 `Gravity`/`Gravity Finance`、
-                -- word='Cycle' 命中 `Cycle`/`Burn Cycle`/`$FYC`，使 cid 7862/7851/7855/
-                -- 15158 各多连 2 个资产（共 8 个 FP）。改 `^word` 只认名称开头。
-                SELECT 1 FROM unnest(%s::text[]) w
-                WHERE LOWER(COALESCE(a.canonical_name, '')) ~
-                      ('^' || LOWER(w) || '([^a-z]|$)')
+        WHERE EXISTS (
+            SELECT 1 FROM unnest(%s::text[]) w
+            WHERE (
+                -- ① 符号对应（P3-C-B3，2026-10-16）：symbol 命中 **且资产名以该词开头**。
+                --    原实现只比 symbol ⇒ 实测 `BSC`(词来自「BSC chain」)→ BowsCoin(#5685)、
+                --    `Ant`(「Ant Group」)→ Autonomi(#885) 都被误配。加名称前缀后可拦住，
+                --    而 `XDC`→`XDC Network`(#71)、`PONS`→`Pons`(#129) 等真对应不受影响。
+                (
+                    LOWER(a.canonical_symbol) = w
+                    AND LOWER(COALESCE(a.canonical_name, '')) LIKE w || '%%'
+                )
+                -- ② 名称对应：**完全同名**（`TRON` ↔ TRON）或 `候选词 + 组织词`
+                --    （`Realio` ↔ `Realio Network`、`Gnosis` ↔ `Gnosis`）。
+                --    真项目名几乎都是这两种形态；垃圾恰是「候选词 + 非组织词」
+                --    （`Asia Coin` / `Liquid Euro` / `Simple AI`）。
+                OR LOWER(COALESCE(a.canonical_name, '')) = w
+                OR LOWER(COALESCE(a.canonical_name, '')) ~
+                   ('^' || w || '[[:space:]]+'
+                    || '(protocol|foundation|labs?|network|dao|chain|swap|finance'
+                    || '|capital|group|token)([^a-z]|$)')
             )
         )
           AND LOWER(a.canonical_symbol) NOT IN
@@ -423,7 +460,7 @@ def _match_project_name_to_assets(conn, title: str) -> list[dict]:
         ORDER BY a.market_cap_rank ASC, a.asset_id
         LIMIT 1
         """,
-        ([w.lower() for w in words], [w.lower() for w in words]),
+        ([w.lower() for w in words],),
     ).fetchall()
     return [dict(r) for r in rows]
 

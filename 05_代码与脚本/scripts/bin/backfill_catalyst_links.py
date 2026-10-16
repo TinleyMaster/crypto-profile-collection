@@ -1,300 +1,90 @@
+#!/usr/bin/env python3
 """
 存量催化剂资产关联展开（linker 全量重算）。
 
-问题：catalyst_asset_link 只有 legacy 单资产链接（12 条），
-      多交易对公告未展开到 N:N 关联表。
-修法：对所有催化剂重新跑 linker（related_pairs + 正文 cashtag 兜底），
-      写入 catalyst_asset_link 表。
+问题：`biz.catalyst_asset_link` 只有部分催化剂有 N:N 关联，
+      多交易对公告未展开到关联表（`asset_catalyst.asset_id` 只存单个主资产）。
+
+修法：对所有催化剂重跑 → **生产同一条归属代码路径** → 写入 catalyst_asset_link。
 
 用法：
-    python scripts/bin/backfill_catalyst_links.py [--dry-run] [--max-items 100]
+    python scripts/bin/backfill_catalyst_links.py --dry-run [--max-items 100]
+    python scripts/bin/backfill_catalyst_links.py               # 增量（只补空，不删）
+    python scripts/bin/backfill_catalyst_links.py --prune       # 重算并剔除失效关联（写库！）
+
+━━━ P3-F 单一真相收敛（2026-10-16）━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+本脚本原先把 linker 全套逻辑（~260 行）**内联复制**在文件里，并注明「手动同步」。
+P3-C 归属护栏改造后，这份副本**已经落后**（仍是：
+  · 宽口径 gate（含 `现货/合约/交易所/spot` ⇒ 商品/美股稿恒过闸）
+  · `len(base) >= 2` 死门（裸 symbol `CT` / 单字符 `W` 全漏）
+  · 旧撞名清单（缺 SNPS/RTX/B3）
+  · 无弱信号护栏（裸 symbol 无标题佐证即认领）
+⇒ 一旦重跑，会以**旧 bug 覆盖新护栏**，重演 582 条错连事故。
+
+现改为**单一真相**：import `workbench/catalyst` 里生产的同一函数，
+归属结果与生产摄入**逐字节一致**。全部内联副本删除。
+（`_resolve_asset_ids` 即 `pipeline._insert_catalyst` 调用的同一个函数。）
+
+⚠️ 本脚本为运维工具，**不在 scheduler 调度内**，须手工执行。
 """
 from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+# prod 结构: /app/scripts/bin/ → /app/（workbench 文件直接在 /app/ 下）
+# 本地结构: .../scripts/bin/ → .../workbench/
+_candidate = SCRIPT_DIR.parent.parent / "workbench"
+WORKBENCH_DIR = _candidate if _candidate.exists() else SCRIPT_DIR.parent.parent
+
+sys.path.insert(0, str(WORKBENCH_DIR))
 PROJECT_SRC = SCRIPT_DIR.parent / "src"
 if str(PROJECT_SRC) not in sys.path:
     sys.path.insert(0, str(PROJECT_SRC))
 
-import psycopg  # noqa: E402
 import psycopg.rows  # noqa: E402
-from crypto_research.config import get_settings  # noqa: E402
-from crypto_research.db.conn import get_connection  # noqa: E402
+
+# 连接工厂同样统一到 catalyst.db.get_conn()（P3-F）：
+# 生产的 runner.py / pipeline 全走它 —— `dict_row` + commit/rollback 语义一致。
+# ⚠️ 不得改用 crypto_research.db.conn.get_connection：那是 `tuple_row`（且池复用时
+#    重置 row_factory），而生产归属代码内部用 `row["asset_id"]` 取值 ⇒ 一跑即
+#    TypeError: tuple indices must be integers。
+from catalyst.db import get_conn  # noqa: E402
+from catalyst.models import CatalystItem  # noqa: E402
+from catalyst.pipeline import (  # noqa: E402
+    _resolve_asset_ids,
+    _update_asset_links,
+)
+
+# 机器生成的关联来源（`--prune` 只清这些；`legacy` / `manual` 等人工行一律不动）
+_MACHINE_LINK_SOURCES = ("trading_pairs", "cashtag", "project_name")
 
 
 # ---------------------------------------------------------------------------
-# linker 核心逻辑（内联自 catalyst/linker.py，避免依赖 workbench）
+# 归属（**委托生产代码**，本文件不再持有任何归属规则）
 # ---------------------------------------------------------------------------
 
-# symbol(大写) -> asset_id 缓存
-_symbol_asset_cache: dict[str, int | None] = {}
 
-# 非加密资产名称黑名单（SQL 正则，与 workbench/catalyst/linker.py 同步）。
-# 命中即视为「美股 tokenized stock / 商品衍生」，不参与 crypto 催化剂信号映射。
-_NON_CRYPTO_NAME_SQL = (
-    r"tokeniz|b[[:space:]]*stocks|pre[[:space:]]*stocks|futures|derivativ"
-    r"|crude[[:space:]]+oil|brent"
-    r"|robinhood[[:space:]]+token|backpack[[:space:]]+securities"
-    r"|\mdinari\M|\mxstock\M"
-)
+def link_catalyst(cat: dict, conn) -> tuple[list[int], str]:
+    """对单条催化剂做资产关联 —— 与生产 `_insert_catalyst` 同一条路径。
 
-# canonical 白名单（CAT-LINKER-DIRTY）：主流/高碰撞符号强制解析为真实主网币。
-# 与 catalyst/linker.py 保持同一清单（内联副本需手动同步）。
-_CANONICAL_TOP_SYMBOLS = frozenset({
-    "BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "PEPE", "SHIB", "ADA",
-    "DOT", "AVAX", "LINK", "LTC", "UNI", "AAVE", "MATIC", "POL", "TRX",
-    "XLM", "FIL", "NEAR", "ARB", "OP", "SUI", "TON", "APT", "INJ", "SEI",
-    "WIF", "BONK", "FLOKI", "ENA", "PENDLE", "JUP", "RENDER", "FET",
-})
-
-# 同名消歧（与 workbench/catalyst/linker.py 手动同步，内联副本）：
-#   · `_COMMODITY_AMBIGUOUS_SYMBOLS` —— 与商品/常用英文词同名（宏观商品新闻误标）；
-#   · `_EQUITY_TICKER_COLLISIONS` —— 与**美股 ticker**撞名（审计_盘面异动告警邮件_3封
-#     _2026-09-26 §三.P0-4：DoorDash（NASDAQ: DASH）新闻误连加密 Dash）。
-# 规则：命中者正文/标题必须含加密语境（`has_crypto_context`）才认，否则跳过。
-#
-# ⚠️ 本脚本此前**调用处传了 `context_text=ctx` 而函数签名没有该参数**（一跑即 TypeError），
-#    根本没有门禁 ⇒ 重跑会**重新写入** P0-4 修掉的脏关联。本轮补齐参数 + 两套集合。
-_COMMODITY_AMBIGUOUS_SYMBOLS = frozenset({
-    "COPPER", "GOLD", "SILVER", "OIL", "GAS", "CRUDE", "BRENT", "IRON", "STEEL",
-    "COAL", "URANIUM", "LITHIUM", "PLATINUM", "PALLADIUM", "COFFEE", "SUGAR",
-    "WHEAT", "CORN", "WATER", "DIAMOND", "ALUMINUM", "ALUMINIUM", "NICKEL",
-    "ZINC", "LEAD", "TIN", "COBALT", "XAU", "XAG", "XPT", "XPD",
-})
-
-_EQUITY_TICKER_COLLISIONS = frozenset({
-    "DASH",   # DoorDash Inc.（NASDAQ: DASH）—— 实物复现
-    "APT",    # Alpha Pro Tech Ltd.（NYSE American: APT）
-    "SUI",    # Sun Communities Inc.（NYSE: SUI）
-    "SOL",    # Emeren Group Ltd.（NYSE: SOL）
-    "TRX",    # TRX Gold Corp.（NYSE American: TRX）
-    "LINK",   # Interlink Electronics Inc.（NASDAQ: LINK）
-    "STX",    # Seagate Technology Holdings plc（NASDAQ: STX）
-    "AR",     # Antero Resources Corp.（NYSE: AR）
-    "OP",     # OceanPal Inc.（NASDAQ: OP）
-    "BB",     # BlackBerry Ltd.（NYSE: BB）
-    "BX",     # Blackstone Inc.（NYSE: BX）
-    "COST",   # Costco Wholesale Corp.（NASDAQ: COST）
-    "DIS",    # The Walt Disney Company（NYSE: DIS）
-    "SHELL",  # Shell plc（NYSE: SHELL）
-    "BR",     # Broadridge Financial Solutions（NYSE: BR）；另有国家代码 BR
-    "UBER",   # Uber Technologies Inc.（NYSE: UBER）
-})
-
-# 与 linker.py 逐字同源（含「`\b` 在中文处判不出词尾」「cashtag 必须含字母」两处修复，
-# 以及 2026-09-26 通用词收口：删 `miner|矿工|上线`、`stacks(?!\s+of\b)`、补 `sui`）。
-_CRYPTO_CONTEXT_RE = re.compile(
-    r"\$(?=[A-Za-z0-9]{2,10}(?![A-Za-z0-9]))(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{2,10}"
-    r"|(?<![A-Za-z0-9])[A-Z0-9]{2,15}USDT(?![A-Za-z0-9])"
-    r"|(?<![A-Za-z0-9])[A-Z0-9]{2,15}/USDT(?![A-Za-z0-9])"
-    r"|(?<![A-Za-z])(?:token|memecoin|meme|crypto|blockchain|on-?chain|onchain"
-    r"|defi|dex|cex|airdrop|staking|listing|solana|ethereum|binance"
-    r"|stablecoin|altcoin|wallet|whale|mainnet|testnet|validator|halving"
-    r"|perpetual|spot|protocol"
-    r"|tron|chainlink|optimism|aptos|arweave|starknet|sui"
-    r"|stacks(?!\s+of\b)"
-    r"|bouncebit|bedrock|myshell|blynex|distribute\.ai"
-    r"|lookonchain|arkham|nansen|coindesk|cointelegraph|defillama|coingecko"
-    r"|coinmarketcap|okx|bybit|coinbase|kraken|uniswap|aave|hyperliquid"
-    r")(?![A-Za-z])"
-    r"|代币|加密|链上|空投|现货|合约|交易所|币安|钱包|巨鲸|主网|质押",
-    re.IGNORECASE,
-)
-
-
-def has_crypto_context(text: str | None) -> bool:
-    """正文/标题是否含加密语境（用于商品/美股同名 symbol 消歧）。"""
-    return bool(text and _CRYPTO_CONTEXT_RE.search(text))
-
-
-def _resolve_canonical_top(conn, base: str) -> int | None:
-    """白名单符号 → 真实主网资产（market_cap_rank 非空，取排名最小）。"""
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            SELECT asset_id
-            FROM core.asset
-            WHERE UPPER(canonical_symbol) = %s
-              AND market_cap_rank IS NOT NULL
-            ORDER BY market_cap_rank ASC, asset_id
-            LIMIT 1
-            """,
-            (base,),
-        )
-        row = cur.fetchone()
-    return row["asset_id"] if row else None
-
-# 常见 quote 币种，用于拆分交易对
-_QUOTE_ASSETS = (
-    "USDT", "USDC", "BUSD", "TUSD", "USDP", "FDUSD",
-    "BTC", "ETH", "BNB", "SOL", "XRP",
-)
-
-
-def _extract_base_symbol(pair: str) -> str | None:
-    """从交易对中提取 base symbol（大写）。"""
-    if not pair:
-        return None
-    pair = pair.upper().strip()
-    for quote in _QUOTE_ASSETS:
-        if pair.endswith(quote) and len(pair) > len(quote):
-            base = pair[: -len(quote)]
-            if len(base) >= 2 and any(c.isalpha() for c in base):
-                return base
-    return None
-
-
-def extract_pairs_from_text(text: str) -> list[str]:
-    """从正文中提取交易对（cashtag 兜底）。"""
-    if not text:
-        return []
-    pairs: list[str] = []
-    seen: set[str] = set()
-
-    # 模式 1：$XXXUSDT 或 $XXX
-    for m in re.finditer(r"\$([A-Z0-9]{2,20})(USDT|USDC|BTC|ETH|BNB)?\b", text):
-        base = m.group(1)
-        quote = m.group(2) or "USDT"
-        pair = base + quote
-        if pair not in seen and any(c.isalpha() for c in base):
-            seen.add(pair)
-            pairs.append(pair)
-
-    # 模式 2：直接 XXXUSDT
-    for m in re.finditer(r"\b([A-Z0-9]{2,20})USDT\b", text):
-        base = m.group(1)
-        if not any(c.isalpha() for c in base):
-            continue
-        if base in ("USD", "USDC", "BUSD", "TUSD", "USDP", "FDUSD"):
-            continue
-        pair = base + "USDT"
-        if pair not in seen:
-            seen.add(pair)
-            pairs.append(pair)
-
-    return pairs
-
-
-def map_pairs_to_asset_ids(
-    pairs: list[str],
-    conn,
-    source_hint: str = "binance",
-    context_text: str | None = None,
-) -> list[int]:
-    """将交易对列表映射为 asset_id 列表（多资产）。
-
-    `context_text`（标题+正文）：用于「同名撞车」消歧 —— 商品/常用词
-    （`_COMMODITY_AMBIGUOUS_SYMBOLS`）与美股 ticker（`_EQUITY_TICKER_COLLISIONS`）。
-    为空时不做消歧（向后兼容）。
+    Returns:
+        (asset_ids, link_source) —— link_source 仅作写入标记（生产默认 trading_pairs）
     """
-    if not pairs:
-        return []
-
-    asset_ids: list[int] = []
-    seen: set[int] = set()
-
-    for pair in pairs:
-        base = _extract_base_symbol(pair)
-        if not base:
-            continue
-
-        # 同名消歧：商品/常用词 symbol 与**美股 ticker 撞名**者，需正文含加密语境，
-        # 否则视为宏观商品新闻 / 美股快讯误标。
-        ambiguous = (base in _COMMODITY_AMBIGUOUS_SYMBOLS
-                     or base in _EQUITY_TICKER_COLLISIONS)
-        if ambiguous and context_text and not has_crypto_context(context_text):
-            continue
-
-        # 查缓存
-        if base in _symbol_asset_cache:
-            aid = _symbol_asset_cache[base]
-            if aid is not None and aid not in seen:
-                seen.add(aid)
-                asset_ids.append(aid)
-            continue
-
-        # 白名单优先（CAT-LINKER-DIRTY）：主流符号强制取真实主网币
-        if base in _CANONICAL_TOP_SYMBOLS:
-            aid = _resolve_canonical_top(conn, base)
-            _symbol_asset_cache[base] = aid
-            if aid is not None and aid not in seen:
-                seen.add(aid)
-                asset_ids.append(aid)
-            continue
-
-        # 查库：优先 source_hint 来源的 source_asset_key
-        # （同 key 多条时按 CMC 排名升序选最靠前的，防止脏映射）
-        # 注意：精确 key 匹配也排除 tokenized stock / 商品衍生资产
-        #       （CAT-CLEANUP v5.1 ③：美股快讯经 cashtag 会错连 xStock/Robinhood Token，
-        #        已定性为脏数据，源头排除，与 workbench/catalyst/linker.py 同步）
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute(
-                f"""
-                SELECT a.asset_id
-                FROM core.asset a
-                JOIN core.asset_source_map m ON a.asset_id = m.asset_id
-                WHERE m.source_code = %s
-                  AND UPPER(m.source_asset_key) = %s
-                  AND LOWER(COALESCE(a.canonical_name, '')) !~ '{_NON_CRYPTO_NAME_SQL}'
-                ORDER BY a.market_cap_rank ASC NULLS LAST, a.asset_id
-                LIMIT 1
-                """,
-                (source_hint, base),
-            )
-            row = cur.fetchone()
-        if row:
-            aid = row["asset_id"]
-            _symbol_asset_cache[base] = aid
-            if aid not in seen:
-                seen.add(aid)
-                asset_ids.append(aid)
-            continue
-
-        # 退一步：asset 表的 canonical_symbol
-        # （同 symbol 多行时避免取到脏行：
-        #   1. 排除 tokenized/合成/商品衍生 等（CAT-CLEANUP v5.1 ③，源头排除）
-        #   2. 排除真正仿盘标记（bridged/wrapped/intents/trophy/tomato/second chance/base coin）
-        #      —— 不再用 meme 系（doge/shib/pepe/floki/inu/ai）无边界子串，避免误杀合法 meme 币（CAT-LINKER-NEG）
-        #   3. 按 CMC 排名升序（rank 越小越主流），兜底用 asset_id
-        # 线上审计 2026-09-15：BTC→Bitcoin Base/XRP→XRP AI/BNB→BNBTiger Inu
-        # 部署复验 2026-09-15：SOL→Sol The Trophy Tomato / ETH→NEAR Intents Bridged ETH
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute(
-                f"""
-                SELECT asset_id
-                FROM core.asset
-                WHERE UPPER(canonical_symbol) = %s
-                  AND LOWER(COALESCE(canonical_name, '')) !~ '{_NON_CRYPTO_NAME_SQL}'
-                  AND LOWER(COALESCE(canonical_name, '')) !~ 'bridged|wrapped|intents|trophy|tomato|second[[:space:]]+chance|base[[:space:]]+coin'
-                ORDER BY
-                    market_cap_rank ASC NULLS LAST,
-                    CASE WHEN LOWER(COALESCE(canonical_name, '')) LIKE '%%' || LOWER(%s) || '%%' THEN 0
-                         WHEN LOWER(COALESCE(canonical_name, '')) ~ 'gold|silver|oil|gas' THEN 2
-                         ELSE 1 END,
-                    asset_id
-                LIMIT 1
-                """,
-                (base, base),
-            )
-            row = cur.fetchone()
-        if row:
-            aid = row["asset_id"]
-            _symbol_asset_cache[base] = aid
-            if aid not in seen:
-                seen.add(aid)
-                asset_ids.append(aid)
-            continue
-
-        # 没找到，缓存 None
-        _symbol_asset_cache[base] = None
-
-    return asset_ids
+    item = CatalystItem(
+        source_code=cat.get("source_code") or "",
+        source_item_id=str(cat["catalyst_id"]),
+        title=cat.get("title") or "",
+        body_text=cat.get("body_text") or "",
+        published_at=0.0,
+        related_pairs=list(cat.get("related_pairs") or []),
+    )
+    # 生产 `upsert_catalyst_item(link_source="trading_pairs")` 的同款默认值
+    asset_ids = _resolve_asset_ids(item, conn, "trading_pairs")
+    return list(asset_ids), "trading_pairs"
 
 
 # ---------------------------------------------------------------------------
@@ -302,166 +92,158 @@ def map_pairs_to_asset_ids(
 # ---------------------------------------------------------------------------
 
 
-def fetch_all_catalysts(conn, limit: int = 500, offset: int = 0) -> list[dict]:
-    """获取所有催化剂（分批）。"""
+def fetch_catalysts(conn, limit: int = 500, after_id: int = 0, only_unlinked: bool = False) -> list[dict]:
+    """分批取催化剂 —— **keyset 分页**（`catalyst_id > after_id`）。
+
+    不用 OFFSET：① `--only-unlinked` 是「排空」语义，本次补上关联的行会退出过滤集，
+    OFFSET 会整批跳行（或整批无进展时死循环）；② keyset 在 3.6 万行上也不会越翻越慢。
+    """
+    extra = ""
+    if only_unlinked:
+        extra = """
+          AND NOT EXISTS (
+              SELECT 1 FROM biz.catalyst_asset_link l WHERE l.catalyst_id = c.catalyst_id
+          )
+        """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            """
-            SELECT catalyst_id, source_code, title, body_text, related_pairs
-            FROM biz.asset_catalyst
-            ORDER BY catalyst_id
-            LIMIT %s OFFSET %s
+            f"""
+            SELECT c.catalyst_id, c.source_code, c.title, c.body_text, c.related_pairs
+            FROM biz.asset_catalyst c
+            WHERE c.catalyst_id > %s
+            {extra}
+            ORDER BY c.catalyst_id
+            LIMIT %s
             """,
-            (limit, offset),
+            (after_id, limit),
         )
         rows = cur.fetchall()
 
     result = []
     for row in rows:
         d = dict(row)
-        # related_pairs 可能是 list 或 str
-        if isinstance(d["related_pairs"], str):
+        rp = d.get("related_pairs")
+        if isinstance(rp, str):
             try:
-                d["related_pairs"] = json.loads(d["related_pairs"])
+                rp = json.loads(rp)
             except Exception:
-                d["related_pairs"] = []
-        elif d["related_pairs"] is None:
-            d["related_pairs"] = []
+                rp = []
+        d["related_pairs"] = rp or []
         result.append(d)
     return result
 
 
-def link_catalyst(cat: dict, conn) -> tuple[list[int], list[int]]:
-    """对单条催化剂做资产关联。
-
-    Returns:
-        (trading_pairs_asset_ids, cashtag_asset_ids)
-    """
-    related_pairs = cat.get("related_pairs") or []
-    body_text = cat.get("body_text") or ""
-    title = cat.get("title") or ""
-    ctx = title + "\n" + body_text
-
-    # 第一路：related_pairs 官方标签（置信度高）
-    pair_asset_ids = []
-    if related_pairs:
-        pair_asset_ids = map_pairs_to_asset_ids(
-            related_pairs, conn, source_hint="binance", context_text=ctx
+def current_links(catalyst_id: int, conn) -> set[int]:
+    """当前关联表里该催化剂的 asset_id 集合。"""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT asset_id FROM biz.catalyst_asset_link WHERE catalyst_id = %s",
+            (catalyst_id,),
         )
-
-    # 第二路：正文 cashtag 兜底（置信度低）
-    cashtag_asset_ids = []
-    text_pairs = extract_pairs_from_text(title + "\n" + body_text)
-    # 过滤掉已经通过 related_pairs 匹配到的
-    if text_pairs:
-        all_ids = map_pairs_to_asset_ids(text_pairs, conn, source_hint="binance",
-                                         context_text=ctx)
-        pair_set = set(pair_asset_ids)
-        cashtag_asset_ids = [aid for aid in all_ids if aid not in pair_set]
-
-    return pair_asset_ids, cashtag_asset_ids
+        return {r["asset_id"] for r in cur.fetchall()}
 
 
-def insert_links(catalyst_id: int, asset_ids: list[int], link_source: str,
-                 confidence: float, conn) -> int:
-    """写入关联表，返回新增条数。"""
-    if not asset_ids:
-        return 0
-
-    added = 0
+def prune_links(catalyst_id: int, keep: set[int], conn) -> int:
+    """删除该催化剂**机器生成**且不在 keep 集合内的关联行（写库，需 --prune）。"""
+    if keep:
+        sql = (
+            "DELETE FROM biz.catalyst_asset_link "
+            "WHERE catalyst_id = %s AND link_source = ANY(%s) AND NOT (asset_id = ANY(%s))"
+        )
+        params = (catalyst_id, list(_MACHINE_LINK_SOURCES), list(keep))
+    else:
+        sql = (
+            "DELETE FROM biz.catalyst_asset_link "
+            "WHERE catalyst_id = %s AND link_source = ANY(%s)"
+        )
+        params = (catalyst_id, list(_MACHINE_LINK_SOURCES))
     with conn.cursor() as cur:
-        for aid in asset_ids:
-            try:
-                cur.execute(
-                    """
-                    INSERT INTO biz.catalyst_asset_link
-                        (catalyst_id, asset_id, link_source, confidence)
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (catalyst_id, asset_id) DO NOTHING
-                    """,
-                    (catalyst_id, aid, link_source, confidence),
-                )
-                if cur.rowcount > 0:
-                    added += 1
-            except Exception as e:
-                print(f"    写入关联失败 catalyst_id={catalyst_id}, asset_id={aid}: {e}")
-    return added
+        cur.execute(sql, params)
+        return cur.rowcount
 
 
-def main():
-    parser = argparse.ArgumentParser(description="存量催化剂资产关联展开")
+def main() -> int:
+    parser = argparse.ArgumentParser(description="存量催化剂资产关联展开（P3-F 单一真相版）")
     parser.add_argument("--dry-run", action="store_true", help="只预览不修改")
+    parser.add_argument("--prune", action="store_true",
+                        help="重算并剔除失效机器关联（写库，先跑 --dry-run 评估）")
+    parser.add_argument("--only-unlinked", action="store_true",
+                        help="只处理当前无关联的催化剂（受控回填的最小面）")
     parser.add_argument("--max-items", type=int, default=0, help="最多处理条数（0=全部）")
     parser.add_argument("--batch-size", type=int, default=500, help="每批查询数量")
     args = parser.parse_args()
 
-    settings = get_settings(require_database=not args.dry_run)
-
     total = 0
-    total_pair_links = 0
-    total_cashtag_links = 0
+    total_added = 0
+    total_pruned = 0
     total_no_link = 0
-    offset = 0
+    gain_catalysts = 0
+    after_id = 0
 
-    with get_connection(settings.database_url) as conn:
+    with get_conn() as conn:
         while True:
-            batch = fetch_all_catalysts(conn, args.batch_size, offset)
+            batch = fetch_catalysts(conn, args.batch_size, after_id, args.only_unlinked)
             if not batch:
                 break
 
-            print(f"\n处理第 {offset+1}-{offset+len(batch)} 条（共处理 {total} 条已完成）")
+            print(f"\n处理 catalyst_id > {after_id}（本批 {len(batch)} 条，已完成 {total}）", flush=True)
 
             for cat in batch:
                 if args.max_items and total >= args.max_items:
                     break
 
                 cid = cat["catalyst_id"]
-                pair_ids, cashtag_ids = link_catalyst(cat, conn)
+                asset_ids, link_source = link_catalyst(cat, conn)
+                old_ids = current_links(cid, conn)
+                new_ids = set(asset_ids)
+                gained = new_ids - old_ids
+                lost = old_ids - new_ids
 
-                n_pair = 0
-                n_cash = 0
                 if not args.dry_run:
-                    n_pair = insert_links(cid, pair_ids, "trading_pairs", 0.95, conn)
-                    n_cash = insert_links(cid, cashtag_ids, "cashtag", 0.6, conn)
+                    n_add = _update_asset_links(cid, asset_ids, link_source, conn)
+                    n_prune = prune_links(cid, new_ids, conn) if args.prune else 0
                 else:
-                    n_pair = len(pair_ids)
-                    n_cash = len(cashtag_ids)
+                    n_add, n_prune = len(gained), len(lost) if args.prune else 0
 
-                total_pair_links += n_pair
-                total_cashtag_links += n_cash
-
-                if not pair_ids and not cashtag_ids:
+                total_added += n_add
+                total_pruned += n_prune
+                if gained:
+                    gain_catalysts += 1
+                if not asset_ids:
                     total_no_link += 1
-                    status = "无关联"
-                else:
-                    parts = []
-                    if pair_ids:
-                        parts.append(f"pairs:{len(pair_ids)}")
-                    if cashtag_ids:
-                        parts.append(f"cashtag:{len(cashtag_ids)}")
-                    status = "+".join(parts)
 
-                title_preview = (cat.get("title") or "")[:50]
-                mode = "DRY" if args.dry_run else "OK"
-                print(f"  [{cid}] {mode} {status} | {title_preview}")
+                parts = []
+                if asset_ids:
+                    parts.append(f"ids:{len(asset_ids)}")
+                if gained:
+                    parts.append(f"+{len(gained)}")
+                if lost:
+                    parts.append(f"-{len(lost)}" if args.prune else f"stale:{len(lost)}")
+                if not parts:
+                    parts.append("无关联")
+
+                mode = "DRY" if args.dry_run else ("PRUNE" if args.prune else "OK")
+                print(f"  [{cid}] {mode} {' '.join(parts)} | {(cat.get('title') or '')[:50]}")
 
                 total += 1
 
             if args.max_items and total >= args.max_items:
                 break
-
+            # keyset 推进：下一批从本批最后一个 catalyst_id 之后取
+            after_id = batch[-1]["catalyst_id"]
             if len(batch) < args.batch_size:
                 break
 
-            offset += len(batch)
-
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"处理催化剂总数: {total}")
-    print(f"  trading_pairs 关联新增: {total_pair_links}")
-    print(f"  cashtag 关联新增:      {total_cashtag_links}")
-    print(f"  无任何关联:            {total_no_link}")
+    print(f"  新增关联行:        {total_added}")
+    print(f"  剔除关联行:        {total_pruned}{'' if args.prune else '（未开 --prune）'}")
+    print(f"  产生新关联的催化剂: {gain_catalysts}")
+    print(f"  仍无任何关联:      {total_no_link}")
     if args.dry_run:
         print("（dry-run 模式，未实际写入）")
+    elif args.prune:
+        print("（--prune 已启用：失效的机器关联已被剔除）")
 
     return 0
 

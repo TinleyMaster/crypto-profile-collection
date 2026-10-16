@@ -10,10 +10,18 @@
 | B 美股撞名 | 裸/单字符 ticker（SHY/V/C/M）在金融稿中必须**不**连 |
 | C 强信号召回 | 有 quote 后缀 / 标题含符号者必须连 |
 | D 门禁不破 | 交易所名、信源名、"代币化" 不得点亮歧义 gate |
+| E 项目名通道 | 「标题项目方名 → 代币」是**弱信号**：泛词/地理词/名称不对应必须**不**连；
+真项目名（完全同名 或 `X + 组织词`）必须连 |
 
 用法：
     python tests/test_attr_guards.py          # 需可连 prod（只读）
 退出码 0 = 全绿；1 = 有失败用例。
+
+已知残余（P3-C-B3 记录，未纳入断言，避免用"未知"污染回归基线）：
+  · `Cafe de Coral Group` → `CORAL`（"Coral" 是港式快餐品牌词，非项目名）
+  · `Alibaba Group Holding` → `BABA`（rank=NULL 资产，经 `map_pairs_to_asset_ids`
+    的 canonical_symbol 兜底路径进入 —— 该路径**不能**加 rank 约束，
+    否则新上市无排名的真币（如 MARSCOIN）会全军覆没）
 """
 from __future__ import annotations
 
@@ -79,6 +87,24 @@ CASES: list[tuple[list[str], str, str, object]] = [
     (["SNPSUSDT"], "Bitget 已上线 SNPS（Synopsys）股票永续合约", "", EMPTY),
     (["SNPSUSDT"], "Foresight News 消息，据 Cointelegraph 报道，Synopsys 发布财报", "", EMPTY),
     (["SNPSUSDT"], "SNPS 代币已上线链上交易所并开放质押", "", {"SNPS"}),
+    # ── E 项目名通道（弱信号：泛词/地理词/名称不对应 必须拦）──
+    # 泛词（地理/国别）—— 实测 cid 149/870
+    ([], "Millennium Management is suing a Dymon Asia Capital employee in Hong Kong court", "", EMPTY),
+    ([], "Japan Finance Minister Satsuki Katayama said the government has maintained the stance", "", EMPTY),
+    # 泛词（产品/描述）—— 实测 cid 58/81/218
+    ([], "Binance Liquid Swap Upgrades Pool Prices WebSocket", "", EMPTY),
+    ([], "SimpleSwap said its fixed-rate exchanges have run inside the Exodus wallet for over a year", "", EMPTY),
+    # 符号对应过松（symbol 命中但资产名不以该词开头）—— 实测 cid 1111/1396
+    ([], "SlowMist said it detected two attackers on the BSC chain copying the method used", "", EMPTY),
+    ([], "Ant Group's Afu app has reached 150 million users, with daily consultations near", "", EMPTY),
+    # 名称完全不对应（既非同名、也非「词+组织词」）—— 实测 cid 490/1608
+    ([], "UBS Group AG completed its debut Chinese domestic bond sale this week", "", EMPTY),
+    ([], "According to Jin10, the OpenAI Foundation invested $60 million in artificial intelligence", "", EMPTY),
+    # 真项目名必须放行：完全同名 / 候选词+组织词
+    ([], "RWA tokenization issuance and management platform Realio Network was attacked on September 20", "", {"RIO"}),
+    ([], "TRON network Super Representatives have launched a vote on mainnet Committee Proposal", "", {"TRX"}),
+    ([], "Liqi Digital Assets and XDC Network have renewed their partnership with a target of", "", {"XDC"}),
+    ([], "Spark said it will close its SparkLend lending protocol on Gnosis Chain on September 30", "", {"GNO"}),
 ]
 
 

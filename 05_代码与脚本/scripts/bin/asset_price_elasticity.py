@@ -16,7 +16,8 @@
 4. **对 BTC 敏感度**：最近 90 交易日的日收益对 BTC 回归 beta。
 
 综合输出**弹性评级**（高/中高/低/负/样本不足/无数据）+ **弹性分 0-100**，
-并给出**分事件类型弹性**（哪类消息对它有效、哪类无效）。
+并给出**分事件类型弹性**（哪类消息对它有效）与**分影响强度弹性**（strong/medium/weak/
+unknown，哪一档消息对它有效——避免 AMA/转发等弱噪音事件拉高事件数造成误判）。
 
 用法
 ----
@@ -67,14 +68,24 @@ WITH ranked AS (
            co.excess_24h, co.excess_72h, co.excess_7d,
            co.hit_72h, co.max_gain_24h, co.max_drawdown_24h,
            COALESCE(ac.ai_event_type, ac.rule_event_type, 'other') AS et,
+           CASE cis.s WHEN 3 THEN 'strong' WHEN 2 THEN 'medium'
+                      WHEN 1 THEN 'weak'   ELSE 'unknown' END AS strength,
            ROW_NUMBER() OVER (PARTITION BY co.asset_id, co.base_time
                               ORDER BY ac.catalyst_id) AS rn
     FROM biz.catalyst_outcome co
     JOIN biz.asset_catalyst ac ON ac.catalyst_id = co.catalyst_id
+    LEFT JOIN (
+        -- 按 catalyst_id 聚合（impact.asset_id 与 outcome.asset_id 不同源，故不可按 asset_id 联；
+        -- 而 strength 仅由 event_type 决定、与 asset 无关，聚合后取最强档即可，且无 fan-out）
+        SELECT catalyst_id,
+               MAX(CASE impact_strength WHEN 'strong' THEN 3 WHEN 'medium' THEN 2
+                                        WHEN 'weak'   THEN 1 ELSE 0 END) AS s
+        FROM biz.catalyst_impact GROUP BY catalyst_id
+    ) cis ON cis.catalyst_id = co.catalyst_id
     WHERE co.data_tier = 'L1' AND co.excess_72h IS NOT NULL
 )
 SELECT asset_id, base_time, excess_24h, excess_72h, excess_7d,
-       hit_72h, max_gain_24h, max_drawdown_24h, et
+       hit_72h, max_gain_24h, max_drawdown_24h, et, strength
 FROM ranked WHERE rn = 1
 """
 
@@ -182,6 +193,7 @@ def event_elasticity(target_rows, day_med24, day_med72, day_med7) -> dict:
             "gain": float(r[6]) if r[6] is not None else None,
             "dd": float(r[7]) if r[7] is not None else None,
             "et": r[8] or "other",
+            "strength": (r[9] if len(r) > 9 and r[9] else "unknown"),
             "date": d,
         })
     n = len(evs)
@@ -227,6 +239,26 @@ def event_elasticity(target_rows, day_med24, day_med72, day_med7) -> dict:
     out["by_event_type"] = {
         k: {"n": len(v), "ar72_mean": round(sum(v) / len(v), 2)}
         for k, v in sorted(by.items(), key=lambda x: -len(x[1])) if len(v) >= 3
+    }
+
+    # 分影响强度（SKILL-HC-001，依赖 biz.catalyst_impact.impact_strength）：
+    #   strong=高影响（主网/协议升级/大所上新/大额融资/法案/代币机制变更）
+    #   medium=中影响（重要合作/grant/跨链集成）／weak=低影响（推文/AMA/次要合作）／unknown=未分级
+    #   ⇒ 回答"哪一档消息对它有效"，避免弱噪音事件拉高事件数造成误判
+    bi, bh = defaultdict(list), defaultdict(list)
+    for e in evs:
+        bi[e["strength"]].append(e["ar72"])
+        if e["hit"] is not None:
+            bh[e["strength"]].append(e["hit"])
+    out["by_impact"] = {
+        k: {
+            "n": len(v),
+            "ar72_mean": round(sum(v) / len(v), 2),
+            "hit_rate": (round(sum(1 for h in bh[k] if h) / len(bh[k]), 4)
+                         if bh.get(k) else None),
+            "insufficient": len(v) < MIN_N,
+        }
+        for k, v in sorted(bi.items(), key=lambda x: -len(x[1]))
     }
     return out
 
@@ -385,13 +417,13 @@ def persist(conn, asset, as_of: date, ev: dict) -> str:
             ar_24h_mean, ar_72h_mean, ar_72h_median, ar_7d_mean, hit_rate, hit_z,
             upside_mean_24h, downside_mean_24h, asym_ratio,
             rs_7d, rs_30d, rs_90d, beta_btc, rs_source,
-            elasticity_grade, elasticity_score, by_event_type, updated_at
+            elasticity_grade, elasticity_score, by_event_type, by_impact, updated_at
         ) VALUES (
             %s,%s,%s, %s,%s,%s,%s,%s,
             %s,%s,%s,%s,%s,%s,
             %s,%s,%s,
             %s,%s,%s,%s,%s,
-            %s,%s,%s, NOW()
+            %s,%s,%s,%s, NOW()
         )
         ON CONFLICT (asset_id, as_of) DO UPDATE SET
             method_version = EXCLUDED.method_version,
@@ -406,7 +438,8 @@ def persist(conn, asset, as_of: date, ev: dict) -> str:
             beta_btc = EXCLUDED.beta_btc, rs_source = EXCLUDED.rs_source,
             elasticity_grade = EXCLUDED.elasticity_grade,
             elasticity_score = EXCLUDED.elasticity_score,
-            by_event_type = EXCLUDED.by_event_type, updated_at = NOW()
+            by_event_type = EXCLUDED.by_event_type,
+            by_impact = EXCLUDED.by_impact, updated_at = NOW()
     """, (
         asset["asset_id"], as_of, METHOD_VERSION,
         ev.get("event_from"), ev.get("event_to"), ev.get("n_events"),
@@ -418,6 +451,7 @@ def persist(conn, asset, as_of: date, ev: dict) -> str:
         ev.get("rs_source"),
         ev.get("elasticity_grade"), ev.get("elasticity_score"),
         json.dumps(ev.get("by_event_type") or {}, ensure_ascii=False),
+        json.dumps(ev.get("by_impact") or {}, ensure_ascii=False),
     ))
     return f"asset_id={asset['asset_id']} as_of={as_of}"
 
@@ -558,6 +592,14 @@ def render_console(asset, as_of, ev):
         print("  分事件类型弹性(AR72, n≥3):")
         for k, v in list(bt.items())[:12]:
             print(f"    {k:<22} n={v['n']:<4} {v['ar72_mean']:+.2f}%")
+    bi = ev.get("by_impact") or {}
+    if bi:
+        label = {"strong": "高影响", "medium": "中影响", "weak": "低影响", "unknown": "未分级"}
+        print("  分影响强度弹性(AR72):")
+        for k, v in bi.items():
+            hr = f"{round(v['hit_rate']*100)}%" if v.get("hit_rate") is not None else "-"
+            flag = " ⚠样本不足" if v.get("insufficient") else ""
+            print(f"    {label.get(k, k):<8} n={v['n']:<4} {v['ar72_mean']:+.2f}%  命中{hr}{flag}")
 
 
 def render_md(asset, as_of, ev):
@@ -585,6 +627,15 @@ def render_md(asset, as_of, ev):
                   "| 事件类型 | n | AR72 均值 |", "|---|---|---|"]
         for k, v in list(bt.items())[:12]:
             lines.append(f"| {k} | {v['n']} | {v['ar72_mean']:+.2f}% |")
+    bi = ev.get("by_impact") or {}
+    if bi:
+        label = {"strong": "高影响", "medium": "中影响", "weak": "低影响", "unknown": "未分级"}
+        lines += ["", "**分影响强度弹性（AR_72h 均值）**", "",
+                  "| 影响强度 | n | AR72 均值 | 命中率 | 备注 |", "|---|---:|---:|---:|---|"]
+        for k, v in bi.items():
+            hr = f"{round(v['hit_rate']*100)}%" if v.get("hit_rate") is not None else "-"
+            note = "⚠样本不足(n<10)" if v.get("insufficient") else ""
+            lines.append(f"| {label.get(k, k)} | {v['n']} | {v['ar72_mean']:+.2f}% | {hr} | {note} |")
     lines += ["", "> 局限: 事件源为币安广场 KOL 新闻流 + 交易所公告（非项目基本面催化，含同名/批次归因噪音）；"
               "样本期随库内数据滚动，弹性能否外推需谨慎。", ""]
     return "\n".join(lines)

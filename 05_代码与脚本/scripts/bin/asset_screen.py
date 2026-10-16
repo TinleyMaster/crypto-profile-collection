@@ -14,6 +14,9 @@
 2. **双确认（弹性 × 资金流）**
    ★双确认（高弹性+资金流入）｜ ⚠背离（高弹性+资金流出）
 3. **综合榜**：同时满足 高弹性 & 资金流≥中性 & 解锁非崩 的标的
+4. **★ 高确定性预筛**（SKILL-HC-001，与 MV fix_110 `hc_prefilter` 同口径）：
+   统计有效（弹性 n≥10 / 解锁 n≥5）+ 高弹性 + 资金流入 + 解锁非崩 + 无 CMC 大额解锁。
+   ⚠️ **仅预筛**：报告层仍须叠加「无高危负向标签 + 因子冲突矩阵无强冲突」终判（铁律 #14）。
 
 用法
 ----
@@ -111,8 +114,33 @@ def main() -> int:
     double_confirm.sort(key=lambda x: -(x["flow_score"] or 0))
     divergence.sort(key=lambda x: (x["flow_score"] or 100))
 
+    # ── ★ 高确定性预筛（SKILL-HC-001；与 MV fix_110 hc_prefilter 严格同口径）──────
+    #   统计有效（弹性 n≥10 且 解锁 n≥5）+ 高弹性 + 资金流入 + 解锁非崩 + 无 CMC 大额解锁
+    #   ⚠️ 仅预筛：报告层仍须终判「无高危风险标签 + 因子冲突矩阵无强冲突」（铁律 #14）
+    def _hc(x):
+        if (x["e_n"] or 0) < 10 or (x["u_n"] or 0) < 5:
+            return False
+        if x["e_grade"] not in E_HI:
+            return False
+        if x["flow_grade"] != "资金流入":
+            return False
+        if x["u_grade"] in U_DN:
+            return False
+        if x["cmc_pct"] is not None and x["cmc_pct"] >= 5:
+            return False
+        return True
+
+    hc_pool = sorted([x for x in rows if _hc(x)],
+                     key=lambda x: -(x["e_score"] or 0))
+    # 因样本不足被剔除的"名义高弹性"标的（供人工判断是否降级为观察）
+    hc_small = sorted([x for x in rows
+                       if x["e_grade"] in E_HI and not _hc(x)
+                       and ((x["e_n"] or 0) < 10 or (x["u_n"] or 0) < 5)],
+                      key=lambda x: -(x["e_score"] or 0))
+
     if args.json:
-        print(json.dumps({"quadrant": {k: quad[k] for k in quad},
+        print(json.dumps({"hc_prefilter": hc_pool, "hc_small_sample": hc_small,
+                          "quadrant": {k: quad[k] for k in quad},
                           "double_confirm": double_confirm, "divergence": divergence},
                          ensure_ascii=False, indent=2, default=str))
         return 0
@@ -148,6 +176,15 @@ def main() -> int:
                      f"| {x['next_unlock_beneficiary'] or '-'} "
                      f"| {cmc_cell} "
                      f"| {f2(x['flow_score'], '', sign=False)} | {x['flow_grade'] or '-'} |")
+        L.append("")
+
+    tbl("★ 高确定性预筛（统计有效 + 双确认 + 解锁非崩 + 无大额解锁）", hc_pool,
+        "SKILL-HC-001 预筛：弹性 n≥10 且 解锁 n≥5 统计有效 + 高弹性 + 资金流入 + 解锁非崩 "
+        "+ 无 CMC 大额解锁（≥5%）；⚠️ 仅预筛，报告层仍须终判风险标签与因子冲突（铁律 #14）")
+    if hc_small:
+        L.append(f"> ⚠ 另有 {len(hc_small)} 个高弹性标的因**样本不足**（弹性 n<10 或 解锁 n<5）"
+                 f"未入预筛：{', '.join(str(x['sym']) for x in hc_small[:15])}"
+                 f"{' …' if len(hc_small) > 15 else ''}")
         L.append("")
 
     tbl("★ 象限一：理想（高弹性 + 抗解禁）", quad["ideal"],

@@ -77,6 +77,7 @@ def _predict_with_linker(gold: list[dict]) -> dict[int, list[int]]:
 
 def _evaluate(gold: list[dict], pred: dict[int, list[int]], bucket: str | None) -> dict:
     per = defaultdict(lambda: {"tp": 0, "fp": 0, "fn": 0, "n": 0, "neg": 0, "neg_ok": 0})
+    errs: list[dict] = []
     skipped = 0
     for g in gold:
         lab = g.get("label")
@@ -97,11 +98,21 @@ def _evaluate(gold: list[dict], pred: dict[int, list[int]], bucket: str | None) 
                 per[b]["neg_ok"] += 1
             else:
                 per[b]["fp"] += len(p_set)
+                errs.append({"cid": g["cid"], "bucket": b, "kind": "neg_fp",
+                             "pred": sorted(p_set), "label": [], "title": (g.get("title") or "")[:90]})
             continue
         g_set = set(int(x) for x in lab)
         tp = len(g_set & p_set)
         fp = len(p_set - g_set)
         fn = len(g_set - p_set)
+        if fp:
+            errs.append({"cid": g["cid"], "bucket": b, "kind": "fp",
+                         "pred": sorted(p_set - g_set), "label": sorted(g_set),
+                         "title": (g.get("title") or "")[:90]})
+        if fn:
+            errs.append({"cid": g["cid"], "bucket": b, "kind": "fn",
+                         "pred": sorted(p_set), "label": sorted(g_set - p_set),
+                         "title": (g.get("title") or "")[:90]})
         per[b]["tp"] += tp
         per[b]["fp"] += fp
         per[b]["fn"] += fn
@@ -127,6 +138,7 @@ def _evaluate(gold: list[dict], pred: dict[int, list[int]], bucket: str | None) 
                 "neg": v["neg"], "neg_ok": v["neg_ok"]}
             for k, v in sorted(per.items())
         },
+        "errors": errs,
     }
 
 
@@ -138,6 +150,7 @@ def main() -> int:
     ap.add_argument("--predict", action="store_true", help="用当前 linker 生成 baseline 预测")
     ap.add_argument("--bucket", default=None, help="只评某一桶")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--show-errors", action="store_true", help="逐条打印 FP/FN/负样本误连")
     args = ap.parse_args()
 
     gold = _load_jsonl(Path(args.gold))
@@ -166,6 +179,12 @@ def main() -> int:
         print(f"  {k:<14} n={v['n']:<4} TP={v['tp']:<4} FP={v['fp']:<4} FN={v['fn']:<4} "
               f"neg={v['neg']}/{v['neg_ok']}")
     print("=" * 62)
+    if args.show_errors:
+        for e in res.get("errors") or []:
+            print(f"  [{e['kind']:<6}] cid={e['cid']:<6} {e['bucket']:<13} "
+                  f"pred={e['pred']} label={e['label']}")
+            print(f"           {e['title']}")
+        print("=" * 62)
     return 0
 
 

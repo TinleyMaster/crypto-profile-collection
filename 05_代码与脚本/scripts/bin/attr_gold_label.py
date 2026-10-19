@@ -149,8 +149,20 @@ def main() -> int:
                 r["label_source"] = "ai_review"
                 r["confidence"] = "high"
                 r["needs_review"] = False
-                r["hint"] = "人工判读：股票 ticker 撞名，非加密"
+                r["hint"] = "人工判读：非加密事件 / 无可归属加密资产"
                 stats["neg_explicit"] += 1
+                continue
+
+            # 3.5) 幂等保护：已定标（ai_review）且已解析出标签的行不重判。
+            #      否则二次运行时它会掉进 step 4/5，被「默认归负」覆盖成负样本
+            #      —— 这正是 2026-10-19 复核实测到的破坏性行为（正样本 30 → 17）。
+            if (
+                r.get("label_source") == "ai_review"
+                and isinstance(r.get("label"), list)
+                and r["label"]
+            ):
+                r["needs_review"] = False
+                stats["keep_labeled"] += 1
                 continue
 
             # 4) 既有 auto 标签 → 按严格口径重解析（统一标签口径）

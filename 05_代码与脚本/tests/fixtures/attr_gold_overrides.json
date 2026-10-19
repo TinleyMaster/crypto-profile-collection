@@ -1,6 +1,7 @@
 {
-  "_comment": "P3-B 半自动定标：人工判读覆盖表。pos=判读为真加密事件（给 ticker）；review=存疑/不可解析（评测跳过）。其余未命中行由 attr_gold_label.py 按桶默认归负，并逐条打印供复核。",
+  "_comment": "P3-B 半自动定标：人工判读覆盖表。pos=判读为真加密事件（给 ticker）；review=存疑/不可解析（评测跳过）；neg=显式负样本。其余未命中行由 attr_gold_label.py 按桶默认归负，并逐条打印供复核。",
   "_note_why": "桶标签（crypto_gap 等）基于 core.asset 的 symbol 匹配，而 symbol 撞名普遍（SHY→Shytoshi Kusama、NEX→Nexus），故桶不可信，须按正文重判。",
+  "_note_rule": "2026-10-19 复核定 19 条存疑：判准＝『事件主体是否就是该资产（或其发行方/核心开发方）』。生态第三方新闻（如 Solana 上的 Imperial 融资、WalletConnect 支持 TRON）不算该链事件。",
   "pos": {
     "31411": ["W"],
     "33714": ["W"],
@@ -11,33 +12,33 @@
     "35957": ["PUFFER"],
     "21875": ["SOL"],
     "21862": ["SOL"],
-    "19112": ["CT"]
+    "19112": ["CT"],
+    "8023": ["2Z"],
+    "13304": ["BTC", "ETH"],
+    "13977": ["DRV"],
+    "17398": ["FLIP"],
+    "28091": ["POLYX"],
+    "31713": ["POLYX"],
+    "35209": ["STRK"]
   },
   "review": {
-    "716": "FundPark 资产证券化融资，未出现可交易加密资产",
     "16322": "正文缺失（title=null），无法判读",
     "30301": "正文缺失（'null 概述'），无法判读",
-    "35186": "SkyAI(纳斯达克)与 SOLUSDT 共存，是否构成 SOL 事件存疑",
-    "35304": "同 35186：SkyAI 股东争议 + SOLUSDT",
-    "13304": "比特币/以太坊现货 ETF 净流入，可争议标 BTC/ETH",
-    "28091": "TruGolf 收购 Layer1 区块链 Polymesh，可争议标 POLYX",
-    "31713": "同 28091：TruGolf 收购 Polymesh",
-    "37868": "Delisting of BOBBOBUSDT，base 资产在 core.asset 不可解析",
-    "29337": "Bithumb 上线 XDP 韩元交易对，XDP 对应资产无 rank，不可解析",
-    "6372": "NGI+ 被 AssetoFinance 代币化，标的资产不可解析",
-    "17941": "WalletConnect Pay 支持 TRON 链 USDT，是否构成 TRX 事件存疑",
-    "13977": "Derive 协议 DRV 回购提案，可争议标 DRV",
-    "17398": "Bitget 被盗资金经 Chainflip 转移，可争议标 FLIP",
-    "25472": "Solana 上永续平台 Imperial 融资，是否构成 SOL 事件存疑",
-    "33188": "Cardano Card 加密支付卡，可争议标 ADA",
-    "8023": "DoubleZero 上新 Kalshi 市场，可争议标 2Z",
-    "35209": "StarkWare 开放 OffMarket 服务，可争议标 STRK",
-    "20006": "Open Standard 稳定币联盟（pairs 为 V/COIN/SHOP 股票永续），无具体加密标的"
+    "29337": "Bithumb 上线 XDP 韩元交易对；资产存在（id=26496 Doppler Finance）但 market_cap_rank=NULL，严格解析失败"
   },
   "neg": {
     "29937": "B3＝巴西证券交易所（B3），非加密（符号撞名）",
     "7967": "ACN＝埃森哲 Accenture（股票），非加密（符号撞名）",
     "35116": "SHY＝iShares 1-3年美债 ETF，非加密（撞名 Shytoshi Kusama）",
-    "18022": "C＝花旗 Citigroup（股票），非加密（符号撞名）"
+    "18022": "C＝花旗 Citigroup（股票），非加密（符号撞名）",
+    "716": "FundPark 资产证券化融资，全文无可交易加密资产（CUSDT 是 Citigroup 股票永续）",
+    "6372": "NGI+ 被 AssetoFinance 代币化，RWA 基金份额，core.asset 无可交易标的",
+    "17941": "WalletConnect Pay 集成 TRON 链 USDT，属支付方产品集成，非 TRX 事件",
+    "20006": "Open Standard 稳定币联盟，pairs 为 V/COIN/SHOP 股票永续，无具体加密标的",
+    "25472": "Solana 上第三方永续平台 Imperial 融资，属生态新闻，非 SOL 事件",
+    "33188": "Cardano Card 为第三方加密支付卡，非 ADA 发行方事件",
+    "35186": "SkyAI（Nasdaq: SKYA）股东争议，SOLUSDT 为 pairs 回响，非 SOL 事件",
+    "35304": "同 35186：SkyAI 股东争议，SOLUSDT 为 pairs 回响",
+    "37868": "Delisting of BOBBOBUSDT，base 资产在 core.asset 不可解析（无该标的）"
   }
 }

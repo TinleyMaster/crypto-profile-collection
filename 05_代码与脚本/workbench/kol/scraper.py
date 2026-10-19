@@ -244,10 +244,10 @@ class BinanceSquareScraper(BaseScraper):
                         seen_ids.add(post.platform_post_id)
                         posts.append(post)
 
-                # 判断是否还有下一页
-                if not resp_data.get("isExistSecondPage", False):
-                    break
-
+                # 判断是否还有下一页：
+                #   1) timeOffset 变化了 → 有下一页，继续
+                #   2) timeOffset 没变或没给 → 到底了，停
+                #   （isExistSecondPage 现已恒为 None，币安废弃此字段，不再依赖）
                 next_offset = resp_data.get("timeOffset")
                 if not next_offset or str(next_offset) == time_offset:
                     break
@@ -532,9 +532,7 @@ class BinanceSquareScraper(BaseScraper):
                         "square_uid": str(square_uid) if square_uid else "",
                     }
 
-                # 翻页
-                if not data.get("data", {}).get("isExistSecondPage", False):
-                    break
+                # 翻页（isExistSecondPage 现已恒为 None，仅靠 timeOffset 变化判断）
                 next_offset = data.get("data", {}).get("timeOffset")
                 if not next_offset or str(next_offset) == time_offset:
                     break

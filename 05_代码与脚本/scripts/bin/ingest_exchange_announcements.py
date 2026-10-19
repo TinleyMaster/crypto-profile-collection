@@ -59,26 +59,27 @@ def main() -> int:
     print("=" * 60, flush=True)
     print("外部交易所公告摄入（OKX / Bitget / Bybit）", flush=True)
     print("=" * 60, flush=True)
-    print(f"{'源':<24} {'抓取':>6} {'新增':>6} {'合并':>6} {'跳过':>6}  错误", flush=True)
-    print("-" * 70, flush=True)
+    print(f"{'源':<24} {'抓取':>6} {'新增':>6} {'合并':>6} {'跳过':>6} {'分离':>6}  错误", flush=True)
+    print("-" * 78, flush=True)
 
-    total_fetched = total_inserted = total_errors = 0
+    total_fetched = total_inserted = total_errors = total_rejected = 0
     for code in SOURCES:
         r = run_source(code, max_pages=args.max_pages)
         print(
             f"{r['source_code']:<24} {r['fetched']:>6} {r['inserted']:>6} "
-            f"{r['merged']:>6} {r['skipped']:>6}  {r['error']}",
+            f"{r['merged']:>6} {r['skipped']:>6} {r.get('rejected', 0):>6}  {r['error']}",
             flush=True,
         )
         total_fetched += r["fetched"]
         total_inserted += r["inserted"]
+        total_rejected += r.get("rejected", 0)
         if r["error"]:
             total_errors += 1
 
     print(flush=True)
     print(
         f"总计: 抓取 {total_fetched} 条, 新增 {total_inserted} 条, "
-        f"错误源 {total_errors}/{len(SOURCES)}",
+        f"代币化股票分离 {total_rejected} 条, 错误源 {total_errors}/{len(SOURCES)}",
         flush=True,
     )
     # 所有源都报错才算失败（部分源失败但有数据仍算成功）

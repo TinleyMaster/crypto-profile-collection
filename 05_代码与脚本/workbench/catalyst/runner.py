@@ -52,6 +52,7 @@ def run_source(
         "inserted": 0,
         "merged": 0,
         "skipped": 0,
+        "rejected": 0,          # 代币化股票/TradFi 被剔除并落分离表的条数
         "error": "",
     }
 
@@ -68,6 +69,7 @@ def run_source(
 
             with source_cls(**source_kwargs) as source:
                 items = source.fetch(since_ts=since_ts)
+                stats["rejected"] = getattr(source, "rejected_saved", 0)
 
             stats["fetched"] = len(items)
 

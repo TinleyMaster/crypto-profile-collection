@@ -28,12 +28,14 @@ import os
 import re
 import socket
 import time
+from datetime import datetime, timezone
 from typing import ClassVar
 
 import requests
 
 from ..base import BaseCatalystSource
 from ..models import CatalystItem
+from ..tokenized import classify_title, build_row as build_tokenized_row
 
 logger = logging.getLogger(__name__)
 
@@ -52,20 +54,9 @@ _BACKOFF_BASE = 1.5
 # Bybit「SNPSUSDT on Bybit TradFi Perpetual」—— 全是代币化美股/商品，非加密币。
 # 追加 `equity`：OKX 大量「XXX Equity X-Perps」（TQQQ/NFLX/US100/EWZ/UNITREE…）为
 # **代币化股票永续**，实测近 14 天该栏目 7 条里 6 条属此类，不加会把股票灌进加密库。
-_NON_CRYPTO_RE = re.compile(
-    r"tradfi|tokeni[sz]ed\s+stocks?|pre[-\s]?ipo|stock\s+perps?"
-    r"|xstocks?|bstocks?|robinhood\s+token|backpack\s+securities"
-    r"|commodit|forex|cfds?\b|metals?\b|crude\s+oil|brent\b|natural\s+gas"
-    r"|nasdaq|nyse|\bnyse\b|\betf\s+share"
-    r"|equity|equities",
-    re.IGNORECASE,
-)
-
-# 「一包多个 2–6 位代码」= 交易所把代币化股票/ETF 打包上新
-# （实测 OKX「to list perpetual futures for H100, ACN, NKE, BWET and SECZ」——
-# 全为美股；而加密币上新是单币句「for DNA crypto」或 `XXX/USDT`，绝不会这样打包）。
-# 单独成式、**不**带 IGNORECASE，避免命中普通英文句子（"for the new, and…"）。
-_EQ_BUNDLE_RE = re.compile(r"\bfor\s+[A-Z0-9]{2,6}(?:\s*,\s*[A-Z0-9]{2,6}){2,}")
+#
+# 规则已上收到 `catalyst.tokenized`（单一真相：判定 + 分类标签 + 分离存储同源）。
+# 这里只保留布尔接口，**命中集合与原正则逐字等价**（见 tests/test_tokenized_split.py）。
 
 # ── symbol 提取 ───────────────────────────────────────────────────────
 # ① 直接交易对：SNPSUSDT / FASTRETAILINGUSDT
@@ -111,9 +102,8 @@ _SYMBOL_STOPWORDS = frozenset({
 
 
 def is_crypto_announcement(title: str) -> bool:
-    """标题是否为「加密」公告（False = TradFi/代币化股票等，应剔除）。"""
-    t = title or ""
-    return not (_NON_CRYPTO_RE.search(t) or _EQ_BUNDLE_RE.search(t))
+    """标题是否为「加密」公告（False = TradFi/代币化股票/一包美股等，应剔除）。"""
+    return classify_title(title or "") is None
 
 
 # 营销活动过滤：交易所把「上新配套活动」也塞进 listing 栏目
@@ -230,6 +220,9 @@ class ExchangeAnnouncementSource(BaseCatalystSource):
         self._session: requests.Session | None = None
         self._proxy: str | None = None          # 首个请求时惰性决定
         self._proxy_probed = False
+        # 被代币化股票/TradFi 闸门剔除的条目（分离存储用）
+        self.rejected: list[dict] = []
+        self.rejected_saved = 0
 
     # ── HTTP ─────────────────────────────────────────────────────────
     @property
@@ -324,7 +317,28 @@ class ExchangeAnnouncementSource(BaseCatalystSource):
                 time.sleep(self.request_interval)
 
         logger.info("%s: fetched %d items (since=%s)", self.source_code, len(items), since_ts)
+        self._flush_rejected()
         return items
+
+    def _flush_rejected(self) -> None:
+        """把被剔除的代币化股票公告落分离表（best-effort，独立连接）。
+
+        为什么用独立连接：`fetch()` 由 `runner.run_source` 在 `with get_conn()` 事务内调用，
+        复用同一连接一旦出错（rollback）会连累尚未提交的加密主链路 upsert。
+        """
+        if not self.rejected:
+            return
+        rows, self.rejected = self.rejected, []
+        try:
+            from ..db import get_conn
+            from .. import tokenized
+
+            with get_conn() as conn:
+                self.rejected_saved = tokenized.persist(conn, rows)
+            logger.info("%s: 代币化股票/TradFi 分离存储 %d 条",
+                        self.source_code, self.rejected_saved)
+        except Exception as e:                              # noqa: BLE001
+            logger.warning("%s: 分离存储失败（不影响主链路）：%s", self.source_code, e)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self._session:
@@ -342,13 +356,44 @@ def build_item(
     event_category: str = "Exchange Announcement",
     event_subcategory: str = "",
     raw: dict | None = None,
+    sink: list[dict] | None = None,
 ) -> CatalystItem | None:
     """由公告原始字段构造 CatalystItem（统一 symbol→pairs + 非加密/营销过滤）。
 
-    返回 None 表示该条被过滤（非加密公告 / 营销活动 / 无发布时间）。
+    Args:
+        sink: 可选。被**代币化股票/TradFi 闸门**剔除的条目会以结构化 dict 追加进来，
+              由 `ExchangeAnnouncementSource` 统一落 `biz.catalyst_tokenized_stock`
+              （分离存储，不进加密投研链路）。营销/批量下架不记录（无投研价值）。
+
+    Returns:
+        None 表示该条被过滤。
     """
-    if not title or not is_crypto_announcement(title):
+    if not title:
         return None
+
+    # 代币化股票 / TradFi：剔除出加密链路，但**保留**到分离存储（女王大人 2026-10-19 指示）
+    verdict = classify_title(title)
+    if verdict is not None:
+        if sink is not None:
+            kind, label = verdict
+            try:
+                ts = float(published_ms) / 1000.0 if published_ms else None
+            except (TypeError, ValueError):
+                ts = None
+            sink.append(build_tokenized_row(
+                stage="source_filter",
+                source_code=source_code,
+                source_item_id=str(item_id or ""),
+                title=title.strip(),
+                published_at=datetime.fromtimestamp(ts, tz=timezone.utc) if ts and ts > 0 else None,
+                source_url=source_url,
+                symbols=extract_symbols(title),
+                asset_class=kind,
+                detect_reason=label,
+                raw=raw,
+            ))
+        return None
+
     if is_promo_announcement(title) or is_bulk_delist_announcement(title):
         return None
     try:

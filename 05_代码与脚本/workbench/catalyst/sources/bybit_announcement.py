@@ -50,6 +50,7 @@ class BybitAnnouncementSource(ExchangeAnnouncementSource):
                 source_url=url,
                 event_subcategory=type_info.get("title") or type_info.get("key") or "",
                 raw=row,
+                sink=self.rejected,
             )
             if item:
                 items.append(item)

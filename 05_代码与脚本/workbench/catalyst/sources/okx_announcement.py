@@ -49,6 +49,7 @@ class OKXAnnouncementSource(ExchangeAnnouncementSource):
                     source_url=url,
                     event_subcategory=det.get("annType") or "new-listing",
                     raw=det,
+                    sink=self.rejected,
                 )
                 if item:
                     items.append(item)

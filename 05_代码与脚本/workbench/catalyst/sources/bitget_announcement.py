@@ -56,6 +56,7 @@ class BitgetAnnouncementSource(ExchangeAnnouncementSource):
                 source_url=row.get("annUrl") or "",
                 event_subcategory=row.get("annSubType") or row.get("annType") or "",
                 raw=row,
+                sink=self.rejected,
             )
             if item:
                 items.append(item)

@@ -276,13 +276,14 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
             entry_price=None, leverage=lev,
             stop_loss_pct=p["SL"] * 100 if p.get("SL") else 0,
             take_profit_pct=p["TP"] * 100 if p.get("TP") else 0,
-            # 原生 TRAILING_STOP_MARKET（2026-10-13 重启，交易所侧即时兜底）：
-            #   callbackRate=TR%、activationPrice=入场价×1.05 —— 涨过 5% 才激活，
-            #   之后回调 TR% 由**交易所瞬间接住**（轮询式软件 TR 对 5 分钟级崩盘
+            # 原生 TRAILING_STOP_MARKET（交易所侧即时兜底）：
+            #   callbackRate=TR%，**入场即激活**（act=0，回测 PF 7.93 远优于 act=5% 的 0.88），
+            #   从持仓期最高价回调 TR% 由**交易所瞬间接住**（轮询式软件 TR 对 5 分钟级崩盘
             #   无能为力，DOSUSDT 21:45 一根 5m 崩 −65% 教训）。
             # 软件 _trail_check 仍保留负责回测对齐的慢速回撤出场；两者竞争先触发者胜。
             trailing_stop_pct=p["TR"] * 100 if p.get("TR") else 0,
-            trailing_activation_pct=BREAKEVEN_TRIGGER_PCT if p.get("TR") else 0,
+            trailing_activation_pct=0,   # 回测结论：act=0 入场即激活（PF 7.93）远优于 act=5%（PF 0.88）
+                                          # 涨过 5% 才激活的设计让"冲不到 5% 就掉头"的动量币全部亏损
         )
         order_id = r.get("orderId")
         # 全量留痕：开仓单原始响应（剔除内部下划线字段）+ 各保护单原始响应（含 orderId）

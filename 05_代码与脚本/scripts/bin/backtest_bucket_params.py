@@ -32,6 +32,7 @@ N_LIST = [6, 12, 24, 36, 48, 72, 96, 120, 144, 168]
 TP_LIST = [0.0, 0.05, 0.10, 0.20, 0.30, 0.50]
 SL_LIST = [0.0, 0.03, 0.05, 0.08, 0.10]
 TR_LIST = [0.03, 0.05, 0.08, 0.10, 0.15]
+ACT_LIST = [0.0, 0.03, 0.05, 0.08]   # 跟踪止盈激活阈值（峰值涨幅 ≥ act% 才激活 TR）
 LEV_LIST = [1, 3, 5]
 MIN_N = 30
 WORST_LIMIT = -0.15
@@ -87,14 +88,22 @@ def _vec_rows(rows):
     return out
 
 
-def _returns_vec(arr, direction, n, tp, sl, tr, cost=0.0):
-    """向量化单笔净收益（含成本）。"""
+def _returns_vec(arr, direction, n, tp, sl, tr, cost=0.0, act=0.0):
+    """向量化单笔净收益（含成本）。
+
+    act: 跟踪止盈激活阈值（峰值涨幅 ≥ act% 才激活 TR）。
+         act=0 等价于"入场即激活"（原行为）。仅对 TR 模式生效。
+    """
     entry = arr["entry"]
     cn = arr[f"c{n}"]
     valid = ~np.isnan(cn)
     if direction == 1:
         if tr is not None:
-            t_tp = arr[f"tr{int(tr*100)}"]
+            t_tp = arr[f"tr{int(tr*100)}"].copy()
+            # activation gate：峰值涨幅 < act% → TR 不激活
+            if act > 0:
+                peak_ratio = arr["px_peak"] / entry - 1   # 峰值相对入场的涨幅
+                t_tp = np.where(peak_ratio >= act, t_tp, np.nan)
         else:
             t_tp = np.full_like(entry, np.nan) if tp == 0 else arr[f"hp{int(tp*100)}"]
         t_sl = np.full_like(entry, np.nan) if sl == 0 else arr[f"sl{int(sl*100)}"]
@@ -109,6 +118,10 @@ def _returns_vec(arr, direction, n, tp, sl, tr, cost=0.0):
     if tr is not None:
         ph_at_tr = arr[f"ph_tr{int(tr * 100)}"]
         tp_val = ph_at_tr * (1 - tr) / entry - 1
+        # activation 过滤后 tp_val 也要置为 NaN（虽然 hit_tp 已处理，但保持一致）
+        if act > 0:
+            peak_ratio = arr["px_peak"] / entry - 1
+            tp_val = np.where(peak_ratio >= act, tp_val, np.nan)
     else:
         tp_val = tp
     ret = np.where(hit_tp, tp_val, np.where(hit_sl, -sl, ret_time))
@@ -153,20 +166,22 @@ def grid_bucket(arr, direction, cost=0.0, lev_list=None):
                     })
             # TRAIL 模式（仅做多）
             if direction == 1:
-                for tr in TR_LIST:
-                    ret = _returns_vec(arr, direction, n, 0, sl, tr, cost)
-                    for lev in lev_list:
-                        r = _apply_lev(ret, lev) if lev > 1 else ret
-                        rs = r[~np.isnan(r)]
-                        if len(rs) < MIN_N:
-                            continue
-                        trail_results.append({
-                            "mode": "TRAIL", "N": n, "TP": None, "TR": tr, "SL": sl, "lev": lev,
-                            "n": len(rs), "win": float((rs > 0).mean()),
-                            "mean": float(rs.mean()), "med": float(np.median(rs)),
-                            "pf": float((rs[rs > 0].sum() + 1e-12) / (abs(rs[rs <= 0].sum()) + 1e-12)),
-                            "worst": float(np.nanmin(rs)),
-                        })
+                for act in ACT_LIST:
+                    for tr in TR_LIST:
+                        ret = _returns_vec(arr, direction, n, 0, sl, tr, cost, act=act)
+                        for lev in lev_list:
+                            r = _apply_lev(ret, lev) if lev > 1 else ret
+                            rs = r[~np.isnan(r)]
+                            if len(rs) < MIN_N:
+                                continue
+                            trail_results.append({
+                                "mode": "TRAIL", "N": n, "TP": None, "TR": tr, "SL": sl,
+                                "lev": lev, "ACT": act,
+                                "n": len(rs), "win": float((rs > 0).mean()),
+                                "mean": float(rs.mean()), "med": float(np.median(rs)),
+                                "pf": float((rs[rs > 0].sum() + 1e-12) / (abs(rs[rs <= 0].sum()) + 1e-12)),
+                                "worst": float(np.nanmin(rs)),
+                            })
 
     def _best(results):
         safe = [g for g in results if g["worst"] >= WORST_LIMIT]
@@ -205,10 +220,10 @@ def main() -> int:
 
             if direction == 1 and trail_top:
                 print(f"\n  --- TRAIL 模式 TOP5 ---")
-                print(f"  {'N(h)':>5} {'TR%':>5} {'SL%':>5} {'Lev':>4} | "
+                print(f"  {'N(h)':>5} {'ACT%':>5} {'TR%':>5} {'SL%':>5} {'Lev':>4} | "
                       f"{'n':>6} {'胜%':>6} {'期望%':>8} {'中位%':>7} {'PF':>6} {'最差%':>7}")
                 for g in trail_top[:3]:
-                    print(f"  {g['N']:>5} {g['TR']*100:>5.0f} {g['SL']*100:>5.0f} {g['lev']:>4}x | "
+                    print(f"  {g['N']:>5} {g['ACT']*100:>5.0f} {g['TR']*100:>5.0f} {g['SL']*100:>5.0f} {g['lev']:>4}x | "
                           f"{g['n']:>6,} {g['win']*100:>6.1f} {g['mean']*100:>8.2f} "
                           f"{g['med']*100:>7.2f} {g['pf']:>6.2f} {g['worst']*100:>7.1f}")
                     all_rows.append({"bucket": bucket_name, "dir": dir_label, **g})
@@ -226,12 +241,13 @@ def main() -> int:
     # 写 CSV
     with out_csv.open("w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["bucket", "dir", "mode", "N_h", "TP_pct", "TR_pct", "SL_pct", "lev",
+        w.writerow(["bucket", "dir", "mode", "N_h", "TP_pct", "TR_pct", "ACT_pct", "SL_pct", "lev",
                      "n", "win", "mean", "med", "pf", "worst_pct"])
         for r in all_rows:
             w.writerow([r["bucket"], r["dir"], r["mode"], r["N"],
                          "" if r["TP"] is None else r["TP"] * 100,
                          "" if r["TR"] is None else r["TR"] * 100,
+                         "" if r.get("ACT") is None else r["ACT"] * 100,
                          r["SL"] * 100, r["lev"], r["n"],
                          round(r["win"], 4), round(r["mean"], 4),
                          round(r["med"], 4), round(r["pf"], 4), round(r["worst"], 4)])
@@ -239,9 +255,9 @@ def main() -> int:
     # 汇总表
     print(f"\n{'='*78}")
     print("== 各档位最优参数汇总（PF 降序，风险约束 ≥ -15%）==")
-    print(f"{'档位':>10} {'方向':>6} {'模式':>6} {'N(h)':>5} {'TP%':>5} {'TR%':>5} {'SL%':>5} {'Lev':>4} | "
+    print(f"{'档位':>10} {'方向':>6} {'模式':>6} {'N(h)':>5} {'ACT%':>5} {'TR%':>5} {'SL%':>5} {'Lev':>4} | "
           f"{'n':>6} {'胜%':>6} {'期望%':>8} {'PF':>6} {'最差%':>7}")
-    print("-" * 100)
+    print("-" * 110)
     for bucket_name, lo, hi in BUCKETS:
         for dir_label in ["LONG", "SHORT"]:
             best = [r for r in all_rows if r["bucket"] == bucket_name and r["dir"] == dir_label]
@@ -249,9 +265,9 @@ def main() -> int:
                 continue
             best.sort(key=lambda g: (g["pf"], g["win"]), reverse=True)
             g = best[0]
-            tp_s = f"{g['TP']*100:.0f}" if g["TP"] is not None else "-"
+            act_s = f"{g['ACT']*100:.0f}" if g.get("ACT") is not None else "-"
             tr_s = f"{g['TR']*100:.0f}" if g["TR"] is not None else "-"
-            print(f"{bucket_name:>10} {dir_label:>6} {g['mode']:>6} {g['N']:>5} {tp_s:>5} {tr_s:>5} "
+            print(f"{bucket_name:>10} {dir_label:>6} {g['mode']:>6} {g['N']:>5} {act_s:>5} {tr_s:>5} "
                   f"{g['SL']*100:>5.0f} {g['lev']:>4}x | "
                   f"{g['n']:>6,} {g['win']*100:>6.1f} {g['mean']*100:>8.2f} "
                   f"{g['pf']:>6.2f} {g['worst']*100:>7.1f}")

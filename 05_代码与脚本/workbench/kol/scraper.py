@@ -9,6 +9,7 @@ KOL 帖子抓取器。
 """
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -135,11 +136,39 @@ class BinanceSquareScraper(BaseScraper):
     # follower_count 缓存（username → count）
     _follower_cache: dict[str, int] = {}
 
+    # 本地代理兜底（与 catalyst/_exchange_announce.py 对齐）
+    _LOCAL_PROXY = "http://127.0.0.1:7890"
+
     def __init__(self, headless: bool = True):
         # headless 参数保留以兼容旧接口，API 模式无实际作用
         self.headless = headless
         self._session = requests.Session()
         self._session.headers.update(self._DEFAULT_HEADERS)
+        # 代理设置：优先环境变量 KOL_HTTP_PROXY / CATALYST_HTTP_PROXY，
+        # 其次探测本地 7890 端口，都没有则直连（容器内通常不需要代理）
+        proxy = self._resolve_proxy()
+        if proxy:
+            self._session.proxies = {"http": proxy, "https": proxy}
+            print(f"[KOL][scraper] 使用代理: {proxy}")
+
+    @classmethod
+    def _resolve_proxy(cls) -> str | None:
+        """惰性探测代理：环境变量 > 本地 7890 > 无。"""
+        env = os.environ.get("KOL_HTTP_PROXY") or os.environ.get("CATALYST_HTTP_PROXY")
+        if env and env.strip():
+            return env.strip()
+        # 探测本地代理端口
+        import socket
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1.0)
+            result = sock.connect_ex(("127.0.0.1", 7890))
+            sock.close()
+            if result == 0:
+                return cls._LOCAL_PROXY
+        except Exception:
+            pass
+        return None
 
     def __enter__(self):
         return self

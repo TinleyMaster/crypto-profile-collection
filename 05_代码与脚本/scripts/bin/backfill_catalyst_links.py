@@ -194,7 +194,9 @@ def main() -> int:
 
                 cid = cat["catalyst_id"]
                 asset_ids, link_source = link_catalyst(cat, conn)
-                old_ids = current_links(cid, conn)
+                # `--only-unlinked` 取的行**按定义**没有任何关联行（SQL 已 NOT EXISTS 过滤），
+                # 再查一次 `current_links` 纯属多一次远程往返（实测占总耗时 ~45%）。
+                old_ids = set() if args.only_unlinked else current_links(cid, conn)
                 new_ids = set(asset_ids)
                 gained = new_ids - old_ids
                 lost = old_ids - new_ids

@@ -37,12 +37,14 @@ from crypto_research.db.conn import get_connection  # noqa: E402
 # ── 交易参数（2026-10-06 细分档回测定稿，含 0.2% 成本）──────────────
 # SHORT_LONG = 短线做多（涨幅≥50%，TRAIL 3%，持仓 24h）
 # MID_LONG   = 中线做多（涨幅 20~50%，TRAIL 3%，持仓 168h）
-# TRAP_SHORT = 诱多做空（涨幅<5%，FIX 止盈 50% / 止损 10%，持仓 12h）
-# 实盘硬止损 -10% 作为黑天鹅保护（跟踪止盈 3% 先触发，硬止损兜底）
+# TRAP_SHORT = 诱多做空（涨幅<5%，FIX 止盈 50% / 止损 15%，持仓 12h）
+# 实盘硬止损 -15%（2026-10-19 从 10% 上调：回测 act=0+SL=15% PF=2~24 vs SL=10% PF=1.12，
+#   82k 样本中 SL=15% 出场占比<0.1%，与 SL=0 等价；DOSUSDT 级闪崩-65% 属极端长尾，
+#   168h 窗口内未出现过）
 PARAMS: dict[str, dict] = {
-    "SHORT_LONG": {"N": 24,  "TP": None, "TR": 0.03, "SL": 0.10},
-    "MID_LONG":   {"N": 168, "TP": None, "TR": 0.03, "SL": 0.10},
-    "TRAP_SHORT": {"N": 12,  "TP": 0.50, "TR": None, "SL": 0.10},
+    "SHORT_LONG": {"N": 24,  "TP": None, "TR": 0.03, "SL": 0.15},
+    "MID_LONG":   {"N": 168, "TP": None, "TR": 0.03, "SL": 0.15},
+    "TRAP_SHORT": {"N": 12,  "TP": 0.50, "TR": None, "SL": 0.15},
 }
 
 # 风控（100U 实验）

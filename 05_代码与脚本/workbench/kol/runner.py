@@ -46,7 +46,8 @@ _CATALYST_TYPES = {KOL_TYPE_CATALYST, KOL_TYPE_NEWS_MEDIA}
 
 def run_crawl_once(platform_code: str | None = None,
                    profile_id: int | None = None,
-                   headless: bool = True) -> dict:
+                   headless: bool = True,
+                   full_backfill: bool = False) -> dict:
     """
     执行一轮抓取。
 
@@ -58,6 +59,8 @@ def run_crawl_once(platform_code: str | None = None,
         platform_code: 只抓取指定平台，None = 全部平台
         profile_id: 只抓取指定博主，None = 全部启用的博主
         headless: 是否无头模式
+        full_backfill: 回溯模式——忽略 since_post_id 增量游标，max_pages=0 翻到底。
+                       建议配合 profile_id 使用，避免一次把所有博主的全部历史都拉了。
 
     Returns:
         统计信息 dict
@@ -116,13 +119,15 @@ def run_crawl_once(platform_code: str | None = None,
             stats["profiles_failed"] += len(plat_profiles)
             continue
 
-        print(f"[KOL][runner] 开始抓取平台: {plat_code} ({len(plat_profiles)} 位博主)")
+        print(f"[KOL][runner] 开始抓取平台: {plat_code} ({len(plat_profiles)} 位博主)"
+              f"{' [full-backfill]' if full_backfill else ''}")
 
         try:
             with scraper_cls(headless=headless) as scraper:
                 for profile in plat_profiles:
                     try:
-                        _crawl_one_profile(scraper, profile, stats)
+                        _crawl_one_profile(scraper, profile, stats,
+                                           full_backfill=full_backfill)
                         stats["profiles_success"] += 1
                     except Exception as e:
                         stats["profiles_failed"] += 1
@@ -153,26 +158,32 @@ def run_crawl_once(platform_code: str | None = None,
     return stats
 
 
-def _crawl_one_profile(scraper, profile: dict, stats: dict) -> None:
-    """抓取单个博主的新帖子并存入数据库。
+def _crawl_one_profile(scraper, profile: dict, stats: dict,
+                       full_backfill: bool = False) -> None:
+    """抓取单个博主的帖子并存入数据库。
 
     按 kol_type 分流：
       - kol:         存档后等待批量 AI 分类处理
       - catalyst / news_media: 存档后立即写入催化剂表
+
+    full_backfill=True 时：忽略 since_post_id（传 None），max_pages=0（翻到底），
+                          由 scraper.backfill_mode 控制更慢的翻页限速。
     """
     profile_id = profile["profile_id"]
     nickname = profile["nickname"]
     user_id = profile["platform_user_id"]
-    last_post_id = profile.get("last_post_id")
+    last_post_id = None if full_backfill else profile.get("last_post_id")
     kol_type = profile.get("kol_type", "kol")
 
     type_label = f"[{kol_type}]" if kol_type != "kol" else ""
-    print(f"[KOL][runner] 抓取博主: {nickname} {type_label} (last_post_id={last_post_id})")
+    backfill_label = " [回溯全量]" if full_backfill else f" (游标={last_post_id})"
+    print(f"[KOL][runner] 抓取博主: {nickname} {type_label}{backfill_label}")
 
     result = scraper.fetch_posts(
         platform_user_id=user_id,
         since_post_id=last_post_id,
-        max_pages=3,
+        max_pages=0 if full_backfill else 3,
+        backfill_mode=full_backfill,
     )
     posts = result.posts
 
@@ -475,7 +486,22 @@ def main():
                         help="发现模式：最低粉丝数（默认 10000）")
     parser.add_argument("--discover-activate", action="store_true",
                         help="发现模式：新博主自动启用监控（默认关闭，需人工审核）")
+    parser.add_argument("--full-backfill", action="store_true",
+                        help="回溯模式：忽略增量游标，翻到底拉全量历史帖子。"
+                             "强烈建议配合 --profile-id 限定单个博主，"
+                             "否则会把所有启用博主的全部历史都拉一遍")
     args = parser.parse_args()
+
+    # 安全守卫：full-backfill 但没指定 profile-id 时，打印警告后继续（但不阻止）
+    if args.full_backfill and not args.profile_id:
+        print("[KOL][runner] ⚠️ WARNING: --full-backfill 未配合 --profile-id，"
+              "将对所有启用博主拉全量历史，非常耗时！"
+              "\n         强烈建议 Ctrl+C 停止后加 --profile-id 指定单个博主。")
+        # 不强制 exit，用户可能就是想全量回溯
+        import time as _t
+        for _ in range(3, 0, -1):
+            print(f"         {_} 秒后继续... (Ctrl+C 取消)")
+            _t.sleep(1)
 
     if args.discover:
         platform = args.platform or "binance_square"
@@ -510,6 +536,7 @@ def main():
                     platform_code=args.platform,
                     profile_id=args.profile_id,
                     headless=not args.headed,
+                    full_backfill=args.full_backfill,
                 )
             except Exception as e:
                 print(f"[KOL][runner] 本轮异常: {e}")
@@ -520,6 +547,7 @@ def main():
             platform_code=args.platform,
             profile_id=args.profile_id,
             headless=not args.headed,
+            full_backfill=args.full_backfill,
         )
 
 

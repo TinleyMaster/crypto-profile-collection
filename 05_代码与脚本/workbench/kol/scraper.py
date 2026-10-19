@@ -57,14 +57,16 @@ class BaseScraper:
         platform_user_id: str,
         since_post_id: str | None = None,
         max_pages: int = 3,
+        backfill_mode: bool = False,
     ) -> FetchResult:
         """
         抓取指定博主的帖子。
 
         Args:
             platform_user_id: 平台内用户 ID（币安广场为 username，如 Square-Creator-xxx）
-            since_post_id: 增量游标，只返回比此 ID 更新的帖子
-            max_pages: 最大翻页数
+            since_post_id: 增量游标，只返回比此 ID 更新的帖子（None = 不过滤，即回溯全量）
+            max_pages: 最大翻页数；0 表示翻到底（回溯模式建议 max_pages=0）
+            backfill_mode: 回溯模式，使用更慢的翻页限速（1s vs 0.3s），降低风控风险
 
         Returns:
             FetchResult：含帖子列表 + 页面状态诊断
@@ -153,6 +155,7 @@ class BinanceSquareScraper(BaseScraper):
         platform_user_id: str,
         since_post_id: str | None = None,
         max_pages: int = 3,
+        backfill_mode: bool = False,
     ) -> FetchResult:
         """
         抓取币安广场博主的帖子列表。
@@ -161,6 +164,10 @@ class BinanceSquareScraper(BaseScraper):
           1. 通过 username 查 squareUid（缓存优先）
           2. 循环 GET feed 接口，timeOffset 翻页
           3. 组装 ScrapedPost，增量过滤
+
+        backfill_mode=True 时：
+          - since_post_id 被忽略（全量回溯）
+          - 翻页限速从 0.3s → 1.0s，降低风控风险
         """
         result = FetchResult()
 
@@ -183,15 +190,19 @@ class BinanceSquareScraper(BaseScraper):
         # 写入粉丝数（从 USER_API 缓存中取）
         result.follower_count = self.get_cached_follower_count(platform_user_id)
 
-        # Step 2: 翻页抓帖
+        # Step 2: 翻页抓帖（max_pages=0 表示翻到底）
+        page_delay = 1.0 if backfill_mode else 0.3
         posts: list[ScrapedPost] = []
         seen_ids: set[str] = set()
         time_offset = "-1"
         page = 0
 
         try:
-            while page < max_pages:
+            while True:
                 page += 1
+                if max_pages > 0 and page > max_pages:
+                    break
+
                 resp_data = self._fetch_feed_page(square_uid, time_offset)
                 contents = resp_data.get("contents", [])
 
@@ -213,8 +224,8 @@ class BinanceSquareScraper(BaseScraper):
                     break
                 time_offset = str(next_offset)
 
-                # 轻微限速，避免触发风控
-                time.sleep(0.3)
+                # 翻页限速（回溯模式更慢）
+                time.sleep(page_delay)
 
         except _BlockedError as e:
             result.page_status = "blocked"
@@ -230,7 +241,7 @@ class BinanceSquareScraper(BaseScraper):
         # 按时间倒序
         posts.sort(key=lambda p: p.posted_at, reverse=True)
 
-        # 增量过滤：只返回比 since_post_id 更新的
+        # 增量过滤：只返回比 since_post_id 更新的（回溯模式下 since_post_id 为 None，跳过）
         if since_post_id and posts:
             idx = None
             for i, p in enumerate(posts):
@@ -244,7 +255,10 @@ class BinanceSquareScraper(BaseScraper):
 
         if not posts:
             result.page_status = "empty_feed"
-            result.error_reason = "接口返回正常但无帖子（博主可能未发帖或已全部增量过滤）"
+            if backfill_mode:
+                result.error_reason = "接口返回正常但无帖子（博主可能未发帖）"
+            else:
+                result.error_reason = "接口返回正常但无帖子（博主可能未发帖或已全部增量过滤）"
 
         return result
 

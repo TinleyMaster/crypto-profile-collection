@@ -413,7 +413,13 @@ def _attribution_from_trades(client, t: dict, prot: dict) -> tuple[dict | None, 
 
 
 def _trail_check(client, conn) -> int:
-    """软件跟踪止盈（对齐回测峰值回撤语义，--watch 每轮调用）。
+    """软件跟踪止盈降级兜底（仅处理 Binance 原生 TR 挂单失败的裸奔仓，--watch 每轮调用）。
+
+    与 Binance 原生 TRAILING_STOP_MARKET 让道：
+      Binance 原生 TR（algoId 存在）用 tick 级实时峰值追踪、act=0 入场即激活，比
+      软件轮询（5min 间隔 + bar high 累积峰值）**更能锁住利润**。正常有 Binance TR
+      保护单的仓位由交易所侧独管，本函数只处理 place_trailing_stop 调用失败、
+      protective_orders.trailing_stop.algoId 缺失的裸奔仓（降级 fallback）。
 
     回测（backtest_trade_params.py）TR 判定：
         ph = 入场后各已收盘 bar 的滚动最高 high（不含入场 bar、不含当前判定 bar）
@@ -460,6 +466,7 @@ def _trail_check(client, conn) -> int:
             "FROM biz.v2_trade_log t "
             "WHERE t.close_ts IS NULL AND t.exit_order_id IS NULL "
             "  AND t.origin = 'bot' AND COALESCE(t.tr_pct, 0) > 0 "
+            "  AND COALESCE(t.protective_orders->'trailing_stop'->>'algoId', 'NULL') = 'NULL' "
             "ORDER BY t.open_ts")
         rows = [dict(zip([d.name for d in cur.description], r)) for r in cur.fetchall()]
     n = 0

@@ -14,6 +14,10 @@ from datetime import datetime
 import psycopg
 from psycopg.rows import dict_row
 
+# 非加密资产名称黑名单（SQL 正则）单一真相：`catalyst/tokenized.py`
+# （2026-10-19 P3-H：原 db.py / linker.py 各有一份硬编码副本，收敛为同一来源，值逐字不变）
+from .tokenized import TOKENIZED_ASSET_NAME_SQL as _NON_CRYPTO_NAME_SQL
+
 logger = logging.getLogger(__name__)
 
 # 兼容 Docker 环境和本地开发环境
@@ -221,14 +225,9 @@ def get_unprocessed_count(conn=None) -> int:
 # symbol(大写) -> asset_id 缓存，避免重复查库
 _symbol_asset_cache: dict[str, int | None] = {}
 
-# 非加密资产名称黑名单（SQL 正则，与 linker.py / asset_filter.py 同步）。
+# 非加密资产名称黑名单（SQL 正则）—— **单一真相上收到 `catalyst/tokenized.py`**。
 # 命中即视为「美股 tokenized stock / 商品衍生」，不参与 crypto 催化剂信号映射。
-_NON_CRYPTO_NAME_SQL = (
-    r"tokeniz|b[[:space:]]*stocks|pre[[:space:]]*stocks|futures|derivativ"
-    r"|crude[[:space:]]+oil|brent"
-    r"|robinhood[[:space:]]+token|backpack[[:space:]]+securities"
-    r"|\mdinari\M|\mxstock\M"
-)
+# （原此处有一份硬编码常量副本，2026-10-19 P3-H 收敛为 import，值逐字不变）
 
 # canonical 白名单（CAT-LINKER-DIRTY）：主流/高碰撞符号强制解析为真实主网币。
 # 命中白名单即返回（要求有 CMC 排名），跳过 source_map / 脏词兜底。

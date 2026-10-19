@@ -105,6 +105,14 @@ CASES: list[tuple[list[str], str, str, object]] = [
     ([], "TRON network Super Representatives have launched a vote on mainnet Committee Proposal", "", {"TRX"}),
     ([], "Liqi Digital Assets and XDC Network have renewed their partnership with a target of", "", {"XDC"}),
     ([], "Spark said it will close its SparkLend lending protocol on Gnosis Chain on September 30", "", {"GNO"}),
+    # ── F 品牌名黑名单（P3-C-B4，2026-10-19 全量扫描实测）──
+    # 现实品牌在 core.asset 里都有同名仿盘（HOOD#7230 / CURR#14490 / BABA#…），
+    # 新闻里的「X Chain / X Labs / X Group」是**公司级产品**，不是那个币
+    ([], "Robinhood Chain's DeFi total value locked is about $683 million, up 17.78% over", "", EMPTY),
+    (["HOODBUSDT"], "Dune data showed that 23,080 tokens were deployed on Robinhood Chain on August 2", "", EMPTY),
+    ([], "Cafe de Coral Group (00703) said it signed two renovation contracts with Baozhen", "", EMPTY),
+    ([], "Alibaba Group Holding Ltd. is slated to lead a $300 million investment in AI training", "", EMPTY),
+    # ⚠️ 已知代价：Coral Protocol 这类真项目名也会被黑名单挡住（错连 > NULL 的取舍）
 ]
 
 

@@ -74,6 +74,19 @@ _GENERIC_PROJECT_WORDS = frozenset({
     "LIQUID", "SIMPLE",
 })
 
+# 品牌/公司名黑名单（P3-C-B4，2026-10-19 全量影响面扫描实测）：
+# 这些词在 `core.asset` 里存在**同名仿盘/概念币**（Robinhood→HOOD#7230 rank2590、
+# CURRENC→CURR#14490），而新闻里的 `X Chain / X Labs / X Network` 恰恰是**公司级产品**，
+# 不是那个币 ⇒ 项目名通道一律不认。实测 HOOD 单币吞掉 56 行（占全部新增 9.3%），
+# 全是「Robinhood Chain」链上数据稿。判准：名称=现实世界品牌 ⇒ 不进项目名通道。
+# ⚠️ 只作用于 `_match_project_name_to_assets`；不影响 pairs 通道（交易对是强信号，
+#    且 `_NON_CRYPTO_NAME_SQL` 已排除 tokenized/bStocks 类资产）。
+_BRAND_NON_TOKEN_NAMES = frozenset({
+    "ROBINHOOD", "ALIBABA", "CURRENC", "CAFE", "CORAL",  # CORAL: Cafe de Coral 残留
+    "MCDONALD", "MCDONALDS", "SANDISK", "NVIDIA", "TESLA", "APPLE", "MICROSOFT",
+    "AMAZON", "GOOGLE", "META", "OPENAI", "GOLDMAN", "JPMORGAN", "BLACKROCK",
+})
+
 
 def _symbol_pos(text_lower: str, base: str) -> int:
     """base 在文本中首次出现位置（词边界、大小写不敏感）；未出现返回 _UNSEEN。"""
@@ -422,6 +435,7 @@ def _match_project_name_to_assets(conn, title: str) -> list[dict]:
             w for w in words
             if w.upper() not in _ORG_WORD_STOPWORDS
             and w.upper() not in _GENERIC_PROJECT_WORDS
+            and w.upper() not in _BRAND_NON_TOKEN_NAMES
         }
     except Exception:
         return []
@@ -470,13 +484,21 @@ def _update_asset_links(
     asset_ids: list[int],
     link_source: str,
     conn,
-):
-    """更新 catalyst_asset_link 表（增量插入，已存在的跳过）。"""
-    if not asset_ids:
-        return
+) -> int:
+    """更新 catalyst_asset_link 表（增量插入，已存在的跳过）。
 
+    Returns:
+        **实际插入**的行数（`ON CONFLICT DO NOTHING` 命中旧行不计）。
+        P3-C-B5（2026-10-19）：原实现无返回值 → `backfill_catalyst_links.py`
+        在真写模式下 `total_added += None` 直接 TypeError 崩溃（dry-run 走的是
+        `len(gained)` 分支，所以只测 dry-run 测不出来）。生产调用方忽略返回值，向后兼容。
+    """
+    if not asset_ids:
+        return 0
+
+    inserted = 0
     for aid in asset_ids:
-        conn.execute(
+        res = conn.execute(
             """
             INSERT INTO biz.catalyst_asset_link (catalyst_id, asset_id, link_source, confidence)
             VALUES (%s, %s, %s, %s)
@@ -484,6 +506,9 @@ def _update_asset_links(
             """,
             (catalyst_id, aid, link_source, 0.9 if link_source == "trading_pairs" else 0.6),
         )
+        if res is not None and res.rowcount and res.rowcount > 0:
+            inserted += res.rowcount
+    return inserted
 
 
 def _to_dt(ts: float | None) -> datetime | None:

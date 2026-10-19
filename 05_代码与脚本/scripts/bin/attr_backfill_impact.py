@@ -149,7 +149,15 @@ def main() -> int:
         detail: list[dict] = []
         all_gained_aids: set[int] = set()
 
-        for c in cats:
+        # 增量落盘 + 进度：全量扫描要跑 1~2 小时（远程库 0.25s/条），
+        # 原实现只在结束时一次性写盘 ⇒ 中断即全丢、且无法判断进度（2026-10-19 踩）。
+        out_fh = None
+        if args.out:
+            out_p = Path(args.out)
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            out_fh = out_p.open("w", encoding="utf-8")
+
+        for i, c in enumerate(cats, 1):
             item = CatalystItem(
                 source_code=c.get("source_code") or "",
                 source_item_id=str(c["catalyst_id"]),
@@ -183,7 +191,7 @@ def main() -> int:
                 n_empty_after += 1
 
             if gained or stale:
-                detail.append({
+                rec = {
                     "catalyst_id": c["catalyst_id"],
                     "source_code": c.get("source_code"),
                     "channel": ch,
@@ -194,7 +202,16 @@ def main() -> int:
                     "new_asset_ids": sorted(new_ids),
                     "gained": sorted(gained),
                     "stale": sorted(stale),
-                })
+                }
+                detail.append(rec)
+                if out_fh:
+                    out_fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+            if out_fh and i % 200 == 0:
+                out_fh.flush()
+            if i % 500 == 0:
+                print(f"  … {i}/{len(cats)} 已扫（gain {n_gain_c} 条 / {n_gain_r} 行）",
+                      file=sys.stderr, flush=True)
 
         smap = symbol_map(conn, all_gained_aids)
         # 精度自检：新增的关联里有多少落在「合成/代币化/商品衍生」资产上（应为 0）
@@ -250,10 +267,9 @@ def main() -> int:
             for cid, aids, t in stale_examples:
                 print(f"  {cid:<7} - {aids:<30} | {t}")
 
-        if args.out:
-            with open(args.out, "w", encoding="utf-8") as f:
-                for d in detail:
-                    f.write(json.dumps(d, ensure_ascii=False) + "\n")
+        if out_fh:
+            out_fh.flush()
+            out_fh.close()
             print(f"\n逐条明细已写入: {args.out}  （{len(detail)} 条）")
 
     return 0

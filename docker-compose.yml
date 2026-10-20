@@ -10,11 +10,13 @@ services:
     build: .
     container_name: crypto-app
     restart: unless-stopped
+    # 只从 scripts/.env 读（项目唯一环境变量文件）
     env_file:
-      - .env
+      - ./05_代码与脚本/scripts/.env
     environment:
-      # docker-compose 内部 PG 服务名，替换 DATABASE_URL 中的 host
-      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto}
+      # 强制覆盖：docker-compose 内部 PG 容器，host=postgres
+      # ⚠️ 如果你在 scripts/.env 里改了 DATABASE_URL，这里会覆盖它
+      DATABASE_URL: postgresql://postgres:crypto2026@postgres:5432/crypto
       # PORT 由 caddy 反代处理，内部固定 9999（和 supervisord.conf 一致）
       PORT: "9999"
     volumes:
@@ -52,26 +54,22 @@ services:
     container_name: crypto-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_ME_IN_ENV}
-      POSTGRES_DB: ${POSTGRES_DB:-crypto}
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: crypto2026
+      POSTGRES_DB: crypto
     volumes:
       - pgdata:/var/lib/postgresql/data
       # 初始化 SQL（首次启动执行；已存在数据库则跳过）
       - ./05_代码与脚本/scripts/migrations:/docker-entrypoint-initdb.d:ro
     command: >
-      -c shared_buffers=512MB
-      -c work_mem=4MB
-      -c max_connections=50
-      -c effective_cache_size=2GB
-      -c maintenance_work_mem=64MB
+      -c shared_buffers=512MB -c work_mem=4MB -c max_connections=50 -c effective_cache_size=2GB -c maintenance_work_mem=64MB
     networks:
       - crypto-net
     # 不对外暴露 5432（仅容器内部通信）
     mem_limit: 1500m
     memswap_limit: 1500m
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-crypto}"]
+      test: [ "CMD-SHELL", "pg_isready -U postgres -d crypto" ]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -94,9 +92,10 @@ services:
       - crypto-net
 
 volumes:
-  pgdata:       # PostgreSQL 数据持久化
-  caddy-data:   # Caddy HTTPS 证书
-  caddy-config: # Caddy 运行时配置
+  pgdata: # PostgreSQL 数据持久化
+  caddy-data: # Caddy HTTPS 证书
+  caddy-config:
+    # Caddy 运行时配置
 
 networks:
   crypto-net:

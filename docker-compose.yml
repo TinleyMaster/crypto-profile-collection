@@ -1,0 +1,103 @@
+# 加密货币投研系统 - docker-compose 部署
+# 服务器：腾讯云轻量 2核8G 东京（richwoman, 43.165.185.221）
+# 架构：app(supervisord 8进程) + postgres:16 + caddy(反代+HTTPS)
+# 代码目录直接挂载，git pull 即生效，无需重建镜像
+
+services:
+  # ─── 投研系统主容器 ────────────────────────────────────────────
+  # 复用项目根目录的 Dockerfile，supervisord 启 8 个常驻进程
+  app:
+    build: .
+    container_name: crypto-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # docker-compose 内部 PG 服务名，替换 DATABASE_URL 中的 host
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto}
+      # PORT 由 caddy 反代处理，内部固定 9999（和 supervisord.conf 一致）
+      PORT: "9999"
+    volumes:
+      # 代码目录直接挂载（优先，让仓库文件覆盖镜像内 COPY 的版本）
+      - ./05_代码与脚本/workbench:/app
+      - ./05_代码与脚本/scripts:/app/scripts
+      # 运行时目录持久化（task_state、docs_storage、scan_daemon.log 等）
+      - ./runtime/task_state:/app/task_state
+      - ./runtime/docs_storage:/app/docs_storage
+      - ./runtime/logs:/app/logs
+      - ./runtime/scan_daemon.log:/app/scan_daemon.log
+      - ./runtime/scan_daemon.err.log:/app/scan_daemon.err.log
+      - ./runtime/v2_executor.log:/app/v2_executor.log
+      - ./runtime/v2_executor.err.log:/app/v2_executor.err.log
+      - ./runtime/catalyst_fast_daemon.log:/app/catalyst_fast_daemon.log
+      - ./runtime/catalyst_fast_daemon.err.log:/app/catalyst_fast_daemon.err.log
+    depends_on:
+      - postgres
+    networks:
+      - crypto-net
+    # 不对外暴露端口，由 caddy 反代
+    # 宿主机内存限制 3.5G（2核8G 机器，留 4G 给系统/PG/Hermes）
+    mem_limit: 3500m
+    memswap_limit: 3500m
+    # supervisor 日志落盘路径（已在 supervisord.conf 配置 /dev/stdout）
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # ─── PostgreSQL 16 ─────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: crypto-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_ME_IN_ENV}
+      POSTGRES_DB: ${POSTGRES_DB:-crypto}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # 初始化 SQL（首次启动执行；已存在数据库则跳过）
+      - ./05_代码与脚本/scripts/migrations:/docker-entrypoint-initdb.d:ro
+    command: >
+      -c shared_buffers=512MB
+      -c work_mem=4MB
+      -c max_connections=50
+      -c effective_cache_size=2GB
+      -c maintenance_work_mem=64MB
+    networks:
+      - crypto-net
+    # 不对外暴露 5432（仅容器内部通信）
+    mem_limit: 1500m
+    memswap_limit: 1500m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-crypto}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ─── Caddy 反代 + 自动 HTTPS ────────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    container_name: crypto-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - app
+    networks:
+      - crypto-net
+
+volumes:
+  pgdata:       # PostgreSQL 数据持久化
+  caddy-data:   # Caddy HTTPS 证书
+  caddy-config: # Caddy 运行时配置
+
+networks:
+  crypto-net:
+    driver: bridge

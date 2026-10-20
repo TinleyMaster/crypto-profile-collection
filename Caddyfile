@@ -1,0 +1,27 @@
+# ═══════════════════════════════════════════════════════════
+# Caddyfile - 自动 HTTPS + 反代
+# 使用前：把 YOUR_DOMAIN.COM 改成你的真实域名
+# 首次启动 Caddy 会自动向 Let's Encrypt 申请证书（需 DNS 已指向服务器 IP）
+# 服务器 IP: 43.165.185.221
+# ═══════════════════════════════════════════════════════════
+
+# ─── 研究系统主站 ──────────────────────────────────────────
+# 把 crypto-profile-collection.zeabur.app 替换成你在腾讯云买/续的域名
+# 或者先临时用服务器 IP + http（不走 HTTPS）调试
+crypto-profile-collection.zeabur.app {
+    reverse_proxy app:9999
+    encode zstd gzip
+    
+    # WebSocket 支持（如果有实时推送）
+    header {
+        X-Real-IP {remote}
+        X-Forwarded-For {remote}
+        X-Forwarded-Proto {scheme}
+    }
+}
+
+# ─── 临时调试（IP 直接访问，不推荐生产用）─────────────────────
+# 如果你还没配域名，用 http://43.165.185.221 先访问：
+:80 {
+    reverse_proxy app:9999
+}

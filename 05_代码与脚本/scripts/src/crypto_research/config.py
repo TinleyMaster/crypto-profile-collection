@@ -66,6 +66,7 @@ class Settings:
     binance_fapi_base_url: str = "https://fapi.binance.com"
     # 风控参数
     signal_trade_enabled: bool = False          # 总开关，=1 才真正下单
+    v2_trade_enabled: bool = False              # v2 盘面信号专用开关（独立于总开关，默认关）
     kol_auto_trade_enabled: bool = False        # KOL 喊单实盘专用开关（独立于总开关，默认关）
     signal_max_notional_usdt: float = 300.0     # 单笔最大名义价值（USDT）
     signal_leverage: int = 5                    # 开仓杠杆
@@ -169,6 +170,7 @@ def get_settings(require_database: bool = True) -> Settings:
         binance_api_secret=os.getenv("BINANCE_API_SECRET", "").strip() or None,
         binance_fapi_base_url=os.getenv("BINANCE_FAPI_BASE_URL", "https://fapi.binance.com").strip(),
         signal_trade_enabled=os.getenv("SIGNAL_TRADE_ENABLED", "0").strip() in ("1", "true", "True"),
+        v2_trade_enabled=os.getenv("V2_TRADE_ENABLED", "0").strip() in ("1", "true", "True"),
         kol_auto_trade_enabled=os.getenv("KOL_AUTO_TRADE_ENABLED", "0").strip() in ("1", "true", "True"),
         signal_max_notional_usdt=float(os.getenv("SIGNAL_MAX_NOTIONAL_USDT", "300") or 300),
         signal_leverage=int(os.getenv("SIGNAL_LEVERAGE", "5") or 5),

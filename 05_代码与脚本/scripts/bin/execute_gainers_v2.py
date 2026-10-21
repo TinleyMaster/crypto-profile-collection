@@ -5,11 +5,11 @@
   - 信号来自 scan_gainers_v2.py（涨幅榜定位 × 强度确认）
   - 方向：SHORT_LONG 做多；MID_LONG 仅 B 右上角（chg30~50% + vr≥5.6）；TRAP_SHORT 不实盘
   - 交易参数：N 持仓时间 / TP 固定止盈 / TR 跟踪止盈 / SL 固定止损（回测最优，见 PARAMS）
-  - 100U 实验风控：SIGNAL_TRADE_ENABLED=1 才下单；分层杠杆/名义（A=3x/60U，其他 1x/20U）
+  - 100U 实验风控：V2_TRADE_ENABLED=1 才下单；分层杠杆/名义（A=3x/60U，其他 1x/20U）
 
 用法：
     python bin/execute_gainers_v2.py --dry-run        # 只打印决策（默认）
-    python bin/execute_gainers_v2.py --apply          # 真实下单（需 SIGNAL_TRADE_ENABLED=1）
+    python bin/execute_gainers_v2.py --apply          # 真实下单（需 V2_TRADE_ENABLED=1）
     python bin/execute_gainers_v2.py --apply --watch --interval 600   # 常驻：下单 + 软件跟踪止盈 + 到期平仓
 
 注意：本脚本在 Zeabur 容器内运行（子账户 API Key 绑定服务器 IP），本机仅 dry-run。
@@ -250,8 +250,9 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
         "direction": sig["direction"], "params": p,
         "notional": notional, "leverage": lev,
     }
-    if not live or not settings.signal_trade_enabled:
-        rec.update(decision="dry_run", reason="SIGNAL_TRADE_ENABLED=0 or dry-run")
+    if not live or not settings.v2_trade_enabled:
+        rec.update(decision="dry_run",
+                   reason="V2_TRADE_ENABLED=0 or dry-run")
         return rec
     # 实盘：余额 / 同币不叠仓 / 持仓上限校验
     bal = client.get_balance("USDT")
@@ -896,7 +897,7 @@ def close_symbol(client, symbol: str) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--apply", action="store_true", help="真实下单（需 SIGNAL_TRADE_ENABLED=1）")
+    ap.add_argument("--apply", action="store_true", help="真实下单（需 V2_TRADE_ENABLED=1）")
     ap.add_argument("--close-symbol", metavar="SYM",
                     help="运维：市价平掉该 symbol 全部持仓后退出（不下新单）")
     ap.add_argument("--watch", action="store_true", help="常驻：下单 + 到期平仓")
@@ -905,7 +906,7 @@ def main() -> int:
     args = ap.parse_args()
 
     settings = get_settings(require_database=True)
-    live = args.apply and settings.signal_trade_enabled
+    live = args.apply and settings.v2_trade_enabled
     # 单一客户端实例：既服务下单，也服务 --watch 的平仓对账。
     # 必须建在 while 之外——对账与本轮「有无待执行信号」无关，若建在 for 循环内，
     # 无信号轮次（常态）会把 client 漏成未定义 → NameError 崩溃。

@@ -130,10 +130,16 @@ CG_CHAIN_MAP = {
     "hyperevm": "hyperevm",
 }
 
-# 合约地址大小写敏感的链（非 EVM hex）。这类链（如 Solana 的 base58）地址
-# 一旦被 .lower() 就会指向错误账户，导入时必须保留原始大小写。
+# 合约地址大小写敏感的链（非 EVM hex）。这类链的地址一旦被 .lower() 就会指向
+# 错误账户（甚至直接被 API 判为非法），导入时必须保留原始大小写：
+#   - solana: base58（大小写敏感）
+#   - ton:   用户友好格式 EQ.../UQ...（base64url，大小写敏感；toncenter 对全小写返回 422）
+#   - tron:   base58check T...（大小写敏感；TronGrid 对全小写返回 400）
+#   - sui / aptos: 0x<64 hex>::module::T 结构体标识（hex 部分大小写不敏感，
+#                 但 module/type 名大小写敏感，且与链上 API 原文比对时须保持一致）
 # EVM 链（hex 地址）大小写不敏感，统一转小写用于去重。
-CASE_SENSITIVE_CHAINS = {"solana"}
+# 必须与 phase_chain_transfer_monitor.CASE_SENSITIVE_CHAINS 保持一致。
+CASE_SENSITIVE_CHAINS = {"solana", "ton", "tron", "sui", "aptos"}
 
 
 # ===================== STEP 1: CREATE TABLE =====================
@@ -215,7 +221,12 @@ SELECT
         ELSE LOWER(m.platform_name)
     END AS chain,
     CASE
-        WHEN LOWER(m.platform_name) IN ('solana', 'solana (spl)') THEN m.token_address
+        WHEN LOWER(m.platform_name) IN ('solana', 'solana (spl)',
+                                        'ton', 'the-open-network',
+                                        'tron', 'tron20',
+                                        'sui', 'sui network',
+                                        'aptos')
+        THEN m.token_address
         ELSE LOWER(m.token_address)
     END AS contract_address,
     TRUE AS is_primary,
@@ -329,7 +340,8 @@ SELECT
         ELSE LOWER(COALESCE(addr_chain, raw_chain))
     END AS chain,
     CASE
-        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'solana' THEN contract_address
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('solana', 'ton', 'tron', 'sui', 'aptos')
+        THEN contract_address
         ELSE LOWER(contract_address)
     END AS contract_address,
     FALSE AS is_primary,

@@ -65,7 +65,9 @@ services:
       -c shared_buffers=512MB -c work_mem=4MB -c max_connections=50 -c effective_cache_size=2GB -c maintenance_work_mem=64MB
     networks:
       - crypto-net
-    # 不对外暴露 5432（仅容器内部通信）
+    # 对外暴露 32405（Zeabur 老端口保持一致）
+    ports:
+      - "32405:5432"
     mem_limit: 1500m
     memswap_limit: 1500m
     healthcheck:

@@ -419,6 +419,43 @@ def _build_html(alerts: list[dict], window_h: int) -> str:
     """
 
 
+def _send_alert_email(settings, alerts: list[dict], window_hours: int, strong_only: bool) -> tuple[bool, str]:
+    """发送异动邮件。strong_only=True 时只发 strong 级（≥5% 市值），watch 级只落库不发。"""
+    notifier = EmailNotifier(settings)
+    if not notifier.configured:
+        print("[WARN] SMTP 未配置，跳过发送")
+        return False, "SMTP 未配置"
+
+    recipients = alerts
+    if strong_only:
+        recipients = [a for a in alerts if a["level"] == "strong"]
+        if not recipients:
+            print("[netflow-alert] 无 strong 级告警，跳过邮件（watch 级已落库）")
+            return True, "skip-no-strong"
+
+    strong = [a for a in recipients if a["level"] == "strong"]
+    html = _build_html(recipients, window_hours)
+    ok, msg = notifier.send(
+        f"🌊 净流异动：{len(recipients)} 个资产（strong={len(strong)}）",
+        html,
+        from_name="净流异动扫描",
+    )
+    print(f"[netflow-alert] 邮件: {msg}")
+    return ok, msg
+
+
+def _send_error_email(settings, subject: str, detail: str) -> tuple[bool, str]:
+    """程序异常时发通知邮件（网络不通、DB 连不上、落库失败等）。"""
+    notifier = EmailNotifier(settings)
+    if not notifier.configured:
+        print(f"[ERROR] 异常但 SMTP 未配置，无法发送: {detail}")
+        return False, "SMTP 未配置"
+    body = f"<pre style='white-space:pre-wrap;font-family:monospace;font-size:13px'>{detail}</pre>"
+    ok, msg = notifier.send(subject, body, from_name="净流异动扫描")
+    print(f"[netflow-alert] 异常通知邮件: {msg}")
+    return ok, msg
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="交易所净流异动扫描告警")
     ap.add_argument("--window-hours", type=int, default=WINDOW_H_DEFAULT,
@@ -426,13 +463,29 @@ def main() -> int:
     ap.add_argument("--cooldown-hours", type=int, default=COOLDOWN_H_DEFAULT,
                     help=f"同资产冷却小时数，默认 {COOLDOWN_H_DEFAULT}")
     ap.add_argument("--dry-run", action="store_true", help="只打印，不发邮件不落库")
+    ap.add_argument("--email-all", action="store_true",
+                    help="所有命中（含 watch 级 ≥1%）都发邮件；默认只发 strong 级（≥5%）")
     args = ap.parse_args()
 
-    settings = get_settings(require_database=True)
-    with get_connection(settings.database_url) as conn:
-        alerts = scan(conn, args.window_hours)
-        if alerts:
-            alerts = enrich_events(conn, alerts)
+    try:
+        settings = get_settings(require_database=True)
+    except Exception as exc:  # noqa: BLE001 - 配置读取失败
+        detail = f"读取 settings 失败：{exc}"
+        print(f"[netflow-alert][FATAL] {detail}")
+        _send_error_email(get_settings(require_database=False), "🔴 净流扫描：配置读取失败", detail)
+        return 1
+
+    # ① 扫描 + 归因
+    try:
+        with get_connection(settings.database_url) as conn:
+            alerts = scan(conn, args.window_hours)
+            if alerts:
+                alerts = enrich_events(conn, alerts)
+    except Exception as exc:  # noqa: BLE001 - DB 断连 / 网络不通 / SQL 错误
+        detail = f"扫描阶段异常：{exc}\n窗口={args.window_hours}h"
+        print(f"[netflow-alert][ERROR] {detail}")
+        _send_error_email(settings, "🔴 净流扫描：DB/网络异常", detail)
+        return 1
 
     if not alerts:
         print(f"[netflow-alert] 近 {args.window_hours}h 无净流异动（≥{WATCH_RATIO*100:.0f}% 市值）")
@@ -451,7 +504,7 @@ def main() -> int:
         print("[dry-run] 未发送邮件、未落库")
         return 0
 
-    # 落库冷却记录（不阻断发信）
+    # ② 落库冷却记录（失败也发邮件，让用户知道 DB 可能有问题）
     try:
         with get_connection(settings.database_url) as conn:
             with conn.cursor() as cur:
@@ -463,20 +516,14 @@ def main() -> int:
                         "ON CONFLICT (asset_id, alerted_at) DO NOTHING",
                         (a["asset_id"], args.window_hours, a["netflow"], a["ratio"], a["level"]),
                     )
-    except Exception as exc:  # noqa: BLE001 - 冷却落库失败不阻断告警
-        print(f"[netflow-alert] 冷却落库失败（跳过）: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        detail = f"冷却落库失败：{exc}\n已扫描 {len(alerts)} 条但无法写入 biz.netflow_alert_log"
+        print(f"[netflow-alert][ERROR] {detail}")
+        _send_error_email(settings, "🔴 净流扫描：落库失败", detail)
+        # 落库失败不阻断 —— 该发的邮件还是发
 
-    notifier = EmailNotifier(settings)
-    if not notifier.configured:
-        print("[WARN] SMTP 未配置，跳过发送")
-        return 0
-    html = _build_html(alerts, args.window_hours)
-    ok, msg = notifier.send(
-        f"🌊 净流异动：{len(alerts)} 个资产（strong={len(strong)}）",
-        html,
-        from_name="净流异动扫描",
-    )
-    print(f"[netflow-alert] 邮件: {msg}")
+    # ③ 发异动邮件（默认只 strong；--email-all 才全部发）
+    ok, msg = _send_alert_email(settings, alerts, args.window_hours, strong_only=not args.email_all)
     return 0 if ok else 1
 
 

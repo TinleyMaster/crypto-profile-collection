@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crypto-research"
+version = "0.1.0"
+description = "加密货币投研采集与落库层（只收集数据，不做投研判断）"
+requires-python = ">=3.11"
+
+# 包源码在 src/ 下（src-layout）。安装后 `import crypto_research` 可直接用，
+# 无需再手动设 PYTHONPATH=/app/scripts/src。
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

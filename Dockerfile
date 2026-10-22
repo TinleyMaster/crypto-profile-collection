@@ -18,6 +18,11 @@ RUN apt-get update && playwright install-deps chromium \
     && playwright install chromium \
     && rm -rf /var/lib/apt/lists/*
 
+# crawl4ai 经 patchright 驱动浏览器（P1.5 缺口补强）。缺这段时
+# crawl4ai_client 会 import 成功但 crawl() 静默返回 None —— 基本面整章空。
+RUN python -m patchright install chromium \
+    && rm -rf /var/lib/apt/lists/*
+
 # 复制 scripts 源码（数据处理模块）
 COPY 05_代码与脚本/scripts/src /app/scripts/src
 COPY 05_代码与脚本/scripts/sql /app/scripts/sql

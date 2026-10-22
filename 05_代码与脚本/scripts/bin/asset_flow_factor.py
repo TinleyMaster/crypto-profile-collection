@@ -84,6 +84,19 @@ FROM biz.onchain_netflow_hourly GROUP BY asset_id
 """
 
 
+FRESH_SQL = """
+SELECT
+  (SELECT max(ts) FROM biz.orderbook_depth_history)      AS obi_max,
+  (SELECT max(ts) FROM biz.cg_taker_volume_hist WHERE interval='4h') AS taker_max,
+  (SELECT max(bucket_hour) FROM biz.onchain_netflow_hourly)          AS netflow_max,
+  (SELECT now())                                          AS now_ts
+"""
+
+# 断更阈值（小时）：超过即判定该源过期。OBI 4h 采集 → 24h 宽松；OFI 4h → 24h；
+# 链上净流小时级 → 48h（部分资产无逐小时数据，留余量）。
+STALE_HOURS = {"OBI": 24, "OFI": 24, "onchain": 48}
+
+
 def clamp(x, lo=0.0, hi=100.0):
     return max(lo, min(hi, x))
 
@@ -129,7 +142,22 @@ def load_flow(conn):
     taker = {r[0]: ({"v7": _f(r[1]), "v30": _f(r[2]), "n7": r[3]}) for r in cur.fetchall()}
     cur.execute(NETFLOW_SQL)
     nf = {r[0]: ({"v7": _f(r[1]), "v30": _f(r[2]), "n7": r[3]}) for r in cur.fetchall()}
-    return obi, taker, nf
+
+    # 各源最新时点 → 断更检测（防止把两周前的数据当成今天的资金流）
+    cur.execute(FRESH_SQL)
+    row = cur.fetchone()
+    now_ts = row[3]
+    fresh = {}
+    for label, ts in (("OBI", row[0]), ("OFI", row[1]), ("onchain", row[2])):
+        if ts is None:
+            fresh[label] = {"max_ts": None, "lag_hours": None, "stale": True,
+                            "reason": "无数据"}
+        else:
+            lag = (now_ts - ts).total_seconds() / 3600.0
+            stale = lag > STALE_HOURS[label]
+            fresh[label] = {"max_ts": ts, "lag_hours": round(lag, 1), "stale": stale,
+                            "reason": ("断更 %.1f 天" % (lag / 24)) if stale else ""}
+    return obi, taker, nf, fresh
 
 
 def load_assets(conn):
@@ -147,7 +175,13 @@ def load_assets(conn):
             for r in cur.fetchall()}
 
 
-def compute_one(asset, obi, taker, nf_by_id):
+def compute_one(asset, obi, taker, nf_by_id, fresh=None):
+    """计算单币资金流因子。
+
+    fresh: 各源新鲜度（load_flow 第 4 个返回值）。**已断更的源不参与打分** ——
+    否则会把两周前的数据当成今天的资金流，输出看似正常的"中性"评级。
+    """
+    fresh = fresh or {}
     mcap = asset.get("market_cap")
     o = obi.get(asset["symbol"].upper() + "USDT")
     t = taker.get(asset["symbol"].upper() + "USDT")
@@ -163,16 +197,34 @@ def compute_one(asset, obi, taker, nf_by_id):
         out.update(netflow_7d_usd=n["v7"], netflow_30d_usd=n["v30"], n_netflow_7d=n["n7"] or 0)
         if n["v7"] is not None and mcap and mcap > 0:
             out["netflow_7d_pct_mcap"] = round(n["v7"] / mcap * 100, 6)
-    out["flow_score"] = flow_score(out["obi_7d"], out["taker_imb_7d"], out["netflow_7d_pct_mcap"])
+    # 断更源剔除：不参与加权，避免"用旧数据算出今天的中性"
+    stale = []
+    def _usable(label, value):
+        if fresh.get(label, {}).get("stale"):
+            if value is not None or fresh.get(label, {}).get("max_ts") is not None:
+                stale.append(label)
+            return None
+        return value
+
+    use_obi = _usable("OBI", out["obi_7d"])
+    use_taker = _usable("OFI", out["taker_imb_7d"])
+    use_nf = _usable("onchain", out["netflow_7d_pct_mcap"])
+
+    out["flow_score"] = flow_score(use_obi, use_taker, use_nf)
     out["flow_grade"] = grade_of(out["flow_score"])
+    out["freshness"] = fresh
+    out["stale_sources"] = stale
+
     src = []
-    if out["n_obi_7d"]:
+    if use_obi is not None:
         src.append("OBI")
-    if out["n_taker_7d"]:
+    if use_taker is not None:
         src.append("taker")
-    if out["n_netflow_7d"]:
+    if use_nf is not None:
         src.append("onchain")
     out["sources"] = ",".join(src) or "none"
+    if stale:
+        out["sources"] += " | 已剔除断更源: " + ",".join(stale)
     return out
 
 
@@ -223,6 +275,8 @@ def render_console(asset, as_of, f):
     print(f"单币资金流因子 · {asset['name']}({asset['symbol']})  asset_id={asset['asset_id']}  as_of={as_of}")
     print("=" * 72)
     print(f"  资金流分: {f['flow_score']}    评级: {f['flow_grade']}    源: {f['sources']}")
+    if f.get("stale_sources"):
+        print("  ⚠️ 断更源(已剔除): " + ", ".join(f["stale_sources"]))
     print(f"  OBI 盘口失衡:  7d {f2(f['obi_7d'])} (n={f['n_obi_7d']}) | 30d {f2(f['obi_30d'])}")
     print(f"  OFI 主动成交:  7d {f2(f['taker_imb_7d'])} (n={f['n_taker_7d']}) | 30d {f2(f['taker_imb_30d'])}")
     print(f"  链上净流: 7d {f0(f['netflow_7d_usd'],' USD') if f['netflow_7d_usd'] is not None else '-'}"
@@ -236,13 +290,25 @@ def render_md(asset, as_of, f):
         f"各源以自身最新时点为锚取近 7d/30d ｜ method={METHOD_VERSION}",
         "",
         f"**资金流评级：{f['flow_grade']}（资金流分 {f['flow_score']}/100）**", "",
+        *(["> ⚠️ **数据断更告警**：" + "；".join(
+            "%s 最新 %s（滞后 %.1f 天，阈值 %dh）" % (
+                k, v["max_ts"].strftime("%Y-%m-%d %H:%M") if v.get("max_ts") else "无数据",
+                (v.get("lag_hours") or 0) / 24, STALE_HOURS[k])
+            for k, v in (f.get("freshness") or {}).items() if v.get("stale")
+        ) + "。**该源已从评分中剔除**，评级仅由剩余源得出，置信度相应下调。", ""]
+          if f.get("stale_sources") else []),
         "| 指标 | 值 | 说明 |",
         "|---|---|---|",
-        f"| OBI 盘口失衡 7d | {f2(f['obi_7d'])} | >0 买盘占优（源 {f['n_obi_7d']} 点）|",
-        f"| OFI 主动成交失衡 7d | {f2(f['taker_imb_7d'])} | >0 主动买占优（源 {f['n_taker_7d']} 点）|",
+        f"| OBI 盘口失衡 7d | {f2(f['obi_7d'])}"
+        f"{'（**已剔除**）' if 'OBI' in (f.get('stale_sources') or []) else ''}"
+        f" | >0 买盘占优（源 {f['n_obi_7d']} 点）|",
+        f"| OFI 主动成交失衡 7d | {f2(f['taker_imb_7d'])}"
+        f"{'（**已剔除**）' if 'OFI' in (f.get('stale_sources') or []) else ''}"
+        f" | >0 主动买占优（源 {f['n_taker_7d']} 点）|",
         f"| 链上净流 7d | {f0(f['netflow_7d_usd'],' USD') if f['netflow_7d_usd'] is not None else '-'}"
         f" | 占市值 {f2(f['netflow_7d_pct_mcap'],'%') if f['netflow_7d_pct_mcap'] is not None else '-'}"
-        f"（源 {f['n_netflow_7d']} 点）|",
+        f"（源 {f['n_netflow_7d']} 点）"
+        f"{'（**已剔除**）' if 'onchain' in (f.get('stale_sources') or []) else ''}|",
         "",
         "> 局限: 三源时间跨度不一，以各自最新时点对齐；盘口/主动成交反映**当下**资金压力，非长期趋势。", "",
     ])
@@ -262,13 +328,13 @@ def main() -> int:
     as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
 
     with get_connection(get_settings(require_database=True).database_url) as conn:
-        obi, taker, nf = load_flow(conn)
+        obi, taker, nf, fresh = load_flow(conn)
         assets = load_assets(conn)
 
         if args.batch:
             n_done = 0
             for sym_usdt, asset in assets.items():
-                f = compute_one(asset, obi, taker, nf)
+                f = compute_one(asset, obi, taker, nf, fresh)
                 if f["sources"] == "none":
                     continue
                 persist(conn, asset, as_of, f)
@@ -297,7 +363,7 @@ def main() -> int:
         if not asset:
             print(f"未找到标的: {args.symbol or args.asset_id}")
             return 1
-        f = compute_one(asset, obi, taker, nf)
+        f = compute_one(asset, obi, taker, nf, fresh)
         if args.json:
             print(json.dumps({"asset": asset, "as_of": str(as_of), "flow": f},
                              ensure_ascii=False, indent=2, default=str))

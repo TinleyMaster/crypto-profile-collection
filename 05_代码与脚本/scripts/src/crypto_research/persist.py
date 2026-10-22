@@ -9,12 +9,18 @@
     - doc_whitepaper_summary      文档结构化摘要（LLM 提炼 + 落库）
     - onchain_holder_snapshot/rank 持有者集中度快照 + Top 明细
     - asset_contract_security     合约安全核查（代理/实现/部署者/信誉）
+    - research_report            投研报告结构化结论 + 原文归档 + 前向跟踪
+    - asset_raises               融资记录（P1.5 补强）
+    - asset_related              关联资产图谱（P3.5 AI 判断后落库）
+    - protocol_tvl               协议 TVL 日快照（P1.5 DefiLlama 补强）
+    - asset_catalyst             研究型催化剂（P1.5 补强，与新闻流不撞键）
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
+from datetime import datetime, timezone
 
 from crypto_research.clients.llm_client import LLMClient, extract_json_from_llm_response
 
@@ -245,6 +251,30 @@ def _jd(v, default=None):
     return json.dumps(v, ensure_ascii=False, default=str)
 
 
+def _norm_ts(v):
+    """把时间戳/日期字符串归一到「秒级 ISO（UTC）」用于生成稳定幂等键。
+
+    无法解析时退化为原值的字符串形式 —— 保证同一输入永远得到同一输出。
+    """
+    if v is None:
+        return ""
+    if isinstance(v, datetime):
+        dt = v
+    elif isinstance(v, (int, float)):
+        dt = datetime.fromtimestamp(v, tz=timezone.utc)
+    else:
+        raw = str(v).strip()
+        if not raw:
+            return ""
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return raw
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+
+
 def _fetch_as_of_price(conn, asset_id: int):
     """取建仓基准价：`market_date <= 北京今日` 的最近可得收盘价（同 thesis_forward_track 口径）。"""
     with conn.cursor() as cur:
@@ -350,6 +380,297 @@ def persist_research_report(conn, asset_id: int, symbol: str, report: dict,
             """,
             (asset_id, as_of_date, price_at))
         out["forward_track"] = True
+
+    return out
+
+
+# ════════════════════════════════════════════════════════════════
+# P1.5 融资记录（DefiLlama raises / 研究补强 → biz.asset_raises）
+# ════════════════════════════════════════════════════════════════
+def persist_raises(conn, asset_id: int, protocol_name: str | None,
+                   raises: list[dict] | None) -> dict:
+    """融资记录幂等落库 → biz.asset_raises。
+
+    raises 每项期望字段：round / raise_date / amount / chains / sector /
+    category / lead_investors / other_investors / valuation / source /
+    defillama_id。缺失一律留空，不臆造。
+
+    幂等键 (asset_id, round, raise_date)。注意：PostgreSQL 唯一约束对 NULL
+    不去重 —— raise_date 为 NULL 的行走 "WHERE NOT EXISTS" 显式查重，避免
+    每次投研重复累积。
+
+    返回 {inserted, updated, skipped}。
+    """
+    out = {"inserted": 0, "updated": 0, "skipped": 0}
+    if not raises:
+        return out
+
+    for r in raises:
+        if not isinstance(r, dict):
+            out["skipped"] += 1
+            continue
+        rnd = r.get("round")
+        raise_date = r.get("raise_date")
+        if not rnd and not raise_date:
+            out["skipped"] += 1
+            continue
+
+        vals = (
+            asset_id,
+            r.get("defillama_id"),
+            protocol_name or r.get("protocol_name"),
+            rnd,
+            raise_date,
+            r.get("amount"),
+            r.get("chains") or None,
+            r.get("sector"),
+            r.get("category"),
+            r.get("lead_investors") or None,
+            r.get("other_investors") or None,
+            r.get("valuation"),
+            r.get("source") or "research_manual",
+        )
+
+        with conn.cursor() as cur:
+            if raise_date is not None:
+                cur.execute(
+                    """
+                    INSERT INTO biz.asset_raises
+                        (asset_id, defillama_id, protocol_name, round, raise_date,
+                         amount, chains, sector, category, lead_investors,
+                         other_investors, valuation, source)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (asset_id, round, raise_date) DO UPDATE SET
+                        amount          = COALESCE(EXCLUDED.amount, biz.asset_raises.amount),
+                        chains          = COALESCE(EXCLUDED.chains, biz.asset_raises.chains),
+                        sector          = COALESCE(EXCLUDED.sector, biz.asset_raises.sector),
+                        category        = COALESCE(EXCLUDED.category, biz.asset_raises.category),
+                        lead_investors  = COALESCE(EXCLUDED.lead_investors, biz.asset_raises.lead_investors),
+                        other_investors = COALESCE(EXCLUDED.other_investors, biz.asset_raises.other_investors),
+                        valuation       = COALESCE(EXCLUDED.valuation, biz.asset_raises.valuation),
+                        updated_at      = NOW()
+                    RETURNING (xmax = 0) AS inserted
+                    """, vals)
+                row = cur.fetchone()
+                if row and (row[0] if not isinstance(row, dict) else row["inserted"]):
+                    out["inserted"] += 1
+                else:
+                    out["updated"] += 1
+            else:
+                # raise_date 为 NULL：唯一约束失效，显式查重
+                cur.execute(
+                    """
+                    INSERT INTO biz.asset_raises
+                        (asset_id, defillama_id, protocol_name, round, raise_date,
+                         amount, chains, sector, category, lead_investors,
+                         other_investors, valuation, source)
+                    SELECT %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM biz.asset_raises
+                        WHERE asset_id = %s AND round IS NOT DISTINCT FROM %s
+                          AND raise_date IS NULL
+                    )
+                    """, vals + (asset_id, rnd))
+                out["inserted" if cur.rowcount else "skipped"] += 1
+
+    return out
+
+
+# ════════════════════════════════════════════════════════════════
+# P3.5 关联资产图谱（AI 判断 → biz.asset_related）
+# ════════════════════════════════════════════════════════════════
+RELATION_TYPES = (
+    "sector_peer", "ecosystem", "narrative", "upstream_downstream",
+    "funding_shared", "etf_basket", "cross_chain", "fork_derivative",
+    "infra_dependency", "other",
+)
+RELATION_STRENGTHS = ("high", "medium", "low")
+
+
+def persist_related_assets(conn, asset_id: int,
+                           relations: list[dict] | None,
+                           as_of_date=None) -> dict:
+    """关联资产图谱幂等 upsert → biz.asset_related。
+
+    relations 每项期望字段：related_symbol(必填) / related_name /
+    relation_type(必填) / relation_direction / strength(必填 high|medium|low) /
+    confidence(0-1) / rationale / source。
+
+    related_asset_id 解析：仅当该 symbol 在 coin_basic 中**唯一**时回填，
+    否则留 NULL（coin_basic 存在 2079 个重复 symbol，按 symbol 硬匹配会串项目）。
+
+    幂等键 (asset_id, related_symbol, relation_type)。
+    返回 {upserted, skipped, rejected, unresolved}。rejected 列出不合法的
+    relation_type / strength —— 白名单与库内 CHECK 约束 ck_asset_related_type
+    严格一致，不合法直接拒写，避免抛 CheckViolation 打断整批投研。
+    """
+    out = {"upserted": 0, "skipped": 0, "rejected": [], "unresolved": []}
+    if not relations:
+        return out
+
+    at = as_of_date or None
+    for rel in relations:
+        if not isinstance(rel, dict):
+            out["skipped"] += 1
+            continue
+        sym = (rel.get("related_symbol") or "").strip()
+        rtype = (rel.get("relation_type") or "").strip()
+        strength = (rel.get("strength") or "").strip().lower()
+        if not sym or not rtype:
+            out["skipped"] += 1
+            continue
+        if rtype not in RELATION_TYPES or strength not in RELATION_STRENGTHS:
+            out["rejected"].append({"symbol": sym, "relation_type": rtype,
+                                    "strength": strength})
+            continue
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT asset_id FROM biz.coin_basic WHERE coin_symbol = %s LIMIT 2",
+                (sym,))
+            rows = cur.fetchall()
+            related_asset_id = None
+            if len(rows) == 1:
+                related_asset_id = rows[0][0] if not isinstance(rows[0], dict) else rows[0]["asset_id"]
+            elif len(rows) > 1:
+                out["unresolved"].append(sym)
+
+            cur.execute(
+                """
+                INSERT INTO biz.asset_related
+                    (asset_id, related_asset_id, related_symbol, related_name,
+                     relation_type, relation_direction, strength, confidence,
+                     rationale, source, as_of_date)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                        COALESCE(%s, (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date))
+                ON CONFLICT (asset_id, related_symbol, relation_type) DO UPDATE SET
+                    related_asset_id   = COALESCE(EXCLUDED.related_asset_id, biz.asset_related.related_asset_id),
+                    related_name       = COALESCE(EXCLUDED.related_name, biz.asset_related.related_name),
+                    relation_direction = COALESCE(EXCLUDED.relation_direction, biz.asset_related.relation_direction),
+                    strength           = EXCLUDED.strength,
+                    confidence         = COALESCE(EXCLUDED.confidence, biz.asset_related.confidence),
+                    rationale          = COALESCE(EXCLUDED.rationale, biz.asset_related.rationale),
+                    source             = COALESCE(EXCLUDED.source, biz.asset_related.source),
+                    as_of_date         = EXCLUDED.as_of_date,
+                    updated_at         = NOW()
+                """,
+                (asset_id, related_asset_id, sym, rel.get("related_name"),
+                 rtype, rel.get("relation_direction"), strength,
+                 rel.get("confidence"), rel.get("rationale"),
+                 rel.get("source") or "research_manual", at))
+            out["upserted"] += 1
+
+    return out
+
+
+# ════════════════════════════════════════════════════════════════
+# P1.5 协议 TVL（DefiLlama 补强 → biz.protocol_tvl，每日一行）
+# ════════════════════════════════════════════════════════════════
+def persist_protocol_tvl(conn, asset_id: int, tvl_usd,
+                         measured_at=None,
+                         source: str = "DefiLlama",
+                         chains: list[str] | None = None,
+                         protocol_slug: str | None = None,
+                         protocol_category: str | None = None,
+                         notes: str | None = None) -> dict:
+    """协议 TVL 日快照幂等 upsert → biz.protocol_tvl（幂等键 asset_id+measured_at）。
+
+    measured_at 缺省取北京今日。tvl_usd 为 None 时直接跳过（不写 0 冒充数据）。
+    返回 {tvl_id, inserted} 或 {skipped: 原因}。
+    """
+    if tvl_usd is None:
+        return {"skipped": "tvl_usd is None"}
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO biz.protocol_tvl
+                (asset_id, protocol_slug, tvl_usd, chains, protocol_category,
+                 source, measured_at, notes)
+            VALUES (%s,%s,%s,%s,%s,%s,
+                    COALESCE(%s, (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date), %s)
+            ON CONFLICT (asset_id, measured_at) DO UPDATE SET
+                tvl_usd           = EXCLUDED.tvl_usd,
+                chains            = COALESCE(EXCLUDED.chains, biz.protocol_tvl.chains),
+                protocol_slug     = COALESCE(EXCLUDED.protocol_slug, biz.protocol_tvl.protocol_slug),
+                protocol_category = COALESCE(EXCLUDED.protocol_category, biz.protocol_tvl.protocol_category),
+                source            = EXCLUDED.source,
+                notes             = COALESCE(EXCLUDED.notes, biz.protocol_tvl.notes)
+            RETURNING tvl_id, (xmax = 0) AS inserted
+            """,
+            (asset_id, protocol_slug, tvl_usd, chains or None,
+             protocol_category, source, measured_at, notes))
+        row = cur.fetchone()
+    if not row:
+        return {"skipped": "no row returned"}
+    if isinstance(row, dict):
+        return {"tvl_id": row["tvl_id"], "inserted": bool(row["inserted"])}
+    return {"tvl_id": row[0], "inserted": bool(row[1])}
+
+
+# ════════════════════════════════════════════════════════════════
+# P1.5 研究型催化剂（→ biz.asset_catalyst，与新闻流不撞键）
+# ════════════════════════════════════════════════════════════════
+def persist_catalysts(conn, asset_id: int,
+                      catalysts: list[dict] | None,
+                      symbol: str | None = None,
+                      source_code: str = "research_manual") -> dict:
+    """研究型催化剂幂等 upsert → biz.asset_catalyst。
+
+    catalysts 每项期望字段：title(必填) / published_at / body_text / body_html /
+    event_category / event_subcategory / source_url / seo_keywords(effective list)。
+
+    幂等键 (source_code, source_article_id)。研究型记录统一用
+    source_code='research_manual'，source_article_id 由
+    sha1(title|published_at|source_url) 生成 —— 同一事实重复投研不重复建行，
+    与新闻流（币安广场/交易所公告）的自然 id 不冲突。
+
+    返回 {upserted, skipped}。
+    """
+    out = {"upserted": 0, "skipped": 0}
+    if not catalysts:
+        return out
+
+    for c in catalysts:
+        if not isinstance(c, dict) or not c.get("title"):
+            out["skipped"] += 1
+            continue
+        published_at = c.get("published_at") or None
+        source_url = c.get("source_url") or None
+        # 幂等种子只用 (标题, 规范化发布时间)：
+        # 不能掺 source_url —— 同一事实带 URL 与不带 URL 会算出两个 id，
+        # 导致同一事件重复建行（实测复现）。发布时间先归一到秒级 ISO，
+        # 避免 "2026-10-20T12:00:00Z" 与 "2026-10-20 12:00:00+00" 算出不同 id。
+        seed = "%s|%s" % ((c.get("title") or "").strip(),
+                          _norm_ts(published_at))
+        article_id = c.get("source_article_id") or \
+            "rm_" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:24]
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO biz.asset_catalyst
+                    (source_code, source_article_id, asset_id, title, body_text,
+                     body_html, published_at, event_category, event_subcategory,
+                     source_url, seo_keywords, raw_json)
+                VALUES (%s,%s,%s,%s,%s,%s,
+                        COALESCE(%s, NOW()), %s,%s,%s,%s,%s::jsonb)
+                ON CONFLICT (source_code, source_article_id) DO UPDATE SET
+                    asset_id          = COALESCE(EXCLUDED.asset_id, biz.asset_catalyst.asset_id),
+                    title             = EXCLUDED.title,
+                    body_text         = COALESCE(EXCLUDED.body_text, biz.asset_catalyst.body_text),
+                    body_html         = COALESCE(EXCLUDED.body_html, biz.asset_catalyst.body_html),
+                    event_category    = COALESCE(EXCLUDED.event_category, biz.asset_catalyst.event_category),
+                    event_subcategory = COALESCE(EXCLUDED.event_subcategory, biz.asset_catalyst.event_subcategory),
+                    source_url        = COALESCE(EXCLUDED.source_url, biz.asset_catalyst.source_url),
+                    updated_at        = NOW()
+                """,
+                (source_code, article_id, asset_id, c.get("title"),
+                 c.get("body_text"), c.get("body_html"), published_at,
+                 c.get("event_category"), c.get("event_subcategory"),
+                 source_url, c.get("seo_keywords") or None,
+                 _jd({"symbol": symbol, "via": "research_manual"}, {})))
+            out["upserted"] += 1
 
     return out
 

@@ -10,3 +10,4 @@ APScheduler>=3.10,<4.0
 yfinance>=0.2.40
 PyYAML>=6.0
 websocket-client>=1.8
+crawl4ai>=0.9.5          # 投研 P1.5 缺口补强（crypto_research.clients.crawl4ai_client）

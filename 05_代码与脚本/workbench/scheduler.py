@@ -479,6 +479,12 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
      "CMC 下次解锁抓取（每日 21:50，P1.7 补强 → biz.asset_unlock_next_cmc，reaction 前）", "core"),
     ("asset_unlock_reaction_batch", "55 21 * * *", "asset_unlock_reaction.py", ["--batch"],
      "解锁表现批量物化（每日 21:55，P1.7 → biz.asset_unlock_reaction）", "core"),
+    # OFI 采集（P1.8 补链）：asset_flow_factor 的资金流分有 40% 权重来自
+    #   biz.cg_taker_volume_hist，但该表此前**无任何定时写入方**（2026-10-22 审计：
+    #   919k 行全在一次 8 小时历史回填中写入，此后断更 15 天，因子静默用旧数据打分）。
+    #   524 币 × 2.5s ≈ 22 min，必须排在 22:10 的资金流因子之前。
+    ("cg_taker_ingest", "15 21 * * *", "ingest_cg_taker.py", [],
+     "OFI 主动成交采集（每日 21:15 → biz.cg_taker_volume_hist，先于资金流因子）", "core"),
     ("asset_flow_factor_batch", "10 22 * * *", "asset_flow_factor.py", ["--batch"],
      "资金流因子批量物化（每日 22:10，P1.8 → biz.asset_flow_factor）", "core"),
     # 物化视图刷新必须排在三条 --batch 之后（22:30）；CONCURRENTLY 不阻塞看板读。

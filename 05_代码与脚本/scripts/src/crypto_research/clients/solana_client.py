@@ -104,10 +104,19 @@ class SolanaClient:
             try:
                 resp = self.session.post(self._rpc_url, json=payload, timeout=30)
                 if resp.status_code == 429:
-                    # 429 重试耗尽前不报错；耗尽后落到循环外，需留下可诊断的失败类别
+                    # 429 重试耗尽前不报错；耗尽后落到循环外，需留下可诊断的失败类别。
+                    # 注意区分两种 429（2026-10-22）：已配 key 时 Helius 返回的
+                    # “max usage reached”是**配额用尽**，不是缺 key —— 旧文案一律提示
+                    # “配置 HELIUS_API_KEY 可缓解”，导致排查时误判为 key 未生效。
+                    body = (resp.text or "").strip()[:120]
+                    if self.api_keys:
+                        detail = (f"HTTP 429：{body or '配额用尽'}（已配置 {len(self.api_keys)} 把 key，"
+                                  f"均耗尽 → 等待配额重置/升级套餐，或降低采集量）")
+                    else:
+                        detail = "HTTP 429：RPC 限流，重试耗尽（未配置 HELIUS_API_KEY，公共 RPC 易限流）"
                     self.last_error = {
                         "kind": "rate_limited", "method": method, "code": 429,
-                        "detail": "HTTP 429：RPC 限流，重试耗尽（公共 RPC 常见；配置 HELIUS_API_KEY 可缓解）",
+                        "detail": detail,
                     }
                     if len(self.api_keys) > 1:
                         self._rotate_key()
@@ -187,6 +196,31 @@ class SolanaClient:
         parsed = data.get("parsed", {}) if isinstance(data, dict) else {}
         return parsed.get("info", {}).get("owner", "") if isinstance(parsed, dict) else ""
 
+    def _get_owners_batch(self, token_accounts: list[str]) -> dict[str, str]:
+        """批量反查 token account 的 owner（getMultipleAccounts，单次上限 100）。
+
+        2026-10-22：原实现逐账户调 getAccountInfo，Top20 就要 20 次 RPC，占单币
+        采集总调用量（约 22 次）的绝大部分。Helius 配额耗尽后这直接放大了故障面：
+        300 币/轮 × 22 次 ≈ 6600 次。改为一次批量后降到约 3 次/币，同等配额能跑
+        约 7 倍的币。查不到 owner 的账户不出现在返回值里，调用方回退到 token account。
+        """
+        owners: dict[str, str] = {}
+        for i in range(0, len(token_accounts), 100):
+            chunk = token_accounts[i:i + 100]
+            result = self._json_rpc(
+                "getMultipleAccounts", [chunk, {"encoding": "jsonParsed"}])
+            values = (result or {}).get("value") or [] if isinstance(result, dict) else []
+            for addr, val in zip(chunk, values):
+                if not val:
+                    continue
+                data = val.get("data", {})
+                parsed = data.get("parsed", {}) if isinstance(data, dict) else {}
+                info = parsed.get("info", {}) if isinstance(parsed, dict) else {}
+                owner = info.get("owner", "") if isinstance(info, dict) else ""
+                if owner:
+                    owners[addr] = owner
+        return owners
+
     # ── 持仓（Top 20）──────────────────────────────────────
     def get_token_holders(self, mint: str, limit: int = 20) -> dict[str, Any]:
         """获取 SPL 代币的 Top N 最大持币账户（Helius 免费档上限 20）。
@@ -204,12 +238,16 @@ class SolanaClient:
         accounts = (result or {}).get("value", []) if isinstance(result, dict) else []
         accounts = accounts[:limit]
 
+        # 批量反查 owner（一次 getMultipleAccounts 替代 N 次 getAccountInfo）
+        token_addrs = [a.get("address", "") for a in accounts if a.get("address")]
+        owners = self._get_owners_batch(token_addrs) if token_addrs else {}
+
         holders = []
         for i, acc in enumerate(accounts):
             token_account = acc.get("address", "")
             raw_amount = int(acc.get("amount", 0) or 0)
             ui_amount = raw_amount / (10 ** decimals) if decimals else raw_amount
-            owner = self._get_owner(token_account)
+            owner = owners.get(token_account, "")
             pct = (ui_amount / total * 100) if total else 0.0
             holders.append({
                 "rank": i + 1,

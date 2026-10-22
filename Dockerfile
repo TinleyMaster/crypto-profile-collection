@@ -28,6 +28,11 @@ COPY 05_代码与脚本/scripts/src /app/scripts/src
 COPY 05_代码与脚本/scripts/sql /app/scripts/sql
 COPY 05_代码与脚本/scripts/bin /app/scripts/bin
 COPY 05_代码与脚本/scripts/migrations /app/scripts/migrations
+# pyproject.toml 用于把 crypto_research 装成可编辑包 —— 否则
+# `import crypto_research` 需要 PYTHONPATH=/app/scripts/src 才能成功，
+# 而 SKILL 文档让 AI 直接 `from crypto_research.clients... import ...`。
+COPY 05_代码与脚本/scripts/pyproject.toml /app/scripts/pyproject.toml
+RUN pip install --no-cache-dir -e /app/scripts
 # 复制脚本数据缓存（trade_params_events.csv 等回测事件缓存，缺失时 load_events()
 # 会走重 SQL 重建、容器内静默数十分钟并被卡死收割器误杀 —— 必须随镜像打入）
 COPY 05_代码与脚本/scripts/data /app/scripts/data

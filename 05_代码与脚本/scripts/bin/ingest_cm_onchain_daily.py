@@ -70,24 +70,30 @@ ON CONFLICT (asset_id, metric_date) DO UPDATE SET
     volume_reported_spot_usd_1d = EXCLUDED.volume_reported_spot_usd_1d
 """
 
-# 查询 asset_id 映射
-SELECT_ASSET_ID_SQL = """
-SELECT asset_id FROM core.asset_source_map
-WHERE source_code = 'cm' AND source_asset_key = %s
+# 同名候选全景（按市值排名消歧；排名越小越可信）
+SELECT_CANDIDATES_SQL = """
+SELECT asset_id, canonical_name, market_cap_rank
+FROM core.asset
+WHERE LOWER(canonical_symbol) = %s
+ORDER BY market_cap_rank ASC NULLS LAST, asset_id ASC
 """
 
-# 插入 asset_source_map（CM 映射）
+# 插入/刷新 asset_source_map（CM 映射）
 INSERT_SOURCE_MAP_SQL = """
 INSERT INTO core.asset_source_map (
     asset_id, source_code, source_asset_key, match_status, match_method, is_primary
 ) VALUES (
-    %s, 'cm', %s, 'confirmed', 'symbol_match', false
+    %s, 'cm', %s, 'confirmed', %s, false
 )
 ON CONFLICT (source_code, source_asset_key) DO UPDATE SET
     asset_id = EXCLUDED.asset_id,
     match_status = 'confirmed',
+    match_method = EXCLUDED.match_method,
     updated_at = NOW()
 """
+
+# 同名候选的资产市值排名劣于该阈值时告警（疑似撞名脏资产）
+AMBIGUOUS_WARN_RANK = 2000
 
 
 def safe_float(v: str) -> float | None:
@@ -123,28 +129,48 @@ def fetch_csv_content(symbol: str) -> str | None:
 
 
 def resolve_asset_id(conn, cm_symbol: str) -> int | None:
-    """解析 CM ticker → core.asset.asset_id。"""
-    # 先查 asset_source_map
-    with conn.cursor() as cur:
-        cur.execute(SELECT_ASSET_ID_SQL, (cm_symbol,))
-        row = cur.fetchone()
-        if row:
-            return row[0]
+    """解析 CM ticker → core.asset.asset_id。
 
-    # 未找到映射，尝试通过 canonical_symbol 匹配
+    🔴 消歧规则（2026-10-23 修复）：
+    - 同名多资产是常态（曾把 XRP 撞上 meme 币、STX 撞上 Seagate 美股、
+      BTC 撞上 Bridged BTC、POL 撞上桥接版、MEGA/ARB 同理）。
+    - 以 core.asset 全量同名候选按 market_cap_rank 升序取最小者为正身；
+      source_map 只作缓存，每次都按 rank 重新裁决后回写，
+      防止历史错误映射被永久复用。
+    - 候选 >1 且正身 rank 缺失或 > AMBIGUOUS_WARN_RANK 时打印告警。
+    """
+    # 1) 同名候选全景，按 rank 消歧
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT asset_id FROM core.asset WHERE LOWER(canonical_symbol) = %s",
-            (cm_symbol,),
+        cur.execute(SELECT_CANDIDATES_SQL, (cm_symbol,))
+        candidates = cur.fetchall()  # [(asset_id, name, rank), ...]
+
+    if not candidates:
+        return None
+
+    asset_id, best_name, best_rank = candidates[0]
+
+    if len(candidates) > 1:
+        alts = ", ".join(
+            f"{a}:{n}(rank={r})" for a, n, r in candidates[1:4]
         )
-        row = cur.fetchone()
-        if row:
-            asset_id = row[0]
-            # 建立映射
-            conn.execute(INSERT_SOURCE_MAP_SQL, (asset_id, cm_symbol))
-            return asset_id
+        if best_rank is None or (best_rank or 0) > AMBIGUOUS_WARN_RANK:
+            print(
+                f"  [WARN] {cm_symbol}: {len(candidates)} 个同名候选且正身 rank 异常"
+                f"（选中 {asset_id}:{best_name} rank={best_rank}；备选 {alts}），请人工核验",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"  [INFO] {cm_symbol}: {len(candidates)} 个同名候选，"
+                f"按 rank 消歧选中 {asset_id}:{best_name}(rank={best_rank})；备选 {alts}"
+            )
 
-    return None
+    # 2) 回写映射缓存（match_method 区分消歧方式），防历史错误复用
+    match_method = "rank_disambiguated" if len(candidates) > 1 else "symbol_unique"
+    with conn.cursor() as cur:
+        cur.execute(INSERT_SOURCE_MAP_SQL, (asset_id, cm_symbol, match_method))
+
+    return asset_id
 
 
 def parse_and_upsert(conn, symbol: str, csv_content: str, dry_run: bool) -> dict:

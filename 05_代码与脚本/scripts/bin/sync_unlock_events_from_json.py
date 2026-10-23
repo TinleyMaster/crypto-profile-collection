@@ -254,14 +254,29 @@ def main() -> int:
                     PRIMARY KEY (asset_id, unlock_date, unlock_type, source_code)
                 )
             """)
-            cur.execute("""
+            # 兼容旧表：补索引。🔴 UNLOCK-SYS-001（2026-10-23）：CREATE INDEX IF NOT EXISTS
+            # 即使索引已存在也校验表 owner 权限，navicat 等非 owner 角色会被
+            # InsufficientPrivilege 硬中断（连 --dry-run 都无法执行）。索引缺失不阻塞
+            # 逐行 INSERT，故降级为告警；真缺索引由建表迁移负责，此处不阻断同步。
+            for _idx_sql in (
+                """
                 CREATE INDEX IF NOT EXISTS idx_unlock_event_date
                     ON biz.asset_unlock_event (unlock_date)
-            """)
-            cur.execute("""
+                """,
+                """
                 CREATE INDEX IF NOT EXISTS idx_unlock_event_asset
                     ON biz.asset_unlock_event (asset_id)
-            """)
+                """,
+            ):
+                try:
+                    cur.execute(_idx_sql)
+                except Exception as e:
+                    # 及时回滚：否则事务 abort 后后续语句连锁报 InFailedSqlTransaction
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    print(f"[warn] 索引自愈跳过（不影响同步）: {type(e).__name__}: {e}")
             # 兼容旧表：补充 unlock_ratio_mcap 列
             try:
                 cur.execute("""
@@ -348,11 +363,18 @@ def main() -> int:
                     if amount is None:
                         amount = _parse_token_amount_str(ev.get("amount_str"))
 
-                    # P2-1: pct 语义 —— 源站表头「Release %」= 占总供应量比例，写入 ratio_total；
-                    # 若事件显式标注 ratio_mcap 才走市值口径
+                    # P2-1: pct 语义 —— 源站表头「Release %」= 占总供应量比例，恒写入 ratio_total。
+                    # 🔴 UNLOCK-SYS-001（2026-10-23 审计）：旧逻辑
+                    #   `ratio_mcap = pct if ev.get("ratio_mcap") else None`
+                    # 把「占供应量比例」错位写进「占市值比例」列，库内 3,033 行被污染
+                    # （已数据修复置 NULL）。今后 pct 只进 ratio_total；
+                    # ratio_mcap 仅接受下方「价值/市值」自洽重算值。
                     pct = _to_float(ev.get("pct") or ev.get("unlock_pct"))
-                    ratio_mcap = pct if ev.get("ratio_mcap") else None
-                    ratio_total = None if ev.get("ratio_mcap") else pct
+                    ratio_total = pct
+                    ratio_mcap = None
+                    # 页面显式给出市值口径时单独取用（拒绝 bool 标志位被 safe_float 强转成 1.0）
+                    _mcap_pct_raw = ev.get("ratio_mcap")
+                    mcap_pct = _to_float(_mcap_pct_raw) if not isinstance(_mcap_pct_raw, bool) else None
                     unlock_ratio_circulating = _to_float(ev.get("pct_of_circulating"))
                     scraped_value = _to_float(ev.get("value_usd"))
 
@@ -373,9 +395,9 @@ def main() -> int:
                         derived_amount = ratio_total / 100.0 * supply_basis
                         if price_usd and price_usd > 0:
                             derived_value = derived_amount * price_usd
-                    elif (ratio_mcap is not None and 0 < ratio_mcap <= 100 and mcap_basis):
-                        # 源站给的是「占市值比例」时按市值折算
-                        derived_value = ratio_mcap / 100.0 * mcap_basis
+                    elif (mcap_pct is not None and 0 < mcap_pct <= 100 and mcap_basis):
+                        # 源站显式给出「占市值比例」时按市值折算（与供应量口径互斥）
+                        derived_value = mcap_pct / 100.0 * mcap_basis
 
                     # 覆盖策略：只有「页面值与自洽公式严重背离（>5x）」才让重算值取代页面值；
                     # 页面字段缺失（unlock_amount 实测普遍为 NULL）时直接落重算值。
@@ -401,8 +423,11 @@ def main() -> int:
                     else:
                         unlock_value_usd = scraped_value
                     # ratio_mcap：有市值基准时统一补算（供解锁榜/压力分消费）
+                    # 🔴 合理性护栏（UNLOCK-SYS-001）：单次解锁占市值 >100% 不可能成立
+                    # （实测为 PoW 年发射量误抓 / supply_basis 污染所致），超限不写入
                     if mcap_basis and unlock_value_usd and mcap_basis > 0:
-                        ratio_mcap = round(unlock_value_usd / mcap_basis * 100.0, 4)
+                        _rm = unlock_value_usd / mcap_basis * 100.0
+                        ratio_mcap = round(_rm, 4) if 0 < _rm <= 100 else None
                     risk_level = str(ev.get("risk_level") or "")[:20] or None
 
                     raw_ref = dict(ev)

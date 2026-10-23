@@ -56,6 +56,11 @@ class SolanaClient:
         # Helius 限流(HTTP 429)则自动轮换到下一把，全部试尽才判 rate_limited。
         self.api_keys = [k.strip() for k in str(api_key or "").split(",") if k.strip()]
         self._key_index = 0
+        # 失效 key 冷却（2026-10-23）：配额耗尽的 key 会被 Helius 持续返回 429
+        # "max usage reached"。5 把 key 里若只剩 1 把可用，旧逻辑每次调用都要先撞
+        # 4 次 429 才轮到它，既慢又白烧尝试。这里记录每个 key 的冷却截止时间，
+        # 冷却期内直接跳过；全部在冷却中时回退到最早到期的那把（不放弃尝试）。
+        self._key_cooldown_until: dict[str, float] = {}
         self.calls_per_second = calls_per_second
         self._min_interval = 1.0 / calls_per_second
         self._last_call = 0.0
@@ -84,10 +89,28 @@ class SolanaClient:
             return f"https://mainnet.helius-rpc.com/?api-key={self.api_key}"
         return "https://api.mainnet-beta.solana.com"
 
+    def _cooling_keys(self) -> list[int]:
+        now = time.monotonic()
+        return [i for i, k in enumerate(self.api_keys)
+                if self._key_cooldown_until.get(k, 0.0) > now]
+
     def _rotate_key(self) -> None:
-        """轮换到下一把 key（429 时调用）。单 key / 无 key 时不动。"""
-        if len(self.api_keys) > 1:
-            self._key_index = (self._key_index + 1) % len(self.api_keys)
+        """轮换到下一把 key（429 时调用）。优先跳到未冷却的 key。单 key / 无 key 时不动。"""
+        n = len(self.api_keys)
+        if n > 1:
+            for step in range(1, n + 1):
+                cand = (self._key_index + step) % n
+                if self._key_cooldown_until.get(self.api_keys[cand], 0.0) <= time.monotonic():
+                    self._key_index = cand
+                    return
+            # 全部在冷却中 → 回到最早到期的那把，继续尝试不放弃
+            self._key_index = min(
+                range(n), key=lambda i: self._key_cooldown_until.get(self.api_keys[i], 0.0))
+
+    def _mark_key_dead(self, seconds: float = 600.0) -> None:
+        """当前 key 判为额度耗尽，冷却指定秒数（默认 10 分钟）后再试。"""
+        if self.api_keys:
+            self._key_cooldown_until[self.api_keys[self._key_index]] = time.monotonic() + seconds
 
     def _rate_limit(self) -> None:
         elapsed = time.monotonic() - self._last_call
@@ -118,10 +141,13 @@ class SolanaClient:
                         "kind": "rate_limited", "method": method, "code": 429,
                         "detail": detail,
                     }
+                    if self.api_keys:
+                        # 配额耗尽 = 这把 key 一段时间内都没用，标记冷却后跳到下一把
+                        self._mark_key_dead(600.0)
                     if len(self.api_keys) > 1:
                         self._rotate_key()
                         if attempt < max_attempts - 1:
-                            time.sleep(0.5)  # 换 key 后短等即可
+                            time.sleep(0.3)  # 换 key 后短等即可
                     else:
                         if attempt < max_attempts - 1:
                             time.sleep(2 ** attempt)

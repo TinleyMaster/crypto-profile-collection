@@ -32,7 +32,12 @@ from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
 
 FAPI_BASE = "https://fapi.binance.com"
-FUNDING_LIMIT = 1000           # fundingRate 单请求上限
+# ⚠️ 2026-10-22：Binance 对 fundingRate 的 limit>200 直接返回 403（实测 limit=200 → 200，
+# limit=300/400/500/1000 → 403，稳定复现，非限流非封禁）。原硬编码 1000 导致增量补跑
+# 378/528 个符号全部 403 失败，funding 历史只能靠「已有 900 条即跳过」的老数据撑场面。
+# 改为 200 + 分页游标：每页 200 条，用上一页末条 fundingTime+1 作为下一页 startTime，
+# 直到返回条数 < 200 为止。333 天历史 ≈ 1000 个结算点 ⇒ 最多 5 页/符号。
+FUNDING_PAGE_LIMIT = 200       # 单请求上限（>200 必 403）
 MIN_KLINES_BARS = 1000         # 只回填有足够 1h 历史的符号（回测宇宙）
 COVERED_COUNT = 900            # 已有 >=900 条结算记录则视为已覆盖
 
@@ -86,13 +91,34 @@ def get_last_funding_times(conn, symbols: list[str]) -> dict[str, datetime]:
 
 
 def fetch_funding(symbol: str, incremental: bool, last_time: datetime | None) -> list[tuple]:
-    """返回 [(funding_time, rate), ...] 升序。"""
-    params: dict = {"symbol": symbol, "limit": FUNDING_LIMIT}
+    """返回 [(funding_time, rate), ...] 升序。
+
+    分页：Binance fundingRate 单请求最多 200 条（>200 返回 403），故按 startTime
+    游标逐页拉取，直到某页不足 200 条。incremental 模式下起点为库内最新结算点+1ms。
+    某页失败直接抛出，由上层计为该符号失败（不吞错、不写半截数据）。
+    """
+    cursor_ms = None
     if incremental and last_time is not None:
-        params["startTime"] = int(last_time.timestamp() * 1000) + 1
-    data = fapi_get(f"{FAPI_BASE}/fapi/v1/fundingRate", params)
-    return [(datetime.fromtimestamp(d["fundingTime"] / 1000.0, tz=timezone.utc),
-             float(d["fundingRate"])) for d in data]
+        cursor_ms = int(last_time.timestamp() * 1000) + 1
+
+    out: list[tuple] = []
+    while True:
+        params: dict = {"symbol": symbol, "limit": FUNDING_PAGE_LIMIT}
+        if cursor_ms is not None:
+            params["startTime"] = cursor_ms
+        data = fapi_get(f"{FAPI_BASE}/fapi/v1/fundingRate", params)
+        if not data:
+            break
+        out += [(datetime.fromtimestamp(d["fundingTime"] / 1000.0, tz=timezone.utc),
+                 float(d["fundingRate"])) for d in data]
+        if len(data) < FUNDING_PAGE_LIMIT:
+            break
+        next_cursor = int(data[-1]["fundingTime"]) + 1
+        # 防御：若游标没前进（接口返回重复页），停止避免死循环
+        if cursor_ms is not None and next_cursor <= cursor_ms:
+            break
+        cursor_ms = next_cursor
+    return out
 
 
 def main() -> int:

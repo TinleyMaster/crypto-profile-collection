@@ -16,6 +16,13 @@ venv/
 # 环境变量
 .env
 .env.local
+# ⚠️ 2026-10-22：备份副本曾不受任何规则覆盖（.env 只匹配精确文件名），
+# 实测 scripts/.env.bak.* 两个文件各含 14 处密钥且处于「未忽略未跟踪」状态，
+# 一次 git add -A 即可泄漏。以下通配覆盖所有 .env 派生副本与通用备份后缀。
+.env.*
+*.bak
+*.bak.*
+*.bak_*
 
 # Node (if any)
 node_modules/

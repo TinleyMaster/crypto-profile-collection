@@ -25,7 +25,13 @@ from crypto_research.clients.llm_client import LLMClient, extract_json_from_llm_
 settings = get_settings(require_database=True)
 
 # 文档存储根目录（优先环境变量，兼容容器和本地）
-DOCS_STORAGE_ROOT = Path(os.getenv("DOCS_STORAGE_ROOT", "/app/docs_storage"))
+# ⚠️ 2026-10-22：scripts/.env 曾把 .env.example 的占位符 `/path/to/docs_storage`
+# 原样抄进生产环境，导致本脚本对每份白皮书都判「文件不存在」、摘要表长期零写入。
+# 占位符/空值一律回退到容器真实挂载路径，避免再次静默失败。
+_DOCS_ROOT_ENV = (os.getenv("DOCS_STORAGE_ROOT") or "").strip()
+if not _DOCS_ROOT_ENV or _DOCS_ROOT_ENV.startswith("/path/to"):
+    _DOCS_ROOT_ENV = "/app/docs_storage"
+DOCS_STORAGE_ROOT = Path(_DOCS_ROOT_ENV)
 
 # 单次提取最大文本字符数（避免 token 超限）
 MAX_TEXT_CHARS = 15000

@@ -403,9 +403,16 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # funding 消融在 test 段无数据，§12.1-B26）。8h 结算点，日频增量足以保鲜：
     # 正常滞后 ≤3h，看门狗阈值 24h 有 ~9× 余量。02:40 避开 01:00 周日 OI 回填、
     # 03:05 CVD 就绪检查，以及 06:30/08:10/08:20/09:00 的邮件与早报高峰。
-    # ("scan_funding_backfill", "40 2 * * *", "phase_backfill_funding_history.py",
-    #  ["--incremental"],
-    #  "盘面扫描·funding 历史增量（每天 02:40，只补缺失结算点，供 funding 消融/拥挤度标签）", "core"),
+    # ═══ 2026-10-22 恢复（本次停摆 17 天）═══
+    # 该行随 2026-10-06 v1→v2 切换被一并注释，归类为「v1 funding 消融支持任务」。
+    # 但 funding_rate_hist 并非只有 v1 使用：拥挤度标签、费率历史分位、本币投研的
+    # 资金费率维度都依赖它。停掉后全库 528 个 symbol 的 max(funding_time) 冻结在
+    # 2026-10-05，静默 17 天无人察觉 —— 与 09-17 那次「未注册调度导致停 14 天」
+    # 是同一个根因复发。
+    # 该脚本无告警副作用（只写 funding_rate_hist），恢复调度风险面为零。
+    ("scan_funding_backfill", "40 2 * * *", "phase_backfill_funding_history.py",
+     ["--incremental"],
+     "盘面扫描·funding 历史增量（每天 02:40，只补缺失结算点，供 funding 消融/拥挤度标签/资金费率分位）", "core"),
     ("scan_event_watchlist", "17 */6 * * *", "phase_build_event_watchlist.py", [],
      "盘面扫描·事件预置层（解锁/链上转账 → event_watchlist，每 6 小时；onchain_alert 依赖，保留）", "core"),
     # ("scan_cvd_ready_check", "5 3 * * *", "phase_check_cvd_ready.py", [],

@@ -15,6 +15,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
+from datetime import datetime, timezone
 
 from crypto_research.clients.llm_client import LLMClient, extract_json_from_llm_response
 
@@ -235,6 +237,248 @@ def persist_contract_security(conn, asset_id: int, chain: str, contract: str,
              raw_json_str))
 
 
+def persist_contract_security_scan(conn, asset_id: int, chain: str, contract: str,
+                                   result: dict) -> None:
+    """ContractSecurityClient.scan 结果落库（GoPlus/RugCheck，upsert asset_id）。"""
+    if not isinstance(result, dict):
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO biz.asset_contract_security
+               (asset_id, chain, contract_addr, source, source_status,
+                is_honeypot, is_open_source, is_mintable, can_take_back_ownership,
+                hidden_owner, is_blacklisted, freeze_authority, mint_authority,
+                buy_tax, sell_tax, lp_locked_pct, top_holders_pct,
+                holder_count, creator_percent, risk_score, raw_json, scanned_at)
+               VALUES (%s,%s,%s,%s,%s,
+                %s,%s,%s,%s,%s,%s,%s,%s,
+                %s,%s,%s,%s,%s,%s,%s,%s::jsonb,NOW())
+               ON CONFLICT (asset_id) DO UPDATE SET
+                chain=EXCLUDED.chain, contract_addr=EXCLUDED.contract_addr,
+                source=EXCLUDED.source, source_status=EXCLUDED.source_status,
+                is_honeypot=EXCLUDED.is_honeypot, is_open_source=EXCLUDED.is_open_source,
+                is_mintable=EXCLUDED.is_mintable, can_take_back_ownership=EXCLUDED.can_take_back_ownership,
+                hidden_owner=EXCLUDED.hidden_owner, is_blacklisted=EXCLUDED.is_blacklisted,
+                freeze_authority=EXCLUDED.freeze_authority, mint_authority=EXCLUDED.mint_authority,
+                buy_tax=EXCLUDED.buy_tax, sell_tax=EXCLUDED.sell_tax,
+                lp_locked_pct=EXCLUDED.lp_locked_pct, top_holders_pct=EXCLUDED.top_holders_pct,
+                holder_count=EXCLUDED.holder_count, creator_percent=EXCLUDED.creator_percent,
+                risk_score=EXCLUDED.risk_score, raw_json=EXCLUDED.raw_json, scanned_at=NOW()""",
+            (asset_id, chain, contract,
+             result.get("source") or "scan", result.get("source_status") or "hit",
+             result.get("is_honeypot"), result.get("is_open_source"), result.get("is_mintable"),
+             result.get("can_take_back_ownership"), result.get("hidden_owner"),
+             result.get("is_blacklisted"), result.get("freeze_authority"), result.get("mint_authority"),
+             result.get("buy_tax"), result.get("sell_tax"), result.get("lp_locked_pct"),
+             result.get("top_holders_pct"), result.get("holder_count"), result.get("creator_percent"),
+             result.get("risk_score"),
+             json.dumps(result.get("raw_json") or result, ensure_ascii=False, default=str).replace("\\u0000", "")))
+
+
+# ════════════════════════════════════════════════════════════════
+# 社交热度（asset_social_heat）
+# ════════════════════════════════════════════════════════════════
+def persist_social_heat(conn, asset_id: int, symbol: str,
+                        twitter_followers: int | None = None,
+                        extra: dict | None = None) -> None:
+    """社交热度落库（upsert）：X 关注数写入 input_snapshot_json，供后续评分。"""
+    if not twitter_followers and not extra:
+        return
+    snapshot = {}
+    if twitter_followers:
+        snapshot["twitter_followers"] = twitter_followers
+    if extra:
+        snapshot.update(extra)
+    snapshot["checked_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO biz.asset_social_heat (asset_id, symbol, input_snapshot_json, updated_at)
+               VALUES (%s,%s,%s::jsonb,NOW())
+               ON CONFLICT (asset_id) DO UPDATE SET
+                 symbol=EXCLUDED.symbol, input_snapshot_json=EXCLUDED.input_snapshot_json,
+                 updated_at=NOW()""",
+            (asset_id, symbol, json.dumps(snapshot, ensure_ascii=False)))
+
+
+# ════════════════════════════════════════════════════════════════
+# 融资记录（asset_raises，外部情报补强）
+# ════════════════════════════════════════════════════════════════
+def persist_raises(conn, asset_id: int, protocol_name: str,
+                   raises: list[dict]) -> int:
+    """融资记录落库（幂等：按 asset_id+round+source 去重）。返回新增条数。
+
+    raises 元素：{round, amount(USD), raise_date, lead_investors, other_investors, source}
+    """
+    if not raises:
+        return 0
+    n = 0
+    with conn.cursor() as cur:
+        for r in raises:
+            src = r.get("source") or "web_search"
+            rnd = r.get("round") or "funding_round"
+            cur.execute(
+                "SELECT 1 FROM biz.asset_raises WHERE asset_id=%s AND round=%s AND source=%s LIMIT 1",
+                (asset_id, rnd, src))
+            if cur.fetchone():
+                continue
+            cur.execute(
+                """INSERT INTO biz.asset_raises
+                   (asset_id, protocol_name, round, raise_date, amount,
+                    lead_investors, other_investors, source)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (asset_id, protocol_name, rnd,
+                 r.get("raise_date"), r.get("amount"),
+                 r.get("lead_investors") or [], r.get("other_investors") or [], src))
+            n += 1
+    return n
+
+
+# ════════════════════════════════════════════════════════════════
+# 关联资产图谱（asset_related，AI 判断 + 落库）
+# ════════════════════════════════════════════════════════════════
+def persist_related_assets(conn, asset_id: int, relations: list[dict],
+                           as_of_date=None) -> int:
+    """关联资产图谱落库（幂等：按 asset_id+related_symbol+relation_type upsert）。
+
+    relations 元素：
+      {related_symbol, related_asset_id(可选), related_name(可选),
+       relation_type, relation_direction(默认 bidirectional), strength(默认 medium),
+       confidence(可选), rationale(传导逻辑，含建议观测联动指标)}
+    as_of_date: 标注日期（默认今天）。返回 upsert 条数。
+    """
+    if not relations:
+        return 0
+    from datetime import date
+    d = as_of_date or date.today()
+    n = 0
+    with conn.cursor() as cur:
+        for r in relations:
+            sym = (r.get("related_symbol") or "").strip().upper()
+            if not sym:
+                continue
+            cur.execute(
+                """INSERT INTO biz.asset_related
+                   (asset_id, related_asset_id, related_symbol, related_name,
+                    relation_type, relation_direction, strength, confidence,
+                    rationale, source, as_of_date)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'ai_analysis',%s)
+                   ON CONFLICT (asset_id, related_symbol, relation_type) DO UPDATE SET
+                     related_asset_id=EXCLUDED.related_asset_id,
+                     related_name=EXCLUDED.related_name,
+                     relation_direction=EXCLUDED.relation_direction,
+                     strength=EXCLUDED.strength,
+                     confidence=EXCLUDED.confidence,
+                     rationale=EXCLUDED.rationale,
+                     as_of_date=EXCLUDED.as_of_date,
+                     updated_at=NOW()""",
+                (asset_id,
+                 r.get("related_asset_id"),
+                 sym,
+                 r.get("related_name"),
+                 r.get("relation_type", "other"),
+                 r.get("relation_direction", "bidirectional"),
+                 r.get("strength", "medium"),
+                 r.get("confidence"),
+                 r.get("rationale"),
+                 d))
+            n += 1
+    return n
+
+
+# ════════════════════════════════════════════════════════════════
+# 协议 TVL（protocol_tvl，来自 DefiLlama 补强；让 TVL 可被下游查询）
+# ════════════════════════════════════════════════════════════════
+def persist_protocol_tvl(conn, asset_id: int, tvl_usd: float, measured_at,
+                         *, source: str = "DefiLlama", chains: list | None = None,
+                         protocol_slug: str | None = None,
+                         protocol_category: str | None = None,
+                         notes: str | None = None) -> int:
+    """协议 TVL 落库（幂等：按 asset_id+measured_at upsert，每日一行）。返回 upsert 条数。
+
+    Args:
+        tvl_usd: TVL 美元数值
+        measured_at: 测量日期（date / datetime / str 'YYYY-MM-DD'）
+        source: 数据来源，默认 DefiLlama
+        chains: 链数组，如 ['Ethereum']
+        protocol_slug: DefiLlama slug（如 'cap'）
+        protocol_category: 协议分类（如 'Lending/Stablecoin'）
+        notes: 备注（如峰值/回撤说明）
+    """
+    if tvl_usd is None or measured_at is None:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO biz.protocol_tvl
+                (asset_id, protocol_slug, tvl_usd, chains, protocol_category,
+                 source, measured_at, notes)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (asset_id, measured_at) DO UPDATE SET
+                tvl_usd         = EXCLUDED.tvl_usd,
+                protocol_slug   = EXCLUDED.protocol_slug,
+                chains          = EXCLUDED.chains,
+                protocol_category = EXCLUDED.protocol_category,
+                source          = EXCLUDED.source,
+                notes           = EXCLUDED.notes
+            """,
+            (asset_id, protocol_slug, tvl_usd, chains, protocol_category,
+             source, measured_at, notes))
+    return 1
+
+
+# ════════════════════════════════════════════════════════════════
+# 研究型催化剂（asset_catalyst，人工标注的 4 类催化事件，source=research_manual）
+# ════════════════════════════════════════════════════════════════
+def persist_catalysts(conn, asset_id: int, catalysts: list[dict],
+                      *, source_code: str = "research_manual",
+                      symbol: str | None = None) -> int:
+    """研究型催化剂落库（幂等：按 source_code+source_article_id upsert）。返回 upsert 条数。
+
+    与新闻流（Binance Square 等）区分：人工/AI 提炼的投研催化剂用 source_code='research_manual'，
+    不冲击新闻流唯一键。catalysts 元素：
+      {article_id(可选，缺省自动生成), title, body_text, published_at,
+       event_category(可选), ai_event_type(可选), ai_sentiment(可选),
+       ai_summary(可选), related_pairs(可选，默认 [SYMUSDT])}
+    symbol: 可选，显式传入用于默认 related_pairs；不传则跳过（避免库内反查吞错导致事务中止）。
+    """
+    if not catalysts:
+        return 0
+    sym = (symbol or "").strip().upper()
+    default_pair = ["{0}USDT".format(sym)] if sym else None
+    n = 0
+    with conn.cursor() as cur:
+        for i, c in enumerate(catalysts):
+            aid = c.get("article_id") or "{0}_{1}_{2}".format(source_code, asset_id, i)
+            pairs = c.get("related_pairs") or default_pair
+            cur.execute(
+                """
+                INSERT INTO biz.asset_catalyst
+                    (source_code, source_article_id, asset_id, title, body_text,
+                     published_at, event_category, related_pairs, source_codes,
+                     ai_processed, ai_event_type, ai_sentiment, ai_summary,
+                     created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        TRUE, %s, %s, %s, NOW(), NOW())
+                ON CONFLICT (source_code, source_article_id) DO UPDATE SET
+                    asset_id      = EXCLUDED.asset_id,
+                    title         = EXCLUDED.title,
+                    body_text     = EXCLUDED.body_text,
+                    published_at  = EXCLUDED.published_at,
+                    event_category= EXCLUDED.event_category,
+                    ai_event_type = EXCLUDED.ai_event_type,
+                    ai_sentiment  = EXCLUDED.ai_sentiment,
+                    ai_summary    = EXCLUDED.ai_summary,
+                    updated_at    = NOW()
+                """,
+                (source_code, aid, asset_id, c.get("title"), c.get("body_text"),
+                 c.get("published_at"), c.get("event_category"), pairs,
+                 [source_code],
+                 c.get("ai_event_type"), c.get("ai_sentiment"), c.get("ai_summary"))
+            )
+            n += 1
+    return n
+
+
 # ════════════════════════════════════════════════════════════════
 # 投研报告归档（research_report，结构化结论 + 原文全文 + 前向跟踪）
 # ════════════════════════════════════════════════════════════════
@@ -243,6 +487,82 @@ def _jd(v, default=None):
     if v is None:
         return None if default is None else json.dumps(default, ensure_ascii=False)
     return json.dumps(v, ensure_ascii=False, default=str)
+
+
+# ── 跟踪章节提取（tracking_json 兜底源）──────────────────────────
+# 背景：2026-10-23 审计发现 21/63 份研报 tracking_json 为空——各写入方
+# 均不解析 md 的跟踪章节。tracking 的唯一权威源是 md 的「跟踪清单」章节，
+# 落库时缺失必须自动从 md 派生，杜绝「正文有、库里无」。
+_TRACK_HEAD_PAT = re.compile(
+    r'#{1,3}\s*(?:\d+(?:\.\d+)?[、.．]?\s*)?(?:十?[一二三四五六七八九十]+、)?[^#\n]*'
+    r'(跟踪|情景观察清单|监测|观察清单)')
+_TRACK_FREQ_PAT = re.compile(r'(日频|每日|每天|日度|周频|每周|周度|月频|每月|事件|触发|盘前|盘后|实时)')
+
+
+def extract_tracking_from_md(md_text: str) -> list:
+    """从报告 markdown 的跟踪章节提取结构化跟踪清单。
+
+    返回 [{'freq': <分组>, 'items': [<条目>...]}]；找不到章节/无条目返回 []。
+    分组规则：章节内子标题归为 freq（命中日频/周频/事件等关键词取关键词，
+    否则取子标题前 12 字）；无子标题归「综合」。表格行转条目并滤掉表头。
+    """
+    if not md_text:
+        return []
+    lines = md_text.splitlines()
+    start = next((i for i, l in enumerate(lines) if _TRACK_HEAD_PAT.search(l)), None)
+    if start is None:
+        return []
+
+    def _level(line):
+        m = re.match(r'^(#+)\s', line)
+        return len(m.group(1)) if m else None
+
+    lvl = _level(lines[start])
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        lv2 = _level(lines[j])
+        if lv2 is not None and lv2 <= lvl:
+            end = j
+            break
+
+    groups: list[tuple[str, list]] = []
+    cur_freq, cur_items = '综合', []
+    for raw in lines[start + 1:end]:
+        l = raw.strip()
+        if not l:
+            continue
+        if _level(raw) is not None:
+            if cur_items:
+                groups.append((cur_freq, cur_items))
+                cur_items = []
+            t = raw.lstrip('#').strip()
+            m = _TRACK_FREQ_PAT.search(t)
+            cur_freq = m.group(1) if m else (t[:12] if t else '综合')
+            continue
+        # 加粗伪标题（整行只有 **标签**[：]）→ 视为分组头
+        m_bold = re.match(r'^\*\*([^*]{2,14})\*\*\s*[：:]?\s*$', l)
+        if m_bold:
+            if cur_items:
+                groups.append((cur_freq, cur_items))
+                cur_items = []
+            t = m_bold.group(1).strip()
+            m = _TRACK_FREQ_PAT.search(t)
+            cur_freq = m.group(1) if m else t[:12]
+            continue
+        if re.match(r'^\|[\s\-|:]+\|?$', l):  # 表格分隔行
+            continue
+        if l.startswith('|'):
+            l = l.strip('|').replace('|', '｜')
+        l = re.sub(r'^[-*+]\s+', '', l)
+        l = re.sub(r'^\d+[.、)）]\s*', '', l).strip()
+        # 表头行过滤：短行内含 ≥2 个 ｜ 且含典型列名 → 跳过
+        if l.count('｜') >= 2 and len(l) < 40 and re.search(r'跟踪项|触发条件|指标|节奏|动作|阈值|频率', l):
+            continue
+        if len(l) >= 4:
+            cur_items.append(l[:200])
+    if cur_items:
+        groups.append((cur_freq, cur_items))
+    return [{'freq': fq, 'items': items} for fq, items in groups]
 
 
 def _fetch_as_of_price(conn, asset_id: int):
@@ -295,6 +615,17 @@ def persist_research_report(conn, asset_id: int, symbol: str, report: dict,
     md = report_md or ""
     sha = hashlib.sha256(md.encode("utf-8")).hexdigest() if md else None
     out = {"report_id": None, "sha256": sha, "archived": False, "forward_track": False}
+
+    # tracking 兜底：写入方未传时自动从 md 跟踪章节派生（唯一权威源），
+    # 派生事实记入 meta_json 供审计。md 无跟踪章节则留空，不臆造。
+    meta = dict(meta) if meta else {}
+    if not report.get("tracking"):
+        derived = extract_tracking_from_md(md)
+        if derived:
+            report = {**report, "tracking": derived}
+            meta["tracking_auto_extracted"] = True
+        else:
+            meta["tracking_missing_in_md"] = True
 
     with conn.cursor() as cur:
         cur.execute(

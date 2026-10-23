@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from datetime import datetime, timezone
 
 from crypto_research.clients.llm_client import LLMClient, extract_json_from_llm_response
@@ -296,6 +297,82 @@ def _fetch_as_of_price(conn, asset_id: int):
     return float(val) if val is not None else None
 
 
+# ── 跟踪章节提取（tracking_json 兜底源）──────────────────────────
+# 背景：2026-10-23 审计发现 21/63 份研报 tracking_json 为空——各写入方
+# 均不解析 md 的跟踪章节。tracking 的唯一权威源是 md 的「跟踪清单」章节，
+# 落库时缺失必须自动从 md 派生，杜绝「正文有、库里无」。
+_TRACK_HEAD_PAT = re.compile(
+    r'#{1,3}\s*(?:\d+(?:\.\d+)?[、.．]?\s*)?(?:十?[一二三四五六七八九十]+、)?[^#\n]*'
+    r'(跟踪|情景观察清单|监测|观察清单)')
+_TRACK_FREQ_PAT = re.compile(r'(日频|每日|每天|日度|周频|每周|周度|月频|每月|事件|触发|盘前|盘后|实时)')
+
+
+def extract_tracking_from_md(md_text: str) -> list:
+    """从报告 markdown 的跟踪章节提取结构化跟踪清单。
+
+    返回 [{'freq': <分组>, 'items': [<条目>...]}]；找不到章节/无条目返回 []。
+    分组规则：章节内子标题归为 freq（命中日频/周频/事件等关键词取关键词，
+    否则取子标题前 12 字）；无子标题归「综合」。表格行转条目并滤掉表头。
+    """
+    if not md_text:
+        return []
+    lines = md_text.splitlines()
+    start = next((i for i, l in enumerate(lines) if _TRACK_HEAD_PAT.search(l)), None)
+    if start is None:
+        return []
+
+    def _level(line):
+        m = re.match(r'^(#+)\s', line)
+        return len(m.group(1)) if m else None
+
+    lvl = _level(lines[start])
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        lv2 = _level(lines[j])
+        if lv2 is not None and lv2 <= lvl:
+            end = j
+            break
+
+    groups: list[tuple[str, list]] = []
+    cur_freq, cur_items = '综合', []
+    for raw in lines[start + 1:end]:
+        l = raw.strip()
+        if not l:
+            continue
+        if _level(raw) is not None:
+            if cur_items:
+                groups.append((cur_freq, cur_items))
+                cur_items = []
+            t = raw.lstrip('#').strip()
+            m = _TRACK_FREQ_PAT.search(t)
+            cur_freq = m.group(1) if m else (t[:12] if t else '综合')
+            continue
+        # 加粗伪标题（整行只有 **标签**[：]）→ 视为分组头
+        m_bold = re.match(r'^\*\*([^*]{2,14})\*\*\s*[：:]?\s*$', l)
+        if m_bold:
+            if cur_items:
+                groups.append((cur_freq, cur_items))
+                cur_items = []
+            t = m_bold.group(1).strip()
+            m = _TRACK_FREQ_PAT.search(t)
+            cur_freq = m.group(1) if m else t[:12]
+            continue
+        if re.match(r'^\|[\s\-|:]+\|?$', l):  # 表格分隔行
+            continue
+        if l.startswith('|'):
+            l = l.strip('|').replace('|', '｜')
+        l = re.sub(r'^[-*+]\s+', '', l)
+        l = re.sub(r'^\d+[.、)）]\s*', '', l).strip()
+        # 表头行过滤：短行内含 ≥2 个 ｜ 且含典型列名 → 跳过
+        if l.count('｜') >= 2 and len(l) < 40 and re.search(r'跟踪项|触发条件|指标|节奏|动作|阈值|频率', l):
+            continue
+        if len(l) >= 4:
+            cur_items.append(l[:200])
+    if cur_items:
+        groups.append((cur_freq, cur_items))
+    return [{'freq': fq, 'items': items} for fq, items in groups]
+
+
 def persist_research_report(conn, asset_id: int, symbol: str, report: dict,
                             report_md: str, name: str | None = None,
                             report_path: str | None = None,
@@ -325,6 +402,18 @@ def persist_research_report(conn, asset_id: int, symbol: str, report: dict,
     md = report_md or ""
     sha = hashlib.sha256(md.encode("utf-8")).hexdigest() if md else None
     out = {"report_id": None, "sha256": sha, "archived": False, "forward_track": False}
+
+    # tracking 兜底：写入方未传时自动从 md 跟踪章节派生（唯一权威源），
+    # 派生事实记入 meta_json 供审计。md 无跟踪章节则留空，不臆造。
+    meta = dict(meta) if meta else {}
+    if not report.get("tracking"):
+        derived = extract_tracking_from_md(md)
+        if derived:
+            report = {**report, "tracking": derived}
+            meta["tracking_auto_extracted"] = True
+        else:
+            meta["tracking_missing_in_md"] = True
+
 
     with conn.cursor() as cur:
         cur.execute(
@@ -674,3 +763,72 @@ def persist_catalysts(conn, asset_id: int,
 
     return out
 
+
+def persist_social_heat(conn, asset_id: int, symbol: str,
+                        twitter_followers: int | None = None,
+                        extra: dict | None = None) -> None:
+    """社交热度落库（upsert）：X 关注数写入 input_snapshot_json，供后续评分。"""
+    if not twitter_followers and not extra:
+        return
+    snapshot = {}
+    if twitter_followers:
+        snapshot["twitter_followers"] = twitter_followers
+    if extra:
+        snapshot.update(extra)
+    snapshot["checked_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO biz.asset_social_heat (asset_id, symbol, input_snapshot_json, updated_at)
+               VALUES (%s,%s,%s::jsonb,NOW())
+               ON CONFLICT (asset_id) DO UPDATE SET
+                 symbol=EXCLUDED.symbol, input_snapshot_json=EXCLUDED.input_snapshot_json,
+                 updated_at=NOW()""",
+            (asset_id, symbol, json.dumps(snapshot, ensure_ascii=False)))
+
+
+# ════════════════════════════════════════════════════════════════
+# 融资记录（asset_raises，外部情报补强）
+# ════════════════════════════════════════════════════════════════
+
+
+def persist_contract_security_scan(conn, asset_id: int, chain: str, contract: str,
+                                   result: dict) -> None:
+    """ContractSecurityClient.scan 结果落库（GoPlus/RugCheck，upsert asset_id）。"""
+    if not isinstance(result, dict):
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO biz.asset_contract_security
+               (asset_id, chain, contract_addr, source, source_status,
+                is_honeypot, is_open_source, is_mintable, can_take_back_ownership,
+                hidden_owner, is_blacklisted, freeze_authority, mint_authority,
+                buy_tax, sell_tax, lp_locked_pct, top_holders_pct,
+                holder_count, creator_percent, risk_score, raw_json, scanned_at)
+               VALUES (%s,%s,%s,%s,%s,
+                %s,%s,%s,%s,%s,%s,%s,%s,
+                %s,%s,%s,%s,%s,%s,%s,%s::jsonb,NOW())
+               ON CONFLICT (asset_id) DO UPDATE SET
+                chain=EXCLUDED.chain, contract_addr=EXCLUDED.contract_addr,
+                source=EXCLUDED.source, source_status=EXCLUDED.source_status,
+                is_honeypot=EXCLUDED.is_honeypot, is_open_source=EXCLUDED.is_open_source,
+                is_mintable=EXCLUDED.is_mintable, can_take_back_ownership=EXCLUDED.can_take_back_ownership,
+                hidden_owner=EXCLUDED.hidden_owner, is_blacklisted=EXCLUDED.is_blacklisted,
+                freeze_authority=EXCLUDED.freeze_authority, mint_authority=EXCLUDED.mint_authority,
+                buy_tax=EXCLUDED.buy_tax, sell_tax=EXCLUDED.sell_tax,
+                lp_locked_pct=EXCLUDED.lp_locked_pct, top_holders_pct=EXCLUDED.top_holders_pct,
+                holder_count=EXCLUDED.holder_count, creator_percent=EXCLUDED.creator_percent,
+                risk_score=EXCLUDED.risk_score, raw_json=EXCLUDED.raw_json, scanned_at=NOW()""",
+            (asset_id, chain, contract,
+             result.get("source") or "scan", result.get("source_status") or "hit",
+             result.get("is_honeypot"), result.get("is_open_source"), result.get("is_mintable"),
+             result.get("can_take_back_ownership"), result.get("hidden_owner"),
+             result.get("is_blacklisted"), result.get("freeze_authority"), result.get("mint_authority"),
+             result.get("buy_tax"), result.get("sell_tax"), result.get("lp_locked_pct"),
+             result.get("top_holders_pct"), result.get("holder_count"), result.get("creator_percent"),
+             result.get("risk_score"),
+             json.dumps(result.get("raw_json") or result, ensure_ascii=False, default=str).replace("\\u0000", "")))
+
+
+# ════════════════════════════════════════════════════════════════
+# 社交热度（asset_social_heat）
+# ════════════════════════════════════════════════════════════════

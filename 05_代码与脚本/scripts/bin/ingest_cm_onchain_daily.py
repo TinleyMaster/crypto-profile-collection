@@ -116,16 +116,26 @@ def safe_int(v: str) -> int | None:
         return None
 
 
+# jsDelivr CDN 镜像兜底：raw.githubusercontent 对大文件在本网络环境
+# 会被中途掐断（RemoteDisconnected / 超时），CDN 镜像实测 2.8s 拿下全量。
+# 注意 @master 走 jsDelivr 有最多 ~12h 缓存，对本数据（社区档本就滞后数月）可接受。
+CM_CSV_MIRROR = "https://cdn.jsdelivr.net/gh/coinmetrics/data@master/csv"
+
+
 def fetch_csv_content(symbol: str) -> str | None:
-    """下载指定币种的 CSV 内容。失败返回 None。"""
-    url = f"{CM_CSV_BASE}/{symbol}.csv"
-    try:
-        req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urlopen(req, timeout=30) as resp:
-            return resp.read().decode("utf-8")
-    except Exception as e:
-        print(f"  [WARN] {symbol}: 下载失败 - {e}", file=sys.stderr)
-        return None
+    """下载指定币种的 CSV 内容。失败返回 None。多源依次兜底。"""
+    last_err: Exception | None = None
+    for base in (CM_CSV_BASE, CM_CSV_MIRROR):
+        url = f"{base}/{symbol}.csv"
+        try:
+            req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urlopen(req, timeout=120) as resp:
+                return resp.read().decode("utf-8")
+        except Exception as e:
+            last_err = e
+            print(f"  [WARN] {symbol}: {base} 下载失败 - {e}", file=sys.stderr)
+    print(f"  [WARN] {symbol}: 全部源下载失败 - {last_err}", file=sys.stderr)
+    return None
 
 
 def resolve_asset_id(conn, cm_symbol: str) -> int | None:
@@ -214,6 +224,11 @@ def parse_and_upsert(conn, symbol: str, csv_content: str, dry_run: bool) -> dict
         # 特殊处理整数列
         record["adr_act_cnt"] = safe_int(row.get("AdrActCnt", ""))
         record["tx_tfr_cnt"] = safe_int(row.get("TxTfrCnt", ""))
+
+        # 部分资产 CSV 无 PriceUSD 列（实测 ckb），退回 ReferenceRateUSD
+        # （CM 美元参考汇率，口径等价），避免 price_usd 全 NULL。
+        if record.get("price_usd") is None:
+            record["price_usd"] = safe_float(row.get("ReferenceRateUSD", ""))
 
         batch.append(record)
 

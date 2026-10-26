@@ -31,6 +31,8 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 
 from crypto_research.config import get_settings
 from crypto_research.db.conn import get_connection
+# 🔴 UNLOCK-SYS-002 源头治理 G3.1：模板占位行判据与消费端共用，避免实现漂移
+from crypto_research.unlock_quality import is_template_event
 
 NAV_TIMEOUT = 20  # 页面导航超时（秒）
 WAIT_MS = 3000      # 页面渲染等待（毫秒）
@@ -1518,6 +1520,27 @@ def save_to_db(conn, asset_id: int, data: dict) -> None:
     import json as json_mod
 
     unlock_ratio_mcap = _compute_unlock_ratio_mcap(data)
+
+    # 🔴 UNLOCK-SYS-002 源头治理 G3.1：入库前剔除 tokenomist 模板占位行。
+    #   源站对「无真实解锁计划」的资产渲染一行占位符
+    #   （pct=12.0 / value_usd=123460.0 / status="4 months left"），
+    #   实测跨 108 个资产重复出现（含 BTC 这类无「解锁」概念的币），
+    #   入库后表现为 ratio_total=12 假比例 + 荒谬解锁价值（BNB $8.32 万亿 / 占市值 8524%）。
+    #   在**爬取端**丢弃 ⇒ 母表不再带毒，下游任何消费端都受益（不依赖消费端各自加护栏）。
+    #   判据与消费端共用 crypto_research.unlock_quality，避免两处实现漂移。
+    _events = list(data.get("unlock_events") or [])
+    _kept, _dropped = [], 0
+    for _ev in _events:
+        if is_template_event(_ev):
+            _dropped += 1
+            continue
+        _kept.append(_ev)
+    if _dropped:
+        _log(f"  [SYS-002] 剔除模板占位行 {_dropped} 条（asset_id={asset_id}）")
+        data = dict(data)
+        data["unlock_events"] = _kept
+        # unlock_ratio_mcap 基于 upcoming 事件计算，需在剔除后重算
+        unlock_ratio_mcap = _compute_unlock_ratio_mcap(data)
 
     sql = """
         INSERT INTO biz.asset_token_unlocks (

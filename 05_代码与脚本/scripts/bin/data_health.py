@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -107,6 +108,12 @@ HEALTH_CHECKS = [
      "SELECT MAX(bucket_hour), COUNT(*) FROM biz.onchain_netflow_hourly WHERE asset_id={aid}", 2, 24),
     ("cm_onchain", "链上指标(CoinMetrics)",
      "SELECT MAX(metric_date), COUNT(*) FROM biz.cm_asset_onchain_daily WHERE asset_id={aid}", 3, 30),
+    ("factor_elasticity", "因子-价格弹性",
+     "SELECT MAX(as_of), COUNT(*) FROM biz.asset_price_elasticity WHERE asset_id={aid}", 7, 1),
+    ("factor_unlock_reaction", "因子-解锁反应",
+     "SELECT MAX(as_of), COUNT(*) FROM biz.asset_unlock_reaction WHERE asset_id={aid}", 7, 0),
+    ("factor_flow", "因子-资金流",
+     "SELECT MAX(as_of), COUNT(*) FROM biz.asset_flow_factor WHERE asset_id={aid}", 7, 1),
     ("doc_entries", "文档入口链接",
      "SELECT MAX(created_at), COUNT(*) FROM biz.doc_source_entry WHERE asset_id={aid}", 90, 1),
     ("doc_assets", "文档资产",
@@ -152,6 +159,30 @@ def _binance_symbol(conn, aid: int) -> str:
         cur.execute("SELECT canonical_symbol FROM core.asset WHERE asset_id=%s", (aid,))
         row = cur.fetchone()
         return (row[0] if row else "") + "USDT"
+
+
+_TABLE_RE = re.compile(r"FROM\s+(biz|core)\.(\w+)", re.IGNORECASE)
+
+
+def _table_global_count(conn, sql_tpl: str) -> int | None:
+    """0 条时探表级全局行数：区分「本资产确无数据」与「表级异常/空表」。
+
+    背景（2026-10-23 实测）：晨间 XMR/ZEC 体检中 CM 链上指标报"0 条"，被误读为
+    "结构性无数据"；实为外部批量载入事务在体检之后才提交（入库竞态）。查询本身无误，
+    但矩阵读者无法从"0 条"区分三种情况。表名从 HEALTH_CHECKS 的固定 SQL 常量中提取
+    （非外部输入，正则仅匹配 schema.单词表名），提取/查询失败返回 None，不影响主流程。
+    """
+    m = _TABLE_RE.search(sql_tpl)
+    if not m:
+        return None
+    schema, table = m.group(1).lower(), m.group(2)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT count(*) FROM {schema}.{table}")
+            row = cur.fetchone()
+            return int(row[0]) if row and row[0] is not None else None
+    except Exception:
+        return None
 
 
 def check_data_health(conn, asset_id: int, binance_symbol: str | None = None) -> dict:
@@ -216,6 +247,16 @@ def check_data_health(conn, asset_id: int, binance_symbol: str | None = None) ->
         detail.append(f"{cnt} 条")
         if min_count > 0 and cnt < min_count:
             detail.append(f"少于阈值 {min_count}")
+        if cnt == 0:
+            # 0 条歧义治理（2026-10-23）：探表级全局行数，让矩阵读者一眼区分
+            # 「本资产无」/「空表」/「表有数据（他资产）」——防止再把入库竞态
+            # 或表级异常误读成"该资产结构性无数据"。
+            g = _table_global_count(conn, sql_tpl)
+            if g is not None:
+                if g > 0:
+                    detail.append(f"该表全局 {g:,} 行（其他资产有数据，本资产确无）")
+                else:
+                    detail.append("该表全局 0 行（空表）")
 
         items.append({
             "key": key, "label": name, "status": status,

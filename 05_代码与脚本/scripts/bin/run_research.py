@@ -766,6 +766,52 @@ SEARCH_DIMENSIONS = [
 ]
 
 
+def _parse_funding(results: list[dict]) -> list[dict]:
+    """从团队/融资搜索结果尽力解析结构化融资（正则提取金额/轮次，解析不到返回空）。
+
+    返回 [{round, amount(USD), source='web_search'}]，供 persist_raises 落库。
+    防误判：必须含融资语义关键词 + 金额 >= $100K（避免把币价/ROI 等小额误当融资）。
+    """
+    raises: list[dict] = []
+    for r in results:
+        text = " ".join(str(r.get(k) or "") for k in ("title", "desc", "description"))
+        # 1) 融资语义闸门：无融资关键词则跳过（排除币价/ROI/普通数字）
+        if not re.search(r"raised|funding|fund|round|raise|seed|series\s*[abcd]|investor|valuation",
+                         text, re.I):
+            continue
+        # 2) 金额（支持 $ / €）
+        m = re.search(r"[€$]\s*([\d.]+)\s*([Mm]illion|M|K|k)?", text)
+        if not m:
+            continue
+        val = float(m.group(1))
+        unit = (m.group(2) or "").lower()
+        if unit.startswith("m"):
+            amount = val * 1_000_000
+        elif unit.startswith("k"):
+            amount = val * 1_000
+        else:
+            amount = val
+        # 3) 金额阈值：融资一般 >= $100K，过滤价格/手续费等小额
+        if amount < 100_000:
+            continue
+        rm = re.search(r"\b(pre-seed|seed|series\s*[abcd]|private\s*(?:sale|round)|ico|ido)\b", text, re.I)
+        raises.append({
+            "round": (rm.group(1).lower().replace(" ", "_") if rm else "funding_round"),
+            "amount": amount,
+            "source": "web_search",
+        })
+    # 简单去重（round+amount）
+    seen = set()
+    uniq = []
+    for r in raises:
+        key = (r["round"], round(r["amount"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(r)
+    return uniq
+
+
 def stage_external_search(identity: dict, per_dim: int = 2, crawl_details: int = 0) -> dict:
     """firecrawl 搜索 3 个维度补外部情报（P2 团队/融资/审计 + P5 动态）。
 
@@ -1279,18 +1325,108 @@ def main() -> int:
                         docs_md, source_pages=source_pages)
                     print(f"[persist] 文档摘要: {'已落库 doc_whitepaper_summary' if _persisted else '跳过（已有摘要或 LLM 失败）'}")
                 else:
-                    print("[persist] 无文档深度爬取内容，跳过摘要落库（链上补强可用 bin/collect_onchain_fundamentals.py）")
+                    print("[persist] 无文档深度爬取内容，跳过摘要落库")
             except Exception as e:
                 conn.rollback()  # 落库失败回滚，避免污染主流程事务
-                print(f"[persist] 落库异常（不影响采集）: {str(e)[:120]}")
+                print(f"[persist] 文档摘要落库异常（不影响采集）: {str(e)[:120]}")
+
+            # ── 合约安全：主链合约扫描（GoPlus/RugCheck）→ asset_contract_security
+            try:
+                from crypto_research.persist import persist_contract_security_scan
+                from crypto_research.clients.contract_security_client import ContractSecurityClient
+                with conn.cursor() as _cur:
+                    _cur.execute(
+                        "SELECT chain, contract_address FROM core.asset_contract "
+                        "WHERE asset_id=%s AND contract_address IS NOT NULL "
+                        "ORDER BY is_primary DESC, contract_id LIMIT 1", (asset["asset_id"],))
+                    _row = _cur.fetchone()
+                if _row:
+                    _chain, _addr = _row
+                    _scan = ContractSecurityClient().scan(asset["asset_id"], _chain, _addr)
+                    if isinstance(_scan, dict) and _scan.get("source_status"):
+                        persist_contract_security_scan(conn, asset["asset_id"], _chain, _addr, _scan)
+                        print(f"[persist] 合约安全: {_scan.get('source')}/{_scan.get('source_status')} "
+                              f"risk={_scan.get('risk_score')} 已落库")
+                    else:
+                        print(f"[persist] 合约安全: 扫描无结果（{_chain} 可能不支持）")
+                else:
+                    print("[persist] 合约安全: 无合约地址，跳过")
+            except Exception as e:
+                conn.rollback()
+                print(f"[persist] 合约安全落库异常（不影响采集）: {str(e)[:120]}")
+
+            # ── 社交：X 关注数 → asset_social_heat
+            try:
+                from crypto_research.persist import persist_social_heat
+                from crypto_research.clients.crawl4ai_client import Crawl4AIClient
+                with conn.cursor() as _cur:
+                    _cur.execute(
+                        "SELECT entry_url FROM biz.doc_source_entry "
+                        "WHERE asset_id=%s AND entry_type='twitter' "
+                        "  AND (entry_url ILIKE '%%x.com%%' OR entry_url ILIKE '%%twitter.com%%') "
+                        "ORDER BY is_primary DESC LIMIT 1", (asset["asset_id"],))
+                    _tw = _cur.fetchone()
+                if _tw:
+                    _md = Crawl4AIClient(get_settings(require_database=False)).crawl(
+                        _tw[0], max_chars=2500, use_cache=True)
+                    if _md:
+                        _m = re.search(r"(\d+(?:\.\d+)?)\s*([KMB]?)\s*Followers", _md)
+                        if _m:
+                            _val = float(_m.group(1))
+                            _mult = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(_m.group(2), 1)
+                            _followers = int(_val * _mult)
+                            persist_social_heat(conn, asset["asset_id"], identity["symbol"],
+                                                twitter_followers=_followers)
+                            print(f"[persist] 社交: X {_followers:,} 关注 已落库 asset_social_heat")
+                        else:
+                            print("[persist] 社交: X 页未解析到关注数")
+                    else:
+                        print("[persist] 社交: X 抓取失败（登录墙/反爬）")
+                else:
+                    print("[persist] 社交: 无 twitter 入口，跳过")
+            except Exception as e:
+                conn.rollback()
+                print(f"[persist] 社交落库异常（不影响采集）: {str(e)[:120]}")
         # P2/P5 外部搜索补全（firecrawl，--search 开启）
         external_search = stage_external_search(identity, per_dim=args.search,
                                                 crawl_details=args.search_crawl) if args.search > 0 else None
         if external_search is not None:
             print(f"[research] 外部搜索: {external_search.get('note', '')}")
+
+        # 外部情报落库（融资 → asset_raises，依赖 external_search 结果）
+        if args.persist and external_search:
+            try:
+                from crypto_research.persist import persist_raises
+                funding_results: list[dict] = []
+                for _dim in external_search.get("dimensions") or []:
+                    if _dim.get("key") == "team_funding":
+                        funding_results = _dim.get("results") or []
+                        break
+                if funding_results:
+                    _raises = _parse_funding(funding_results)
+                    if _raises:
+                        _n = persist_raises(conn, asset["asset_id"], identity["name"], _raises)
+                        print(f"[persist] 融资: 解析 {len(_raises)} 条已落库 asset_raises（新增 {_n}）")
+                    else:
+                        print("[persist] 融资: 搜索结果未解析出结构化融资（建议人工补强）")
+                else:
+                    print("[persist] 融资: 无 team_funding 搜索结果，跳过")
+            except Exception as e:
+                conn.rollback()
+                print(f"[persist] 融资落库异常（不影响采集）: {str(e)[:120]}")
         market = stage_market(conn, asset, binance_symbol)
         flow = stage_flow(conn, identity.get("symbol", ""))
         catalyst = stage_catalyst(conn, asset)
+
+        # 矩阵防陈旧（2026-10-23）：体检快照算于 P1（采集阶段之前），而本 run 的
+        # 落库阶段（docs 摘要/融资，--persist 默认开）与外部作业都可能在此期间写入
+        # ⇒ 用入库后的状态重算体检再渲染，避免矩阵漏报本 run 刚补齐/刚可见的数据域
+        # （晨间 XMR/ZEC 体检报 CM"0 条"、白皮书"0 条"即此类陈旧/竞态漏报）
+        try:
+            health = check_data_health(conn, asset["asset_id"], binance_symbol)
+            print("[research] 体检矩阵已按入库后状态重算（防陈旧）")
+        except Exception as e:
+            print(f"[research] 体检重算失败，沿用 P1 快照: {type(e).__name__}: {str(e)[:80]}")
 
         gen_time = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
         data = {

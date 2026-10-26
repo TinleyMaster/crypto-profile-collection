@@ -45,6 +45,9 @@ SELECT count(*)                                          AS rows_total,
        count(*) FILTER (WHERE quad_key = 'avoid')        AS n_avoid,
        count(*) FILTER (WHERE is_double_confirm)         AS n_double_confirm,
        count(*) FILTER (WHERE is_divergence)             AS n_divergence,
+       -- fix_114 / SKILL-HC-010：hc 池规模必须每次刷新都可见。
+       -- 历史踩坑：刷完只看到"行数不变"，误判刷新没生效（SKILL-HC-009）。
+       count(*) FILTER (WHERE hc_prefilter)              AS n_hc,
        max(latest_as_of)                                 AS latest_as_of
 FROM {MV}
 """
@@ -103,6 +106,7 @@ def main() -> int:
               f" defensive={after['n_defensive']} avoid={after['n_avoid']}")
         print(f"     双确认 {after['n_double_confirm']}（Δ{diff['n_double_confirm']:+d}）"
               f"  背离 {after['n_divergence']}")
+        print(f"     hc 池 {after['n_hc']}（Δ{diff['n_hc']:+d}）")
     return 0
 
 

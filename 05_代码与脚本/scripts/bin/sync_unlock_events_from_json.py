@@ -578,6 +578,19 @@ def main() -> int:
         print(f"  [SYS-002] 模板占位行丢弃: {skipped_template} 条"
               f" | 市值基准污染拒用: {mcap_contaminated} 次"
               f" | ratio_mcap 越界拒写: {ratio_mcap_out_of_range} 条")
+        # ⚠️ SKILL-HC-010：本步只写 biz.asset_unlock_event，链路还差两步。
+        #    biz.mv_asset_screen 的 u_n_events 取自 biz.asset_unlock_reaction
+        #    的**最新 as_of 快照**（ORDER BY as_of DESC LIMIT 1），本脚本既不重算
+        #    快照也不刷新视图 —— 只跑到这里就去查 hc 漏斗，会看到「数据明明补了、
+        #    u_n_events 却纹丝不动」的假故障（SKILL-HC-009 的真实踩坑）。
+        print()
+        print("⚠️  链路未完成（本步只更新 event 表）：")
+        print("    ③ 重算解锁反应快照  python bin/asset_unlock_reaction.py "
+              f"{'--asset-id %d ' % args.asset_id if args.asset_id else '--batch '}--persist")
+        print("    ④ 刷新物化视图      python bin/refresh_asset_screen_mv.py")
+        print("    或一条命令跑完 ③④   python bin/refresh_unlock_chain.py "
+              f"{'--asset-id %d' % args.asset_id if args.asset_id else '--from-file <targets.tsv>'} "
+              "--skip-crawl --skip-event")
 
     return 0
 

@@ -932,10 +932,16 @@ def main() -> int:
                 if rec["decision"] in ("ordered", "aborted", "skipped", "error"):
                     with get_connection(settings.database_url) as conn:
                         with conn.cursor() as cur:
+                            # 审计：把决策原因合并进 params JSONB，方便事后追溯 skipped/error
+                            # （之前只写 exec_state 不写 reason，事后无法复盘跳过/失败原因）
+                            _audit_patch = {"exec_reason": rec.get("reason", ""),
+                                            "exec_at": datetime.now(timezone.utc).isoformat()}
                             cur.execute(
-                                "UPDATE biz.scan_gainer_signal SET exec_state=%s, executed_at=%s "
+                                "UPDATE biz.scan_gainer_signal SET exec_state=%s, executed_at=%s, "
+                                "params = COALESCE(params, '{}'::jsonb) || %s::jsonb "
                                 "WHERE id=%s",
-                                (rec["decision"], datetime.now(timezone.utc), sig["id"]),
+                                (rec["decision"], datetime.now(timezone.utc),
+                                 json.dumps(_audit_patch), sig["id"]),
                             )
                         # 实盘开仓 → 写 v2_trade_log（全量留痕，供追溯复验 + 完善策略）
                         # 只记机器人单（origin='bot'）；手动单不经过本脚本、不入本表。

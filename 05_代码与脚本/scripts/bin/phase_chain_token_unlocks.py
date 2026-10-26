@@ -32,10 +32,11 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 from crypto_research.config import get_settings
 from crypto_research.db.conn import get_connection
 # 🔴 UNLOCK-SYS-002 源头治理 G3.1：模板占位行判据与消费端共用，避免实现漂移
-from crypto_research.unlock_quality import is_template_event
+from crypto_research.unlock_quality import is_template_event, classify_event_quality
 
 NAV_TIMEOUT = 20  # 页面导航超时（秒）
 WAIT_MS = 3000      # 页面渲染等待（毫秒）
+TABLES_TIMEOUT_MS = 15000  # 等待解锁表格渲染的上限（毫秒），SKILL-HC-007
 
 
 def _log(msg: str) -> None:
@@ -489,6 +490,26 @@ def _scrape_variant(slug: str, variant: dict, is_fallback: bool, context,
 
         page.wait_for_timeout(WAIT_MS)
         _close_popups(page)
+
+        # SKILL-HC-007（2026-10-26）：固定 ms 等待赌不过 SPA 渲染时机。
+        # 实测同一命令连跑 3 次，有 1 次 document.querySelectorAll('table') === 0
+        # ⇒ 抓出 0 条事件却被写成 crawl_status='ok'，反向污染已有的 7 条数据。
+        # 改为轮询等待目标表出现；超时只告警不中断（交给 main() 的写入护栏兜底）。
+        try:
+            page.wait_for_function(
+                """() => Array.from(document.querySelectorAll('table')).some(t => {
+                    const hs = Array.from(
+                        t.querySelectorAll('thead th, thead td, tr:first-child th, tr:first-child td')
+                    ).map(h => h.textContent.trim().toLowerCase());
+                    return hs.some(h => h.includes('unlock date'))
+                        && hs.some(h => h.includes('mcap'));
+                })""",
+                timeout=TABLES_TIMEOUT_MS,
+            )
+        except PlaywrightTimeout:
+            _log(f"  [WARN] 等待解锁表格超时（{TABLES_TIMEOUT_MS}ms），页面未渲染完成")
+        except Exception as e:
+            _log(f"  [WARN] 等待解锁表格异常: {type(e).__name__}: {e}")
 
         unlocks_ov_fn = variant.get("extract_unlocks_overview")
         if unlocks_ov_fn:
@@ -1030,30 +1051,31 @@ def _extract_unlock_events(page) -> list[dict]:
     try:
         rows_data = page.evaluate("""
             () => {
+                // SKILL-HC-003: 页面有两张同构表（Upcoming + Past Unlocks），
+                // 旧实现命中首表即 return，Past 表（历史事件）被整条丢弃。
+                // 改为收集所有匹配表，跨表去重交给 Python 层 seen 集合。
                 const tables = document.querySelectorAll('table');
+                const all = [];
                 for (const table of tables) {
                     const headers = Array.from(table.querySelectorAll('thead th, thead td, tr:first-child th, tr:first-child td'));
                     const headerTexts = headers.map(h => h.textContent.trim().toLowerCase());
-                    if (headerTexts.some(h => h.includes('unlock date')) && headerTexts.some(h => h.includes('mcap'))) {
-                        const rows = [];
-                        const trs = table.querySelectorAll('tbody tr, tr');
-                        for (const tr of trs) {
-                            const tds = tr.querySelectorAll('td');
-                            if (tds.length < 3) continue;
-                            const date = tds[0].textContent.trim();
-                            if (!/\\w{3,9}\\s+\\d{1,2},\\s+\\d{4}/.test(date)) continue;
-                            rows.push({
-                                date: date,
-                                pct: tds[1].textContent.trim(),
-                                recipients: tds[2].textContent.trim(),
-                                status: tds[3] ? tds[3].textContent.trim() : '',
-                                rowText: tr.textContent.trim(),
-                            });
-                        }
-                        return rows;
+                    if (!(headerTexts.some(h => h.includes('unlock date')) && headerTexts.some(h => h.includes('mcap')))) continue;
+                    const trs = table.querySelectorAll('tbody tr, tr');
+                    for (const tr of trs) {
+                        const tds = tr.querySelectorAll('td');
+                        if (tds.length < 3) continue;
+                        const date = tds[0].textContent.trim();
+                        if (!/\\w{3,9}\\s+\\d{1,2},\\s+\\d{4}/.test(date)) continue;
+                        all.push({
+                            date: date,
+                            pct: tds[1].textContent.trim(),
+                            recipients: tds[2].textContent.trim(),
+                            status: tds[3] ? tds[3].textContent.trim() : '',
+                            rowText: tr.textContent.trim(),
+                        });
                     }
                 }
-                return [];
+                return all;
             }
         """)
         _log(f"  JS 提取表格: {len(rows_data)} 行")
@@ -1422,21 +1444,46 @@ SOURCE_VARIANTS = [
         "extract_unlocks_overview": _extract_unlocks_overview,
         "extract_unlock_events": _extract_unlock_events,
     },
-    {
-        "key": "tokenomist.ai",
-        "base_tpl": "https://tokenomist.ai/{slug}",
-        "unlock_path": "/unlock-events",
-        "extract_overview": _extract_overview_legacy,
-        "extract_unlocks_overview": None,
-        "extract_unlock_events": _extract_unlock_events_legacy,
-    },
+    # SKILL-HC-004（2026-10-26 定案）：tokenomist.ai 变体已下线，不再作为 fallback。
+    # 三条独立证据：
+    #   ① 站点已硬墙：urllib 与真 chromium 访问均 HTTP 403（28KB 错误页，0 张表）
+    #   ② 历史产出天花板极低：source_name='tokenomist.ai' 的 103 个资产，事件数
+    #      分布 {0:14, 1:36, 2:12, 3:23, 4:18}，n>=5 为 0 个（对比 tokenomics.com 460 个 n=7）
+    #   ③ 时间线停止：最后成功抓取 2026-09-25、最后尝试 2026-09-26，此后 10 月零记录
+    #      （同期 tokenomics.com 最后尝试 2026-10-25）
+    # ⇒ 该变体的「只取首表」缺陷虽真实存在，但代码已永远走不到，修它无意义。
+    # 遗留的 _extract_*_legacy 函数保留为死代码，另行清理，不在本次删除。
 ]
 
 
 # ── 存入数据库 ─────────────────────────────────────────────
 
 def ensure_table(conn) -> None:
-    """确保 biz.asset_token_unlocks 表存在，并包含 revenue/valuation 等列。"""
+    """确保 biz.asset_token_unlocks 表存在，并包含 revenue/valuation 等列。
+
+    SKILL-HC-008（2026-10-26）：连接用户 navicat 不是表 owner（owner=postgres），
+    DDL 一律被 InsufficientPrivilege 拒绝（`must be owner of table asset_token_unlocks`）。
+    而下面的 CREATE/ALTER 对「表已存在且列齐全」是纯 no-op —— 无条件执行等于给每次
+    --save 埋一颗权限地雷：实测 20 个资产的批量落库 100% 卡死在本函数，一条数据没写成。
+    改为先探测列集合，齐全即返回（主路径零 DDL），缺列才走 DDL。
+    """
+    required = {
+        "source_url", "source_name", "slug", "overview_json", "unlock_events_json",
+        "revenue_json", "valuation_json", "methodology_json", "input_snapshot_json",
+        "scraped_at", "updated_at", "crawl_status", "last_attempt_at", "unlock_ratio_mcap",
+    }
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'biz' AND table_name = 'asset_token_unlocks'"
+        )
+        existing = {r[0] for r in cur.fetchall()}
+    if required <= existing:
+        return  # 表与列均齐备 ⇒ 零 DDL（正常路径，不触碰权限）
+
+    missing = sorted(required - existing)
+    _log(f"  [WARN] asset_token_unlocks 缺列 {missing}，尝试 DDL 补齐（需表 owner 权限）")
+
     with conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS biz.asset_token_unlocks (
@@ -1515,6 +1562,61 @@ def _compute_unlock_ratio_mcap(data: dict) -> float | None:
     return None
 
 
+def _detect_symbol_collision(conn, asset_id: int) -> None:
+    """🔴 UNLOCK-SYS-002 源头治理 G2.5：检测并记录 canonical_symbol 撞名。
+
+    背景：`core.asset.canonical_symbol` 命名空间被长尾山寨币侵占——实测 2,108 个
+    symbol 有多个 asset_id（BTC 撞 "Big Titty Coin"、ETH 撞 "Bridged ETH"…）。
+    `core.asset_source_map` 的 `cmc_id → asset_id` 映射是干净的 1:1，问题不在映射，
+    而在于 symbol 本身不唯一 ⇒ 按 symbol 聚合的消费端（reaction 的 EVENTS_SQL）
+    会把 A 币的解锁事件算到 B 币头上。
+
+    本函数**只记录告警，不改 core.asset**——改 canonical_symbol 会破坏大量下游引用，
+    口径变更需主人拍板（工单 G2.3/G2.4）。
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                WITH me AS (
+                    SELECT asset_id, canonical_symbol, canonical_name FROM core.asset WHERE asset_id=%s
+                )
+                SELECT o.asset_id, o.canonical_name
+                FROM me JOIN core.asset o
+                  ON o.canonical_symbol = me.canonical_symbol AND o.asset_id <> me.asset_id
+                LIMIT 1
+            """, (asset_id,))
+            row = cur.fetchone()
+            if not row:
+                # 无撞名 ⇒ 清掉历史告警（若资产曾撞名后已修正）
+                cur.execute("DELETE FROM biz.asset_symbol_collision WHERE asset_id=%s", (asset_id,))
+                return
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS biz.asset_symbol_collision (
+                    asset_id BIGINT PRIMARY KEY,
+                    canonical_symbol VARCHAR(50),
+                    collided_with_asset_id BIGINT,
+                    collided_with_name VARCHAR(200),
+                    detected_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                INSERT INTO biz.asset_symbol_collision
+                    (asset_id, canonical_symbol, collided_with_asset_id, collided_with_name)
+                SELECT m.asset_id, m.canonical_symbol, o.asset_id, o.canonical_name
+                FROM core.asset m JOIN core.asset o
+                  ON o.canonical_symbol = m.canonical_symbol AND o.asset_id <> m.asset_id
+                WHERE m.asset_id = %s
+                ON CONFLICT (asset_id) DO UPDATE SET
+                    canonical_symbol = EXCLUDED.canonical_symbol,
+                    collided_with_asset_id = EXCLUDED.collided_with_asset_id,
+                    collided_with_name = EXCLUDED.collided_with_name,
+                    detected_at = NOW()
+            """, (asset_id,))
+    except Exception as e:
+        # 告警功能失败不应阻断主流程
+        _log(f"  [warn] 撞名检测失败（不影响入库）: {type(e).__name__}: {str(e)[:120]}")
+
+
 def save_to_db(conn, asset_id: int, data: dict) -> None:
     """写入或更新 biz.asset_token_unlocks。"""
     import json as json_mod
@@ -1528,12 +1630,19 @@ def save_to_db(conn, asset_id: int, data: dict) -> None:
     #   入库后表现为 ratio_total=12 假比例 + 荒谬解锁价值（BNB $8.32 万亿 / 占市值 8524%）。
     #   在**爬取端**丢弃 ⇒ 母表不再带毒，下游任何消费端都受益（不依赖消费端各自加护栏）。
     #   判据与消费端共用 crypto_research.unlock_quality，避免两处实现漂移。
+    #
+    # 🔴 G3.2：为每条保留的事件打上 `_quality` 标记（real / implausible / template），
+    #   写进 unlock_events_json 内的事件对象（不新增列——prod 的 navicat 角色非 owner，
+    #   ALTER TABLE 会被拒；CREATE TABLE 可以）。消费端可按标记过滤，无需硬编码常数。
     _events = list(data.get("unlock_events") or [])
     _kept, _dropped = [], 0
     for _ev in _events:
         if is_template_event(_ev):
             _dropped += 1
             continue
+        if isinstance(_ev, dict):
+            _ev = dict(_ev)
+            _ev["_quality"] = classify_event_quality(_ev)
         _kept.append(_ev)
     if _dropped:
         _log(f"  [SYS-002] 剔除模板占位行 {_dropped} 条（asset_id={asset_id}）")
@@ -1588,8 +1697,41 @@ def save_to_db(conn, asset_id: int, data: dict) -> None:
             "crawl_status": data.get("crawl_status", "ok"),
         })
     conn.commit()
+    # 🔴 G2.5：撞名告警（失败不阻断主流程）
+    _detect_symbol_collision(conn, asset_id)
     _log(f"  已写入数据库 (asset_id={asset_id}, crawl_status={data.get('crawl_status', 'ok')}, "
          f"unlock_ratio_mcap={unlock_ratio_mcap})")
+
+
+def _has_nonempty_events(conn, asset_id: int) -> bool:
+    """库中该资产是否已有非空解锁事件（SKILL-HC-007 写入护栏用）。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT unlock_events_json IS NOT NULL AND unlock_events_json <> '[]'::jsonb "
+            "FROM biz.asset_token_unlocks WHERE asset_id = %s",
+            (asset_id,),
+        )
+        row = cur.fetchone()
+    return bool(row and row[0])
+
+
+def _mark_parse_empty(conn, asset_id: int) -> None:
+    """标记本次解析为空：只更新状态与时间戳，绝不覆盖已有事件数据。
+
+    SKILL-HC-007：SPA 渲染竞态会偶发返回 0 条（实测 1/3），此时既有数据必须
+    原样保留，同时把状态写成 parse_empty 而非 ok——否则下游会把「抓取抖动」
+    误读成「该资产没有解锁计划」。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE biz.asset_token_unlocks
+               SET crawl_status = 'parse_empty',
+                   last_attempt_at = NOW()
+             WHERE asset_id = %s
+            """,
+            (asset_id,),
+        )
 
 
 def _mark_not_found(conn, asset_id: int, data: dict | None = None) -> None:
@@ -1732,7 +1874,15 @@ def _main() -> int:
         # 写入数据库
         if args.save:
             ensure_table(conn)
-            save_to_db(conn, asset_id, data)
+            # SKILL-HC-007 护栏②（2026-10-26）：本次 0 条事件且库中已有非空数据时，
+            # 绝不覆盖。save_to_db 的 WHERE 保护只拦「降级状态覆盖成功数据」，
+            # 拦不住「同为 ok 但内容为空」——而 SPA 渲染竞态恰好产出的就是后者。
+            if not data.get("unlock_events") and _has_nonempty_events(conn, asset_id):
+                _log("[WARN] 本次抓到 0 条事件，库中已有非空数据 → 跳过写入（防竞态刷空）")
+                data["crawl_status"] = "parse_empty"
+                _mark_parse_empty(conn, asset_id)
+            else:
+                save_to_db(conn, asset_id, data)
 
         # JSON 输出到 stdout
         output = {k: v for k, v in data.items() if k not in ("status",)}

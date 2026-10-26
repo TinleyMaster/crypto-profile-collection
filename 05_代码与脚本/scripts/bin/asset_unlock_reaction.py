@@ -62,7 +62,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
 
-METHOD_VERSION = "v3"  # v3: next_unlock_beneficiary 取值加 CMC 兜底 + next_unlock_source 标注来源
+METHOD_VERSION = "v4"  # v4: 聚合粒度 symbol → asset_id，消除同名不同币的跨币串扰（UNLOCK-SYS-002 G2.3）
 MIN_N = 5                  # 解锁评级样本下限（解锁事件天然稀少，比弹性指标更低）
 HORIZONS = (1, 3, 7, 14, 30)
 GRADE_PUMP = 5.0           # excess7 ≥ +5% → 抗解禁型
@@ -73,7 +73,24 @@ PUMP_TH = 0.05             # excess7 > +5% 记一次「抗解禁」
 DUMP_TH = -0.05            # excess7 < −5% 记一次「解禁即崩」
 BENCH_START = date(2022, 10, 1)  # 截面基准固定扫描窗口（保证口径稳定，与 research_unlock_longterm 同源）
 
-# ── 该币解锁事件（按 symbol 聚合全部 asset_id，按 unlock_date 去重） ──
+# ── 该资产解锁事件（UNLOCK-SYS-002 G2.3：聚合粒度 asset_id）──────────
+#
+# 🔴 v4 变更（2026-10-26）：原按 `canonical_symbol` 聚合全部 asset_id，导致
+#   **同名不同币的解锁事件被混算**——`core.asset` 的 ticker 命名空间被长尾山寨侵占
+#   （实测 2,108 个 symbol 有多个 asset_id；BTC 撞 "Big Titty Coin"、
+#   ETH 撞 "Bridged ETH"、BNB 撞 "BNB AI"…）。
+#   真串扰源精确为 **11 个 symbol，各自恰有 2 个 asset_id 且都有解锁事件**：
+#   AI / ARC / BOB / CATE / EDGE / GRVT / JOE / RAIN / UP / VELO / XAI，
+#   同 symbol 内两个币的市值比 1.6~2121 倍 ⇒ 混算样本完全是另一个币的。
+#
+#   ⚠️ 早前考虑过的「按 symbol 排除撞名」方案（G2.4）**已否决**：
+#   实测 168 个有解锁事件的 symbol 中撞名的有 168 个，其中 44 个是 rank≤200 主流币
+#   （SOL / BNB / ADA / UNI / AVAX / ARB / TAO / NEAR / DOT / TRUMP / STX…）。
+#   它们撞名的对手山寨**没有解锁数据**，聚合结果其实正确 ⇒ 按 symbol 排除会误杀主流币。
+#
+#   ✅ 改为 asset_id 粒度是**回归表结构的原生语义**：
+#   reaction 表主键本就是 `UNIQUE (asset_id, as_of)`（已有 549 个 symbol 天然多行），
+#   消费端 asset_screen.py 亦按 asset_id 关联 ⇒ 无历史可比性问题。
 EVENTS_SQL = """
 SELECT e.unlock_date,
        max(e.unlock_value_usd)                       AS value,
@@ -81,7 +98,7 @@ SELECT e.unlock_date,
        count(*) FILTER (WHERE e.unlock_ratio_circulating IS NOT NULL) AS has_ratio
 FROM biz.asset_unlock_event e
 JOIN core.asset a ON a.asset_id = e.asset_id
-WHERE upper(a.canonical_symbol) = upper(%s)
+WHERE e.asset_id = %(asset_id)s
   AND e.unlock_value_usd IS NOT NULL AND e.unlock_value_usd > 0
 GROUP BY e.unlock_date
 ORDER BY e.unlock_date
@@ -130,22 +147,22 @@ GROUP BY (open_time AT TIME ZONE 'UTC')::date
 ORDER BY d
 """
 
-# ── 前瞻解锁压力 ──
+# ── 前瞻解锁压力（v4：按 asset_id）──
 PRESSURE_SQL = """
 SELECT p.unlock_pct_7d, p.unlock_pct_30d, p.pressure_score, p.risk_level
 FROM biz.asset_unlock_pressure p
 JOIN core.asset a ON a.asset_id = p.asset_id
-WHERE upper(a.canonical_symbol) = upper(%s)
+WHERE p.asset_id = %(asset_id)s
 ORDER BY p.calculated_at DESC
 LIMIT 1
 """
 
-# ── 受益人构成（补齐 unlock_type 缺口）──
+# ── 受益人构成（补齐 unlock_type 缺口；v4：按 asset_id）──
 ALLOC_SQL = """
 SELECT m.insider_pct, m.dominant_bucket, m.mix
 FROM biz.asset_allocation_mix m
 JOIN core.asset a ON a.asset_id = m.asset_id
-WHERE upper(a.canonical_symbol) = upper(%s)
+WHERE m.asset_id = %(asset_id)s
 ORDER BY m.confidence DESC NULLS LAST LIMIT 1
 """
 
@@ -153,12 +170,12 @@ BATCH_ALLOC_SQL = """
 SELECT asset_id, insider_pct, dominant_bucket, mix FROM biz.asset_allocation_mix
 """
 
-# ── 下一次解锁的受益人构成（事件级；源 tokenomics hero）──
+# ── 下一次解锁的受益人构成（事件级；源 tokenomics hero；v4：按 asset_id）──
 NEXT_MIX_SQL = """
 SELECT m.bucket, m.category, m.pct
 FROM biz.asset_unlock_recipient_mix m
 JOIN core.asset a ON a.asset_id = m.asset_id
-WHERE upper(a.canonical_symbol) = upper(%s) AND m.unlock_date = %s
+WHERE m.asset_id = %(asset_id)s AND m.unlock_date = %(unlock_date)s
 ORDER BY m.pct DESC
 """
 
@@ -188,28 +205,30 @@ WHERE dominant_bucket IS NOT NULL AND next_unlock_date IS NOT NULL
 
 # ── 批量：全部已发生解锁（按 symbol 聚合去重）──
 BATCH_EVENTS_SQL = """
-SELECT upper(a.canonical_symbol) AS sym,
+SELECT e.asset_id,
        e.unlock_date,
        max(e.unlock_value_usd) AS value
 FROM biz.asset_unlock_event e
 JOIN core.asset a ON a.asset_id = e.asset_id
 WHERE e.unlock_value_usd IS NOT NULL AND e.unlock_value_usd > 0
-GROUP BY upper(a.canonical_symbol), e.unlock_date
-ORDER BY sym, e.unlock_date
+GROUP BY e.asset_id, e.unlock_date
+ORDER BY e.asset_id, e.unlock_date
 """
 
-# ── 批量：全部已发生解锁的资产（每 symbol 取市值最大的 asset_id 为主）──
+# ── 批量：全部已发生解锁的资产（v4：按 asset_id，不再按 symbol 取代表）──
+# v3 是 `DISTINCT ON (upper(canonical_symbol)) ... ORDER BY market_cap DESC`（每 symbol 一个代表），
+# 那会把撞名 symbol 的两个币合并成一行。v4 改为**每个有事件的 asset_id 各出一行**，
+# 与 reaction 表 `UNIQUE (asset_id, as_of)` 的原生粒度一致。
 BATCH_ASSETS_SQL = """
 WITH unlocked AS (
-    SELECT DISTINCT upper(a.canonical_symbol) AS sym
-    FROM biz.asset_unlock_event e JOIN core.asset a ON a.asset_id = e.asset_id
+    SELECT DISTINCT e.asset_id
+    FROM biz.asset_unlock_event e
     WHERE e.unlock_value_usd > 0 AND e.unlock_date <= %s
 )
-SELECT DISTINCT ON (upper(canonical_symbol))
-       asset_id, canonical_symbol, canonical_name, market_cap, market_cap_rank
-FROM core.asset
-WHERE upper(canonical_symbol) IN (SELECT sym FROM unlocked)
-ORDER BY upper(canonical_symbol), market_cap DESC NULLS LAST
+SELECT a.asset_id, a.canonical_symbol, a.canonical_name, a.market_cap, a.market_cap_rank
+FROM core.asset a
+WHERE a.asset_id IN (SELECT asset_id FROM unlocked)
+ORDER BY a.asset_id
 """
 
 # ── 批量：全市场日线（一次拉全量，构建各币日线映射）──
@@ -416,9 +435,9 @@ def next_beneficiary(conn, asset_id, symbol, next_date):
       2. `cmc_next`        — biz.asset_unlock_next_cmc 的 nextUnlockedDetail 归桶（覆盖更广）
     """
     cur = conn.cursor()
-    # 1) tokenomics hero（事件级，日期精确）
+    # 1) tokenomics hero（事件级，日期精确；v4：按 asset_id）
     if next_date:
-        cur.execute(NEXT_MIX_SQL, (symbol, next_date))
+        cur.execute(NEXT_MIX_SQL, {"asset_id": asset_id, "unlock_date": next_date})
         rows = cur.fetchall()
         if rows:
             mix = [{"category": c, "bucket": b, "pct": float(p)} for b, c, p in rows]
@@ -439,8 +458,8 @@ def compute(conn, asset, as_of: date) -> dict:
     sym = asset["symbol"]
     cur = conn.cursor()
 
-    # 1) 解锁事件（按 symbol 聚合，去重）
-    cur.execute(EVENTS_SQL, (sym,))
+    # 1) 解锁事件（v4：按 asset_id 聚合，去重）
+    cur.execute(EVENTS_SQL, {"asset_id": asset["asset_id"]})
     all_ev = cur.fetchall()
     past = [(ud, val) for ud, val, _dup, _hr in all_ev if ud <= as_of]
     future = [ud for ud, _v, _d, _h in all_ev if ud > as_of]
@@ -487,8 +506,8 @@ def compute(conn, asset, as_of: date) -> dict:
     if ds:
         out["event_from"], out["event_to"] = ds[0], ds[-1]
 
-    # 4) 前瞻压力
-    cur.execute(PRESSURE_SQL, (sym,))
+    # 4) 前瞻压力（v4：按 asset_id）
+    cur.execute(PRESSURE_SQL, {"asset_id": asset["asset_id"]})
     pr = cur.fetchone()
     if pr:
         out["unlock_pct_7d"] = float(pr[0]) if pr[0] is not None else None
@@ -496,8 +515,8 @@ def compute(conn, asset, as_of: date) -> dict:
         out["pressure_score"] = float(pr[2]) if pr[2] is not None else None
         out["pressure_level"] = pr[3]
 
-    # 4b) 受益人构成（补齐 unlock_type 缺口）
-    cur.execute(ALLOC_SQL, (sym,))
+    # 4b) 受益人构成（补齐 unlock_type 缺口；v4：按 asset_id）
+    cur.execute(ALLOC_SQL, {"asset_id": asset["asset_id"]})
     al = cur.fetchone()
     if al:
         out["insider_pct"] = float(al[0]) if al[0] is not None else None
@@ -521,9 +540,13 @@ def compute(conn, asset, as_of: date) -> dict:
     return out
 
 
-def persist(conn, asset, as_of, ev) -> str:
-    cur = conn.cursor()
-    cur.execute("""
+# ── reaction 落库 SQL（拆成常量 + 参数组装，单条/批量共用）────────────
+#
+# 🔴 性能（2026-10-26 实测）：单条 upsert 在本机网络下 **0.38 秒/条**
+#   （552 个资产 ⇒ 约 210 秒纯等待，叠加计算会撞 560s 超时上限）。
+#   根因是 TUN 代理逐条往返的延迟，不是 SQL 本身慢。
+#   ⇒ 批量路径改用 executemany（一次往返发全部），单条路径保留（CLI 单币查询用）。
+_REACTION_INSERT_SQL = """
         INSERT INTO biz.asset_unlock_reaction (
             asset_id, as_of, method_version,
             n_events, n_seen, event_from, event_to, next_unlock,
@@ -570,7 +593,13 @@ def persist(conn, asset, as_of, ev) -> str:
             next_unlock_source = EXCLUDED.next_unlock_source,
             reaction_grade = EXCLUDED.reaction_grade, reaction_score = EXCLUDED.reaction_score,
             by_horizon = EXCLUDED.by_horizon, updated_at = NOW()
-    """, (
+    """
+
+
+def _reaction_params(asset, as_of, ev):
+    """把一条计算结果组装成 reaction 表的插入参数（单条/批量共用）。"""
+    return (
+
         asset["asset_id"], as_of, METHOD_VERSION,
         ev.get("n_events"), ev.get("n_seen"), ev.get("event_from"), ev.get("event_to"), ev.get("next_unlock"),
         ev.get("pre7_mean"), ev.get("pre7_median"), ev.get("pre7_excess_mean"),
@@ -587,7 +616,13 @@ def persist(conn, asset, as_of, ev) -> str:
         ev.get("next_unlock_source"),
         ev.get("reaction_grade"), ev.get("reaction_score"),
         json.dumps(ev.get("by_horizon") or {}, ensure_ascii=False),
-    ))
+    
+    )
+
+
+def persist(conn, asset, as_of, ev) -> str:
+    cur = conn.cursor()
+    cur.execute(_REACTION_INSERT_SQL, _reaction_params(asset, as_of, ev))
     return f"asset_id={asset['asset_id']} as_of={as_of}"
 
 
@@ -599,38 +634,75 @@ def batch_run(conn, as_of, commit_every=200) -> dict:
     from collections import defaultdict
     cur = conn.cursor()
 
-    # 1) 事件（按 symbol 聚合去重）
-    cur.execute(BATCH_EVENTS_SQL)
-    ev_by_sym = defaultdict(list)
-    for sym, ud, val in cur.fetchall():
-        ev_by_sym[sym].append((ud, val, 1, 1))
+    # 1) 事件（v4：按 asset_id 聚合去重；服务端物化 + 分块读回，防 TUN 吞大响应）
+    cur.execute("DROP TABLE IF EXISTS tmp_react_events")
+    cur.execute("CREATE TEMP TABLE tmp_react_events AS " + BATCH_EVENTS_SQL)
+    ev_by_id = defaultdict(list)
+    offset = 0
+    while True:
+        cur.execute("SELECT asset_id, unlock_date, value FROM tmp_react_events "
+                    "ORDER BY asset_id, unlock_date LIMIT 5000 OFFSET %s", (offset,))
+        chunk = cur.fetchall()
+        if not chunk:
+            break
+        for aid, ud, val in chunk:
+            ev_by_id[aid].append((ud, val, 1, 1))
+        offset += len(chunk)
+    cur.execute("DROP TABLE IF EXISTS tmp_react_events")
 
-    # 2) 资产（每 symbol 取主 asset）
+    # 2) 资产（v4：每个有事件的 asset_id 一行）
     cur.execute(BATCH_ASSETS_SQL, (as_of,))
     assets = [{"asset_id": r[0], "symbol": r[1], "name": r[2], "market_cap": r[3], "rank": r[4]}
               for r in cur.fetchall()]
 
     # 3) 全市场日线
-    cur.execute(BATCH_KLINES_SQL, (BENCH_START,))
+    # 🔴 2026-10-26：本机 TUN 代理会**吞大响应**——BATCH_KLINES_SQL 结果 41.7 万行，
+    #   在已跑过几条查询的连接里 fetchall 会永久卡死（faulthandler 实测卡在此处）。
+    #   ⇒ 改为**服务端物化 + 分块读回**（每块 5,000 行，响应体积可控）。
+    cur.execute("DROP TABLE IF EXISTS tmp_react_klines")
+    # CREATE TABLE AS 不接受参数占位符 → 先把 %s 换成字面量
+    _kl_sql = BATCH_KLINES_SQL.replace("%s", "'%s'" % BENCH_START.isoformat())
+    cur.execute("CREATE TEMP TABLE tmp_react_klines AS " + _kl_sql)
     ser_by_sym = defaultdict(list)
-    for sym, d, close in cur.fetchall():
-        if close is not None:
-            ser_by_sym[sym].append((d, float(close)))
+    offset = 0
+    while True:
+        cur.execute("SELECT symbol, d, close FROM tmp_react_klines "
+                    "ORDER BY symbol, d LIMIT 5000 OFFSET %s", (offset,))
+        chunk = cur.fetchall()
+        if not chunk:
+            break
+        for sym, d, close in chunk:
+            if close is not None:
+                ser_by_sym[sym].append((d, float(close)))
+        offset += len(chunk)
+    cur.execute("DROP TABLE IF EXISTS tmp_react_klines")
     for v in ser_by_sym.values():
         v.sort()
 
     # 4) 截面基准（全窗口一次算好）
-    cur.execute(BATCH_BENCH_SQL, (BENCH_START,))
+    # 🔴 同上：服务端物化，避免 TUN 吞大响应
+    cur.execute("DROP TABLE IF EXISTS tmp_react_bench")
+    # CREATE TABLE AS 不接受参数占位符 → 先把 %s 换成字面量
+    _bench_sql = BATCH_BENCH_SQL.replace("%s", "'%s'" % BENCH_START.isoformat())
+    cur.execute("CREATE TEMP TABLE tmp_react_bench AS " + _bench_sql)
     bench = {}
-    for row in cur.fetchall():
-        d = row[0]
-        bench[d] = {
-            1: float(row[1]) if row[1] is not None else None,
-            3: float(row[2]) if row[2] is not None else None,
-            7: float(row[3]) if row[3] is not None else None,
-            14: float(row[4]) if row[4] is not None else None,
-            30: float(row[5]) if row[5] is not None else None,
-        }
+    offset = 0
+    while True:
+        cur.execute("SELECT * FROM tmp_react_bench ORDER BY 1 LIMIT 2000 OFFSET %s", (offset,))
+        chunk = cur.fetchall()
+        if not chunk:
+            break
+        for row in chunk:
+            d = row[0]
+            bench[d] = {
+                1: float(row[1]) if row[1] is not None else None,
+                3: float(row[2]) if row[2] is not None else None,
+                7: float(row[3]) if row[3] is not None else None,
+                14: float(row[4]) if row[4] is not None else None,
+                30: float(row[5]) if row[5] is not None else None,
+            }
+        offset += len(chunk)
+    cur.execute("DROP TABLE IF EXISTS tmp_react_bench")
 
     # 5) 分配构成
     cur.execute(BATCH_ALLOC_SQL)
@@ -638,10 +710,20 @@ def batch_run(conn, as_of, commit_every=200) -> dict:
                    for r in cur.fetchall()}
 
     # 5b) 下一次解锁的受益人构成（事件级，按 (asset_id, unlock_date) 聚合）
-    cur.execute(BATCH_NEXT_MIX_SQL)
+    cur.execute("DROP TABLE IF EXISTS tmp_react_nmix")
+    cur.execute("CREATE TEMP TABLE tmp_react_nmix AS " + BATCH_NEXT_MIX_SQL)
     _nmix = defaultdict(list)
-    for aid, ud, bucket, cat, pct in cur.fetchall():
-        _nmix[(aid, ud)].append({"category": cat, "bucket": bucket, "pct": float(pct)})
+    offset = 0
+    while True:
+        cur.execute("SELECT asset_id, unlock_date, bucket, category, pct FROM tmp_react_nmix "
+                    "ORDER BY asset_id, unlock_date, pct DESC LIMIT 5000 OFFSET %s", (offset,))
+        chunk = cur.fetchall()
+        if not chunk:
+            break
+        for aid, ud, bucket, cat, pct in chunk:
+            _nmix[(aid, ud)].append({"category": cat, "bucket": bucket, "pct": float(pct)})
+        offset += len(chunk)
+    cur.execute("DROP TABLE IF EXISTS tmp_react_nmix")
     # 行已按 pct DESC 排序 → 首元素即主导桶
     next_mix_by_key = {k: (v[0]["bucket"], v) for k, v in _nmix.items() if v}
 
@@ -654,23 +736,24 @@ def batch_run(conn, as_of, commit_every=200) -> dict:
                    for k, v in (bpct or {}).items()]
             cmc_by_id[aid] = (dom, mix)
 
-    # 6) 前瞻压力（每 symbol 最新一条）
+    # 6) 前瞻压力（v4：按 asset_id 取最新一条；原按 symbol 会让撞名币互串）
     cur.execute("""
-        SELECT upper(a.canonical_symbol), p.unlock_pct_7d, p.unlock_pct_30d, p.pressure_score, p.risk_level
+        SELECT p.asset_id, p.unlock_pct_7d, p.unlock_pct_30d, p.pressure_score, p.risk_level
         FROM biz.asset_unlock_pressure p JOIN core.asset a ON a.asset_id = p.asset_id
-        ORDER BY upper(a.canonical_symbol), p.calculated_at DESC NULLS LAST
+        ORDER BY p.asset_id, p.calculated_at DESC NULLS LAST
     """)
     pres = {}
-    for sym, p7, p30, ps, lvl in cur.fetchall():
-        if sym not in pres:
-            pres[sym] = (p7, p30, ps, lvl)
+    for aid, p7, p30, ps, lvl in cur.fetchall():
+        if aid not in pres:
+            pres[aid] = (p7, p30, ps, lvl)
 
-    # 7) 逐资产计算 + 落库
+    # 7) 逐资产计算（先全部算完，再批量落库）
     n_done = n_nodata = 0
     grades = defaultdict(int)
+    rows_to_write = []
     for i, asset in enumerate(assets):
         sym = asset["symbol"]
-        all_ev = ev_by_sym.get((sym or "").upper(), [])
+        all_ev = ev_by_id.get(asset["asset_id"], [])
         past = [(ud, val) for ud, val, _d, _h in all_ev if ud <= as_of]
         future = [ud for ud, _v, _d, _h in all_ev if ud > as_of]
         out = {"n_seen": len(past), "next_unlock": min(future) if future else None,
@@ -686,7 +769,7 @@ def batch_run(conn, as_of, commit_every=200) -> dict:
             ds = sorted(r["anchor"] for r in recs)
             if ds:
                 out["event_from"], out["event_to"] = ds[0], ds[-1]
-            pr = pres.get((sym or "").upper())
+            pr = pres.get(asset["asset_id"])
             if pr:
                 out["unlock_pct_7d"] = float(pr[0]) if pr[0] is not None else None
                 out["unlock_pct_30d"] = float(pr[1]) if pr[1] is not None else None
@@ -713,8 +796,12 @@ def batch_run(conn, as_of, commit_every=200) -> dict:
                 out["next_unlock_beneficiary"] = cm[0]
                 out["next_unlock_recipient_json"] = cm[1]
                 out["next_unlock_source"] = "cmc_next"
-        persist(conn, asset, as_of, out)
-        if (i + 1) % commit_every == 0:
+        rows_to_write.append(_reaction_params(asset, as_of, out))
+
+    # 7b) 批量落库（executemany 一次往返；单条 upsert 实测 0.38s/条会超时）
+    with conn.cursor() as cur:
+        for i in range(0, len(rows_to_write), 100):
+            cur.executemany(_REACTION_INSERT_SQL, rows_to_write[i:i + 100])
             conn.commit()
     conn.commit()
     return {"n_persisted": len(assets), "n_done": n_done, "n_nodata": n_nodata,

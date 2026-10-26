@@ -37,9 +37,27 @@ from crypto_research.clients.evm_propagate import (
 
 
 def get_db_url() -> str:
-    return os.getenv(
-        "DATABASE_URL",
-        "postgresql://root:iuU2F8Vx1aj7A6gw3Pd4bH9rG5eL0RyW@43.166.198.83:32405/crypto"
+    """取数据库连接串：环境变量 > scripts/.env > 报错。
+
+    🔴 R4（2026-10-26）：原兜底硬编码了
+    `postgresql://postgres:crypto2026@43.165.185.221:32405/crypto`
+    —— 既是**已弃用的旧主机**，又��**明文口令**（且该口令与 prod 现役线共用）。
+    改为：**取不到就明确报错退出**，不再回落到一个泄露的凭据。
+    """
+    url = (os.getenv("DATABASE_URL") or "").strip()
+    if url:
+        return url
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    try:
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            s = line.strip()
+            if s.startswith("DATABASE_URL=") and not s.startswith("#"):
+                return s.split("=", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
+    raise RuntimeError(
+        "未找到 DATABASE_URL：请设置环境变量，或在 scripts/.env 中配置 "
+        "DATABASE_URL=postgresql://<user>:<password>@<host>:<port>/<db>"
     )
 
 

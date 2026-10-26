@@ -14,8 +14,9 @@
 2. **双确认（弹性 × 资金流）**
    ★双确认（高弹性+资金流入）｜ ⚠背离（高弹性+资金流出）
 3. **综合榜**：同时满足 高弹性 & 资金流≥中性 & 解锁非崩 的标的
-4. **★ 高确定性预筛**（SKILL-HC-001，与 MV fix_110 `hc_prefilter` 同口径）：
-   统计有效（弹性 n≥10 / 解锁 n≥5）+ 高弹性 + 资金流入 + 解锁非崩 + 无 CMC 大额解锁。
+4. **★ 高确定性预筛**（SKILL-HC-001 + fix_114，与 MV `hc_prefilter` 同口径）：
+   统计有效（弹性 n≥10 / 解锁 n≥5）+ 高弹性 + 资金流入 + 解锁非崩 + 无 CMC 大额解锁
+   + **有未来解锁事件（fut_n≥1，fix_114）**。
    ⚠️ **仅预筛**：报告层仍须叠加「无高危负向标签 + 因子冲突矩阵无强冲突」终判（铁律 #14）。
 
 用法
@@ -52,6 +53,8 @@ SELECT a.asset_id, a.canonical_symbol AS sym, a.canonical_name AS name, a.market
        c.next_unlock_date AS cmc_date, c.next_unlock_usd AS cmc_usd,
        c.next_unlock_pct_supply AS cmc_pct, c.dominant_bucket AS cmc_bene,
        c.insider_pct AS cmc_insider_pct,
+       -- fix_114：未来解锁（事件表口径，hc 闸门依据；与 MV unlock_fut_n 同源同口径）
+       COALESCE(fu.fut_n, 0) AS fut_n, fu.next_dt AS fut_next_date,
        f.flow_score, f.flow_grade, f.obi_7d, f.taker_imb_7d, f.netflow_7d_pct_mcap
 FROM core.asset a
 JOIN LATERAL (SELECT * FROM biz.asset_price_elasticity x WHERE x.asset_id=a.asset_id
@@ -60,6 +63,9 @@ LEFT JOIN LATERAL (SELECT * FROM biz.asset_unlock_reaction x WHERE x.asset_id=a.
               ORDER BY x.as_of DESC LIMIT 1) r ON TRUE
 LEFT JOIN LATERAL (SELECT * FROM biz.asset_flow_factor x WHERE x.asset_id=a.asset_id
               ORDER BY x.as_of DESC LIMIT 1) f ON TRUE
+LEFT JOIN LATERAL (SELECT COUNT(*) FILTER (WHERE x.unlock_date >= CURRENT_DATE) AS fut_n,
+                          MIN(x.unlock_date) FILTER (WHERE x.unlock_date >= CURRENT_DATE) AS next_dt
+                   FROM biz.asset_unlock_event x WHERE x.asset_id=a.asset_id) fu ON TRUE
 LEFT JOIN biz.asset_unlock_next_cmc c ON c.asset_id = a.asset_id
 WHERE a.market_cap_rank IS NOT NULL AND a.market_cap_rank <= %s
 """
@@ -114,9 +120,19 @@ def main() -> int:
     double_confirm.sort(key=lambda x: -(x["flow_score"] or 0))
     divergence.sort(key=lambda x: (x["flow_score"] or 100))
 
-    # ── ★ 高确定性预筛（SKILL-HC-001；与 MV fix_110 hc_prefilter 严格同口径）──────
+    # ── ★ 高确定性预筛（SKILL-HC-001 + fix_114；与 MV hc_prefilter 严格同口径）──────
     #   统计有效（弹性 n≥10 且 解锁 n≥5）+ 高弹性 + 资金流入 + 解锁非崩 + 无 CMC 大额解锁
     #   ⚠️ 仅预筛：报告层仍须终判「无高危风险标签 + 因子冲突矩阵无强冲突」（铁律 #14）
+    #   ⚠️ 解锁门槛为何是 5 而不是 8（SKILL-HC-002 实测，2026-10-26）：
+    #      库内 biz.asset_unlock_event 已发生事件/资产 MAX=7，n≥8 资产数=0
+    #      ⇒ n≥8 结构性不可达，若设为 hc 硬门槛会导致 hc 永久空集（基线 hc_n=2，改后=0）。
+    #      ⇒ 故 hc 门槛保持 5（= asset_unlock_reaction.MIN_N）；5≤n<8 属"小样本"，
+    #         可进 hc，但报告层必须标注「样本 n<8，推断力弱、不外推」。
+    #   ⚠️ 为何要 fut_n≥1（SKILL-HC-009 结论 2 / migration fix_114，2026-10-26 实测）：
+    #      原来的 hc 只校验「历史解锁的反应质量」，不校验「还有没有下一次解锁」。
+    #      实测 hc_n=7 里 AXS/FET 的未来事件数为 0（CMC 下次解锁也空）——解锁已全走完，
+    #      没有「解锁前布局」窗口，属纯噪音占位。加此闸门 7→5，剔掉的正好是这 2 个假信号。
+    #      数据源用事件表而非 CMC：ATH 在 CMC 全空但事件表有 4 个未来事件，用 CMC 会误杀。
     def _hc(x):
         if (x["e_n"] or 0) < 10 or (x["u_n"] or 0) < 5:
             return False
@@ -127,6 +143,8 @@ def main() -> int:
         if x["u_grade"] in U_DN:
             return False
         if x["cmc_pct"] is not None and x["cmc_pct"] >= 5:
+            return False
+        if (x["fut_n"] or 0) < 1:      # fix_114：必须有未来解锁事件
             return False
         return True
 

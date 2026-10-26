@@ -54,7 +54,29 @@ FETCH_TIMEOUT = 15           # 页面抓取超时（秒）
 #   2^53-1 = 9007199254740991 是 JavaScript Number 的最大安全整数，
 #   CMC 在 max_supply 缺失/溢出时会下发该值。实测 1,458 条快照命中、10 个资产
 #   total_supply 正常而 max_supply 为哨兵 ⇒ 该值必须当作「无数据」而非真实供应量。
+#
+# ⚠️ 2026-10-26 修正：**不能用 `>=` 判定**。
+#   meme 币的真实供应量本来就常常大于 2^53（PIT=1e17、KISHU=9.67e16、
+#   QUACK=4.68e16、LEASH=8.03e17、JAGER=1.46e16、BabyDoge=2.03e17），
+#   用 `>= 9007199254740991` 会把这些**真实值**当成哨兵丢弃
+#   （实测误伤 6 个资产）。哨兵是**写死的那个具体值**，故改为精确值判定。
 CMC_SENTINEL_MAX_SUPPLY = 9007199254740991.0
+CMC_SENTINEL_MAX_SUPPLY_ALT = 9007199254740992.0   # 2^53
+
+
+def _is_cmc_sentinel(v) -> bool:
+    """判定是否为 CMC 下发的哨兵值（精确等于 2^53-1 / 2^53）。
+
+    🔴 绝不能用 `>=`：meme 币真实供应量常 > 2^53（PIT=1e17 等），
+    用 `>=` 会把真实值当哨兵丢弃（2026-10-26 实测误伤 6 个资产）。
+    """
+    if v is None:
+        return False
+    try:
+        fv = float(v)
+    except (TypeError, ValueError):
+        return False
+    return fv == CMC_SENTINEL_MAX_SUPPLY or fv == CMC_SENTINEL_MAX_SUPPLY_ALT
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -837,7 +859,7 @@ def get_authoritative_supply(conn, asset_id: int) -> dict | None:
                         fv = float(v) if v is not None else None
                     except (TypeError, ValueError):
                         fv = None
-                    if fv is not None and fv >= CMC_SENTINEL_MAX_SUPPLY:
+                    if _is_cmc_sentinel(fv):
                         out[k] = None
                         out.setdefault("_sentinel_dropped", []).append(k)
                 return out
@@ -896,9 +918,9 @@ def validate_supply_units(conn, asset_id: int, data: dict) -> dict:
     for key in ("total_supply", "circulating_supply", "max_supply"):
         raw = data.get(key)
         fv = _f(raw)
-        if fv is not None and fv >= CMC_SENTINEL_MAX_SUPPLY:
+        if _is_cmc_sentinel(fv):
             data[key] = None
-            notes.append(f"{key} 命中 CMC 哨兵值（2^53-1 量级），已置空")
+            notes.append(f"{key} 命中 CMC 哨兵值（等于 2^53-1/2^53），已置空")
 
     # max_supply vs total_supply：同口径应同量级，差 10 倍以上必有一方错
     if cur_max and cur_total and cur_total > 0:

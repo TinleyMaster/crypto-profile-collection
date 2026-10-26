@@ -665,7 +665,8 @@ def scrape_tokenomist(slugs: list[str], symbol: str = "", name: str = "",
                                              include_extras=include_extras,
                                              no_browser_search=True)
 
-        _log(f"  所有 slug 均失败，该代币可能未被收录")
+        _log("  所有 slug 均失败：tokenomics.com 无该币解锁页"
+             "（多为全流通/无 vesting，如 ETH/XLM，属正常缺失；未必是漏抓）")
         return None
     finally:
         if context:
@@ -1573,48 +1574,73 @@ def _detect_symbol_collision(conn, asset_id: int) -> None:
 
     本函数**只记录告警，不改 core.asset**——改 canonical_symbol 会破坏大量下游引用，
     口径变更需主人拍板（工单 G2.3/G2.4）。
+
+    HC-013 修复（2026-10-26）：原实现的 UPSERT 存在结构性缺陷 ——
+            `INSERT ... SELECT` 未去重，一个资产撞 N 个 symbol 就返回 N 行，
+            且 N 行的 `m.asset_id` 完全相同 ⇒ PostgreSQL 抛
+            `CardinalityViolation: ON CONFLICT DO UPDATE command cannot affect
+             row a second time`，整条语句回滚。而下方 `except Exception` 把它
+            吞成一条 `[warn]`，于是护栏在「撞 >=2 个」的资产上**从未真正生效**。
+            实测规模：5264 个撞名资产中 2186 个（41.5%）属此类，其
+            `detected_at` 全部冻结在同一次批量灌库的微秒上、此后永不刷新。
+            修法：`GROUP BY m.asset_id, m.canonical_symbol` 保证每组只产出一行
+            （顺带 `count(*)` 得到撞名总数），从**结构上**消除冲突，
+            而不是靠 `LIMIT 1` 掩盖；`LIMIT 1` 还会让「撞了几个」这个信息彻底丢失。
     """
     try:
         with conn.cursor() as cur:
-            cur.execute("""
-                WITH me AS (
-                    SELECT asset_id, canonical_symbol, canonical_name FROM core.asset WHERE asset_id=%s
+            # DDL 不进抓取热路径（HC-008 教训：非 owner 环境下 CREATE 即崩）。
+            # 表结构由 migrations/fix_116_symbol_collision_dedup.sql 负责，
+            # 缺失时给可执行的补救指令，而不是在抓取途中隐式建表。
+            cur.execute("SELECT to_regclass('biz.asset_symbol_collision')")
+            if cur.fetchone()[0] is None:
+                raise RuntimeError(
+                    "biz.asset_symbol_collision 不存在，请先执行 "
+                    "migrations/fix_116_symbol_collision_dedup.sql"
                 )
-                SELECT o.asset_id, o.canonical_name
-                FROM me JOIN core.asset o
-                  ON o.canonical_symbol = me.canonical_symbol AND o.asset_id <> me.asset_id
-                LIMIT 1
-            """, (asset_id,))
-            row = cur.fetchone()
-            if not row:
-                # 无撞名 ⇒ 清掉历史告警（若资产曾撞名后已修正）
-                cur.execute("DELETE FROM biz.asset_symbol_collision WHERE asset_id=%s", (asset_id,))
-                return
+
+            # 撞名数量探测（取代原先带 LIMIT 1 的探测：数量本身就是有用信号）
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS biz.asset_symbol_collision (
-                    asset_id BIGINT PRIMARY KEY,
-                    canonical_symbol VARCHAR(50),
-                    collided_with_asset_id BIGINT,
-                    collided_with_name VARCHAR(200),
-                    detected_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-            cur.execute("""
-                INSERT INTO biz.asset_symbol_collision
-                    (asset_id, canonical_symbol, collided_with_asset_id, collided_with_name)
-                SELECT m.asset_id, m.canonical_symbol, o.asset_id, o.canonical_name
+                SELECT count(*)
                 FROM core.asset m JOIN core.asset o
                   ON o.canonical_symbol = m.canonical_symbol AND o.asset_id <> m.asset_id
                 WHERE m.asset_id = %s
+            """, (asset_id,))
+            n_collide = cur.fetchone()[0]
+            if not n_collide:
+                # 无撞名 ⇒ 清掉历史告警（若资产曾撞名后已修正）
+                cur.execute("DELETE FROM biz.asset_symbol_collision WHERE asset_id=%s", (asset_id,))
+                return
+
+            # 对撞对象取谁：优先市值排名更高者（消费端最容易混淆的那个），
+            # NULL 排名排最后，再按 asset_id 兜底 —— 保证结果确定、可复现。
+            cur.execute("""
+                INSERT INTO biz.asset_symbol_collision
+                    (asset_id, canonical_symbol, collided_with_asset_id,
+                     collided_with_name, n_collisions)
+                SELECT m.asset_id,
+                       m.canonical_symbol,
+                       (array_agg(o.asset_id
+                                  ORDER BY o.market_cap_rank NULLS LAST, o.asset_id))[1],
+                       (array_agg(o.canonical_name
+                                  ORDER BY o.market_cap_rank NULLS LAST, o.asset_id))[1],
+                       count(*)
+                FROM core.asset m JOIN core.asset o
+                  ON o.canonical_symbol = m.canonical_symbol AND o.asset_id <> m.asset_id
+                WHERE m.asset_id = %s
+                GROUP BY m.asset_id, m.canonical_symbol
                 ON CONFLICT (asset_id) DO UPDATE SET
                     canonical_symbol = EXCLUDED.canonical_symbol,
                     collided_with_asset_id = EXCLUDED.collided_with_asset_id,
                     collided_with_name = EXCLUDED.collided_with_name,
+                    n_collisions = EXCLUDED.n_collisions,
                     detected_at = NOW()
             """, (asset_id,))
     except Exception as e:
-        # 告警功能失败不应阻断主流程
-        _log(f"  [warn] 撞名检测失败（不影响入库）: {type(e).__name__}: {str(e)[:120]}")
+        # 告警功能失败不应阻断主流程（刻意保持宽捕获：告警不能反噬主链路）。
+        # 但必须留可检索的稳定标签，否则「静默失效」会重演 —— HC-013 的教训。
+        _log(f"  [warn][HC-013] 撞名检测失败（不影响入库）: "
+             f"{type(e).__name__}: {str(e)[:120]}")
 
 
 def save_to_db(conn, asset_id: int, data: dict) -> None:
@@ -1651,6 +1677,15 @@ def save_to_db(conn, asset_id: int, data: dict) -> None:
         # unlock_ratio_mcap 基于 upcoming 事件计算，需在剔除后重算
         unlock_ratio_mcap = _compute_unlock_ratio_mcap(data)
 
+    # ⚠️ 时间列语义（2026-10-26 实测纠错，勿再误读）：
+    #   scraped_at      —— 只在**首次 INSERT** 写 NOW()，ON CONFLICT DO UPDATE **刻意不更新**
+    #                      ⇒ 真实语义是「首次收录时间（≈first_seen）」，**不是**最后抓取时间。
+    #   updated_at      —— 每次 upsert 刷 NOW() ⇒ **判断数据新鲜度只能用这一列**。
+    #   last_attempt_at —— 每次尝试（含失败）刷 NOW()，用于区分「试了没写成」与「写成了」。
+    #   教训：曾按 scraped_at 统计，得出「全库 1383 行无一 7 天内更新」的错误结论，
+    #        差点判定整条解锁链停摆；按 updated_at 复算：ok 607 行中 598 行当日更新，
+    #        「有事件但超 7 天」= 0，数据面健康。
+    #   注解迁移见 migrations/fix_115_unlock_scraped_at_semantics.sql（需表 owner 执行）。
     sql = """
         INSERT INTO biz.asset_token_unlocks (
             asset_id, source_url, source_name, slug,
@@ -1840,14 +1875,18 @@ def _main() -> int:
         )
 
         if data is None:
-            # tokenomist 未收录 → 返回 not_found 状态
+            # tokenomics.com 无该币解锁页 → 返回 not_found 状态
             # P1-1: 写 not_found 墓碑，避免 batch 每日重复爬取该资产
+            # HC-013 附注：not_found **不等于**数据缺口。实测 rank=2 的 ETH(ethereum)、
+            #   rank=16 的 XLM(stellar)，slug 猜对、页面为空 —— 全流通币本就没有 vesting
+            #   时间表，墓碑是正确状态。763 个墓碑中 753 个 source_name='tokenomist'
+            #   （该源已于 HC-004 下线），故文案不再点名 tokenomist，避免误导排查方向。
             if args.save:
                 ensure_table(conn)
                 _mark_not_found(conn, asset_id)
             print(json.dumps({
                 "status": "not_found",
-                "message": "该代币未被 tokenomist 收录",
+                "message": "tokenomics.com 无该币解锁页（多为全流通/无 vesting，非漏抓）",
                 "asset_id": asset_id,
                 "symbol": asset["symbol"],
                 "name": asset["name"],

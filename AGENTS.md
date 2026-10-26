@@ -3006,3 +3006,23 @@ null/negative**（A3 阈值 sweep 样本外反向 / `regime_label` `descriptive_
 - **未动**：`phase_chain_holder_batch.py` 采集逻辑、`--limit`、旋转排序、看门狗 `check_onchain_snapshot_freshness.py`（按表事实判定，不依赖任务名）一律未改。
 - **待部署**：`scheduler.py` 需容器 **redeploy** 后新任务注册；下一次北京 14:40/14:50 调度即按新拆分运行。base 的 ~58s/币 属上游 Blockscout 对容器出口劣化（非本轮范围，见 `scheduler.py` 2026-10-03 注释）。
 - **未做/边界**：未手工触发 prod 补跑 arb（`chain` 槽位=1 且生产 daemon 在跑；新拆分任务首发即覆盖）；base 单链仍可能在重币日超 12h 被收割（其自身覆盖不受本轮影响，另列为观察项）。
+
+### 解锁链收尾三件（HC-006 / HC-012 字段语义 / HC-005 存废判定，2026-10-26 本次提交）
+
+- **HC-006 `data_health.py` 三态→四态退出码**：原实现裸调 `get_connection()`，`PoolTimeout` 直接冒堆栈，且「资产未找到」与「库连不上」**撞同一个退出码 1**。本次立契约：`0`=体检完成 / `1`=资产不存在（库可达、已查证）/ `3`=数据库不可达 / `4`=环境缺依赖。另在 `_IMPORT_ERROR` 分流：`__name__=="__main__"` 时降级为 rc=4 并打印正确解释器；**被 import 时原样 `raise`**（`run_research.py` / `build_factors.py` / `collect_onchain_fundamentals.py` 均 `from data_health import resolve_asset`，不能拿到 None 后在别处变成 `TypeError: 'NoneType' object is not callable`）。四条退出码均已实测：ARB→0、`ZZZZNOTEXIST`→1、注入 `PoolTimeout`→3、裸 `python`(3.13 无 psycopg)→4。同步写入 skill 铁律 15。
+- **HC-012 `biz.asset_token_unlocks.scraped_at` 字段名骗人（重要纠错）**：`save_to_db()` 的 `ON CONFLICT DO UPDATE` **不含 `scraped_at`**，该列只在首次 INSERT 写 `NOW()` ⇒ 真实语义是「首次收录时间（≈first_seen）」，**与最后抓取时间无关**。曾按它统计得出「全库 1383 行无一 7 天内更新、ARB 已 7 周未更新」，差点判定整链停摆；按 `updated_at` 复算：`ok` 607 行中 **598 行当日更新**，「有事件数据但 `updated_at` 超 7 天」= **0**，数据面健康。**结论：判新鲜度唯一可信字段是 `updated_at`；`crawl_status='ok'` 本身不证明数据新。** 处理方式为**补文档不改语义**（`migrations/fix_115_unlock_scraped_at_semantics.sql` 加 `COMMENT ON COLUMN`）——不把 `scraped_at` 改成 `NOW()` 的理由：那样两列完全同义纯冗余，且「首次收录时间」本身有价值。⚠️ 该迁移**需表 owner（postgres）执行**，`navicat` 报 `InsufficientPrivilege: must be owner of relation`，与 HC-008 同类权限地雷。**已于 2026-10-26 由 owner 执行完成**，直连库复核 `pg_attribute.col_description` **4/4 列注释非 NULL**（`scraped_at` / `updated_at` / `crawl_status` / `last_attempt_at`），文案与迁移文件逐字一致 ⇒ 「字段名骗人」的坑现在在**库结构层**也可见，`\d+ biz.asset_token_unlocks` 即可看到。
+- **日更链路「缺 ③④」是伪问题（推翻此前待办）**：`run_data_sync_daily.py` 只跑 ②`sync_unlock_events_from_json` 看似断链，实则 `workbench/scheduler.py` 已排全：`06:30 data_sync_daily`(②) → `21:50 cmc_unlock_ingest` → `21:55 asset_unlock_reaction_batch --batch`(③) → `22:30 asset_screen_mv_refresh`(④)。**故不把 ③④ 塞进日同步**：06:30 跑 reaction 会读到尚未刷新的 CMC 兜底（21:50 才 ingest），且 21:55 必重算，纯重复。
+- **HC-005（复用库内 slug）判定不做**：实测 `not_found` 763 行中 **761 行无 slug 可复用**（唯一 2 行是 AI 估算写入的 `ai_estimate_*` 假 slug，XRP/ETH）；`ok` 607 行全有真 slug，复用只省一次猜测。⇒ 改抓取主路径的风险远大于收益，不执行。
+- **遗留观察（未修，非本次引入）**：ARB 全链跑时稳定打印 `[warn] 撞名检测失败（不影响入库）: CardinalityViolation: ON CONFLICT DO UPDATE command cannot affect row a second time`（L1617 兜底 catch）。说明 G2.5 撞名检测的 INSERT 里存在重复 `asset_id`，被 catch 掩盖。入库不受影响，但该护栏实际**从未生效**，拟另开单。
+
+### HC-013：撞名检测护栏静默失效（2026-10-26，已闭环）
+
+- **症状**：ARB 每次抓取稳定打印 `[warn] 撞名检测失败（不影响入库）: CardinalityViolation: ON CONFLICT DO UPDATE command cannot affect row a second time`，被 `except Exception` 吞掉。
+- **根因**：`_detect_symbol_collision()` 的 `INSERT ... SELECT` 未去重。一个 symbol 撞 N 个资产就返回 N 行，且 N 行 `m.asset_id` 完全相同 ⇒ 同一语句二次命中同一主键（PK=`asset_id`）⇒ 整条语句回滚。探测阶段用了 `LIMIT 1`、写入阶段没用，是典型「探测与写入口径不一致」。
+- **影响面（实测）**：5264 个撞名资产中 **2186 个（41.5%）撞 ≥2 个，护栏完全哑火**。判据不能看「表里有没有行」——那 2186 行都在，但 `detected_at` **全部等于同一微秒 `2026-10-26 02:17:35.485399`**（一次性批量灌库），而正常逐资产写入的 3078 行跨 7 个不同分钟。**看「不同时间戳个数」才能区分批量灌入与逐条写入**（与 HC-012 的 `scraped_at` 误读同类：字段有值 ≠ 值在按预期更新）。
+- **修法**：`SELECT ... count(*) ... GROUP BY m.asset_id, m.canonical_symbol`，每组恰一行 ⇒ 结构上不可能再同语句二次命中；`count(*)` 顺带补出原本彻底丢失的「撞了几个」。对撞对象按 `market_cap_rank NULLS LAST, asset_id` 取（优先市值更高、消费端最易混淆者，且结果确定可复现）。DDL 从热路径移出到迁移（HC-008 同类：非 owner 环境 CREATE 即崩）。告警加稳定标签 `[warn][HC-013]` 便于 grep。
+- **迁移** `fix_116_symbol_collision_dedup.sql`：补 `n_collisions`（`NOT NULL DEFAULT 1`）+ 三列注释 + 存量回填 + 按新规则对齐 `collided_with_*`，全部 `IS DISTINCT FROM` 幂等。**本表 owner=`navicat`，业务连接可直接执行**（不像 `asset_token_unlocks` 卡 `postgres`）。已 apply，重复执行验证幂等。
+- **验收**：ARB(撞2) 真实全链路 `refresh_unlock_chain.py --asset-id 2748` 全程无 `[warn]`，`hc_n 5→5`、行数 1240→1240；CAT(撞18，全库最极端) `n_collisions=18`；HYPE(无撞名) 正确走 DELETE 分支。5264 行 `n_collisions` 与 `collided_with_asset_id` 与真实值比对 **0 不符**。
+- **763 墓碑定案：不建复活重试**。`not_found` 763 行中 753 行 `source_name='tokenomist'`（该源 HC-004 已下线）、761 行 `source_url` 为 NULL。决定性实验（只读）：ETH(1209) 用正确 slug `ethereum`、XLM(1173) 用 `stellar`，页面**均为空** ⇒ 全流通老币本就无 vesting 时间表，`not_found` 是**正确状态而非漏抓**。故重试循环纯消耗，不做。顺带纠正误导文案（旧文案点名已下线的 tokenomist，把排查方向指错）。
+- **污染核查（已排除）**：`asset_unlock_reaction.py:94` 的 `EVENTS_SQL` 按 `e.asset_id = %(asset_id)s` 聚合，**不走 symbol** ⇒ 解锁反应计算无撞名污染；`BENCH_SQL` 用 `asset_klines.symbol`（`ARBUSDT` 式），与 `canonical_symbol` 不同命名空间。故本单价值不在「修正算错的数」，而在「让符号歧义在库里可见」。
+- **遗留**：`not_found` 单态混装两种语义（①站点确无该币 ②slug 猜错没命中），当前无法从数据区分。要安全谈「复活」须先二拆为 `no_vesting` / `slug_miss`，见工单待拍板。

@@ -1651,6 +1651,15 @@ def save_to_db(conn, asset_id: int, data: dict) -> None:
         # unlock_ratio_mcap 基于 upcoming 事件计算，需在剔除后重算
         unlock_ratio_mcap = _compute_unlock_ratio_mcap(data)
 
+    # ⚠️ 时间列语义（2026-10-26 实测纠错，勿再误读）：
+    #   scraped_at      —— 只在**首次 INSERT** 写 NOW()，ON CONFLICT DO UPDATE **刻意不更新**
+    #                      ⇒ 真实语义是「首次收录时间（≈first_seen）」，**不是**最后抓取时间。
+    #   updated_at      —— 每次 upsert 刷 NOW() ⇒ **判断数据新鲜度只能用这一列**。
+    #   last_attempt_at —— 每次尝试（含失败）刷 NOW()，用于区分「试了没写成」与「写成了」。
+    #   教训：曾按 scraped_at 统计，得出「全库 1383 行无一 7 天内更新」的错误结论，
+    #        差点判定整条解锁链停摆；按 updated_at 复算：ok 607 行中 598 行当日更新，
+    #        「有事件但超 7 天」= 0，数据面健康。
+    #   注解迁移见 migrations/fix_115_unlock_scraped_at_semantics.sql（需表 owner 执行）。
     sql = """
         INSERT INTO biz.asset_token_unlocks (
             asset_id, source_url, source_name, slug,

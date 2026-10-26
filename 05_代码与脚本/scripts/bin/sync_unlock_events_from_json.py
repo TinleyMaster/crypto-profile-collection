@@ -135,6 +135,57 @@ def _parse_token_amount_str(s: str) -> float | None:
     return num * mult
 
 
+# ── UNLOCK-SYS-002：tokenomist 模板占位行识别（2026-10-26 审计）──────
+#
+# 根因（实测证据，非推测）：
+#   tokenomist 页面的「next unlock」卡片对**没有真实解锁计划**的资产会渲染一行占位符：
+#       pct = 12.0, value_usd = 123460.0, value_str = "$123.46K",
+#       status = "4 months left", allocations = 1, is_upcoming = True, recipients = None
+#   该签名在母表 biz.asset_token_unlocks 的 1,383 个资产里**同时出现于 108 个资产**
+#   （含 BTC 这种根本不存在「解锁」概念的币），日期集中在 2026-12-25 / 2027-01-20~21。
+#   ⇒ 这是**模板占位行**，不是真实解锁事件。入库后表现为：
+#       · ratio_total = 12.0（假的供应量释放比例）
+#       · unlock_value_usd 被自洽公式重算成荒谬值（BEAM 5,371 万美元 / BNB 8.3 万亿美元）
+#       · ratio_mcap 动辄数百至数千个百分点（BEAM 4654%、BNB 8524%）
+#   ⚠️ **不能按 symbol 黑名单过滤**：命中面是 108 个资产且随页面变化，黑名单不可穷举，
+#      且 pct=12.0 / $123.46K 在 SHIB/SOL/YFI 等真实事件中也存在（非 PoW 专属签名）。
+#   ⇒ 正确解法是**按事件结构特征识别**（下面 _is_template_event 判定）。
+#
+# 判据（三条同时成立才判为模板行，宁可漏杀不可错杀真实事件）：
+#   ① value_usd 精确等于 123460.0（源站写死的占位金额）
+#   ② pct 精确等于 12.0（源站写死的占位比例）
+#   ③ status 属于模板话术集合（"N months left" / "Next" 等倒计时文案）
+_TEMPLATE_PLACEHOLDER_VALUE_USD = 123460.0
+_TEMPLATE_PLACEHOLDER_PCT = 12.0
+_TEMPLATE_STATUS_PATTERNS = ("months left", "next unlock", "next")
+
+
+def _is_template_event(ev: dict) -> bool:
+    """判定 tokenomist 模板占位行（跨资产重复的假解锁事件）。
+
+    宁可漏杀（漏判的行只是多一条噪声数据）也不可错杀（错杀会丢掉真实解锁事件）。
+    """
+    if not isinstance(ev, dict):
+        return False
+    val = ev.get("value_usd")
+    pct = ev.get("pct")
+    try:
+        val_f = float(val) if val is not None else None
+        pct_f = float(pct) if pct is not None else None
+    except (TypeError, ValueError):
+        return False
+    if val_f is None or pct_f is None:
+        return False
+    if abs(val_f - _TEMPLATE_PLACEHOLDER_VALUE_USD) > 0.01:
+        return False
+    if abs(pct_f - _TEMPLATE_PLACEHOLDER_PCT) > 1e-9:
+        return False
+    status = str(ev.get("status") or "").lower()
+    if not any(p in status for p in _TEMPLATE_STATUS_PATTERNS):
+        return False
+    return True
+
+
 # ── 解锁价值重算底座（审计 P0-2，2026-09-26）──────────────────────────
 #
 # 背景：unlock_value_usd 原先直接照抄 tokenomist 页面上的 Value 列，实测严重失真：
@@ -150,6 +201,15 @@ def _parse_token_amount_str(s: str) -> float | None:
 #
 # tokenomist 表格的「Release %」按源站表头语义 = 占**总供应量**的比例，
 # 故 ratio_total 为首选口径；pct 与 value 会原样留在 raw_ref 里可追溯。
+#
+# 🔴 UNLOCK-SYS-002（2026-10-26 审计）：供应量基数取数顺序必须 CMC 优先。
+# 旧顺序 `tokenomics.max_supply → tokenomics.total_supply → cmc.*` 有两个致命缺陷：
+#   ① biz.asset_tokenomics.max_supply 系统性污染（实测 2,047 行中 39 行 >1e12；
+#      KAS max_supply=28,704,026,601 而真实总量仅 27,775,519,352 量级——差 10 倍量级错位）；
+#   ② biz.asset_market_daily 存在同名多 asset_id 污染（BTC 9 个 / CAT 17 个 / PEPE 16 个），
+#      其中错挂的「同名假币」行会带进量纲完全不同的 market_cap。
+# 改为：**CMC 快照（与 price/mcap 同源同资产，量纲自洽）优先**，
+# tokenomics.max_supply 降为末位兜底，并记录实际采用的口径供审计追溯。
 _SUPPLY_PRICE_SQL = """
     WITH tok AS (
         SELECT DISTINCT ON (asset_id)
@@ -165,16 +225,20 @@ _SUPPLY_PRICE_SQL = """
         WHERE source_code = 'cmc' AND price_usd IS NOT NULL AND price_usd > 0
         ORDER BY asset_id, market_date DESC
     )
-    SELECT t.asset_id,
-           COALESCE(NULLIF(t.max_supply, 0), NULLIF(t.total_supply, 0),
-                    NULLIF(m.total_supply, 0), NULLIF(m.circulating_supply, 0)) AS supply_basis,
+    SELECT COALESCE(t.asset_id, m.asset_id) AS asset_id,
+           -- 🔴 CMC 优先：cmc.total_supply → cmc.circulating_supply → tokenomics.total_supply
+           --    → tokenomics.max_supply（污染源，末位兜底）
+           COALESCE(NULLIF(m.total_supply, 0), NULLIF(m.circulating_supply, 0),
+                    NULLIF(t.total_supply, 0), NULLIF(t.max_supply, 0)) AS supply_basis,
            m.price_usd,
            m.market_cap,
+           m.circulating_supply,
            m.market_date,
-           CASE WHEN NULLIF(t.max_supply, 0) IS NOT NULL THEN 'tokenomics.max_supply'
+           CASE WHEN NULLIF(m.total_supply, 0) IS NOT NULL THEN 'cmc.total_supply'
+                WHEN NULLIF(m.circulating_supply, 0) IS NOT NULL THEN 'cmc.circulating_supply'
                 WHEN NULLIF(t.total_supply, 0) IS NOT NULL THEN 'tokenomics.total_supply'
-                WHEN NULLIF(m.total_supply, 0) IS NOT NULL THEN 'cmc.total_supply'
-                ELSE 'cmc.circulating_supply' END AS supply_source
+                WHEN NULLIF(t.max_supply, 0) IS NOT NULL THEN 'tokenomics.max_supply'
+                ELSE NULL END AS supply_source
     FROM tok t
     FULL OUTER JOIN mkt m ON m.asset_id = t.asset_id
     WHERE COALESCE(t.asset_id, m.asset_id) = ANY(%s)
@@ -202,8 +266,10 @@ def _load_supply_price_basis(conn, asset_ids: list[int]) -> dict[int, dict]:
                 "supply_basis": _db_num(r["supply_basis"]),
                 "price_usd": _db_num(r["price_usd"]),
                 "market_cap": _db_num(r["market_cap"]),
+                "circulating_supply": _db_num(r["circulating_supply"]),
                 "price_date": str(r["market_date"]) if r["market_date"] else None,
                 "supply_source": r["supply_source"],
+                "market_cap_source": "cmc.asset_market_daily" if r["market_cap"] is not None else None,
             }
             for r in cur.fetchall()
         }
@@ -321,6 +387,10 @@ def main() -> int:
 
         inserted = 0
         skipped = 0
+        # 🔴 UNLOCK-SYS-002 计数器
+        skipped_template = 0
+        mcap_contaminated = 0
+        ratio_mcap_out_of_range = 0
 
         # 供应量基数 + 现价（审计 P0-2：解锁价值必须可自证）
         basis_map = _load_supply_price_basis(conn, [r["asset_id"] for r in rows])
@@ -344,6 +414,12 @@ def main() -> int:
 
                 for ev in events:
                     if not isinstance(ev, dict):
+                        continue
+                    # 🔴 UNLOCK-SYS-002：模板占位行直接丢弃（不入库、不参与任何下游计算）
+                    # 详见 _is_template_event 的说明：源站对无真实解锁计划的资产渲染
+                    # pct=12.0 / value_usd=123460.0 的假行，跨 108 个资产重复出现。
+                    if _is_template_event(ev):
+                        skipped_template += 1
                         continue
                     unlock_date = _parse_date(ev.get("date"))
                     if not unlock_date:
@@ -384,6 +460,31 @@ def main() -> int:
                     supply_basis = _b.get("supply_basis")
                     price_usd = _b.get("price_usd")
                     mcap_basis = _b.get("market_cap") or mcap_fallback
+
+                    # 🔴 UNLOCK-SYS-002：量纲自检 —— market_cap 必须与 price×circ 同量级。
+                    # biz.asset_market_daily 存在同名多 asset_id 污染（BTC 9 个 / CAT 17 个 /
+                    # PEPE 16 个），其中错挂的「同名假币」行 market_cap 量纲完全错误
+                    # （实测 ZEC 9133「Zcash AI」mcap=3,873.67 而真 ZEC(1273)=206 亿）。
+                    # 用 price×circulating_supply 交叉验市值：偏差 >10 倍即判定基准污染，
+                    # 该资产的 mcap_basis 一律拒用（ratio_mcap 留 NULL，绝不写错值）。
+                    mcap_basis_valid = True
+                    _circ = _b.get("circulating_supply")
+                    if mcap_basis and price_usd and _circ and _circ > 0:
+                        _implied = price_usd * _circ
+                        _r = (_implied / mcap_basis) if mcap_basis > 0 else 0
+                        if _r > 10 or _r < 0.1:
+                            mcap_basis_valid = False
+                            mcap_contaminated += 1
+                    elif mcap_basis and price_usd and _circ is None and supply_basis:
+                        # 无流通量时退而用总量做弱校验（允许 1/50 ~ 50 倍的宽松区间）
+                        _implied = price_usd * supply_basis
+                        _r = (_implied / mcap_basis) if mcap_basis > 0 else 0
+                        if _r > 50 or _r < 0.02:
+                            mcap_basis_valid = False
+                            mcap_contaminated += 1
+                    if not mcap_basis_valid:
+                        mcap_basis = None
+
                     # 比例越界（>100%）说明源站该列语义与「占总量比例」不符，
                     # 不据此反推金额（否则会算出超过最大供应量的解锁量），仅在 raw_ref 标记
                     ratio_implausible = ratio_total is not None and ratio_total > 100
@@ -423,11 +524,17 @@ def main() -> int:
                     else:
                         unlock_value_usd = scraped_value
                     # ratio_mcap：有市值基准时统一补算（供解锁榜/压力分消费）
-                    # 🔴 合理性护栏（UNLOCK-SYS-001）：单次解锁占市值 >100% 不可能成立
-                    # （实测为 PoW 年发射量误抓 / supply_basis 污染所致），超限不写入
+                    # 🔴 合理性护栏（UNLOCK-SYS-001 + SYS-002）：单次解锁占市值 >100% 不可能成立
+                    # （实测为 PoW 年发射量误抓 / supply_basis 污染 / 模板占位行所致），超限不写入
+                    ratio_mcap_rejected = False
                     if mcap_basis and unlock_value_usd and mcap_basis > 0:
                         _rm = unlock_value_usd / mcap_basis * 100.0
-                        ratio_mcap = round(_rm, 4) if 0 < _rm <= 100 else None
+                        if 0 < _rm <= 100:
+                            ratio_mcap = round(_rm, 4)
+                        else:
+                            ratio_mcap = None
+                            ratio_mcap_rejected = True
+                            ratio_mcap_out_of_range += 1
                     risk_level = str(ev.get("risk_level") or "")[:20] or None
 
                     raw_ref = dict(ev)
@@ -443,6 +550,10 @@ def main() -> int:
                         "price_usd": price_usd,
                         "price_date": _b.get("price_date"),
                         "ratio_implausible": ratio_implausible,
+                        # 🔴 UNLOCK-SYS-002 审计溯源
+                        "mcap_basis_valid": mcap_basis_valid,
+                        "mcap_basis_source": _b.get("market_cap_source"),
+                        "ratio_mcap_rejected": ratio_mcap_rejected,
                     }
 
                     try:
@@ -478,6 +589,10 @@ def main() -> int:
 
         conn.commit()
         print(f"同步完成：写入 {inserted} 条，跳过 {skipped} 条")
+        # 🔴 UNLOCK-SYS-002 审计摘要：三项防线各自拦截量，缺一不可见
+        print(f"  [SYS-002] 模板占位行丢弃: {skipped_template} 条"
+              f" | 市值基准污染拒用: {mcap_contaminated} 次"
+              f" | ratio_mcap 越界拒写: {ratio_mcap_out_of_range} 条")
 
     return 0
 

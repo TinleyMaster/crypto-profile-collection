@@ -5,7 +5,13 @@
 1. resolve_asset()：把用户输入（symbol / name / asset_id）解析成 (asset_id, symbol, name, sector)。
 2. check_data_health()：对目标资产各数据域做新鲜度 + 覆盖率检查，输出绿/黄/红矩阵。
 
-被 run_research.py 调用；也可单独运行 `python data_health.py --symbol BTC` 快速体检。
+被 run_research.py 调用；也可单独运行 `py -3.12 data_health.py --symbol BTC` 快速体检。
+
+退出码（HC-006 契约，上层必须据此区分，不得一律当失败）：
+    0 = 体检完成
+    1 = 资产不存在（库可达、已查证）
+    3 = 数据库不可达（本次无法判定，≠ 数据不可得）
+    4 = 环境缺依赖 / 解释器不对（先修环境）
 """
 from __future__ import annotations
 
@@ -23,8 +29,34 @@ for cand in (_scripts_src, os.path.join(_code_root, "workbench"), "/app"):
     if cand and os.path.isdir(cand) and cand not in sys.path:
         sys.path.insert(0, cand)
 
-from crypto_research.config import get_settings  # noqa: E402
-from crypto_research.db.conn import get_connection  # noqa: E402
+# ── HC-006：环境/依赖缺失不得伪装成「数据不可得」────────────────────
+# 本机裸 `python` = WorkBuddy 内置 3.13（无 psycopg），正确解释器为 `py -3.12`。
+# 若直接 import，缺依赖时脚本会在 import 阶段崩成 ModuleNotFoundError 堆栈，
+# 上层只看到「stdout 一片空白」，极易被解读成「库里没有数据」——2026-10-26 真实踩过。
+# 故此处捕获并降级为显式退出码 4（ENV_BROKEN），绝不静默、绝不伪装。
+_IMPORT_ERROR: BaseException | None = None
+try:
+    import psycopg  # noqa: E402
+    import psycopg_pool  # noqa: E402
+    from crypto_research.config import get_settings  # noqa: E402
+    from crypto_research.db.conn import get_connection  # noqa: E402
+except ModuleNotFoundError as _ie:  # noqa: N816
+    # 被其他脚本 import（run_research.py / build_factors.py 等）时必须原样抛出：
+    # 让调用方看到真实的缺依赖栈，而不是拿到一个 None 后在别处变成
+    # 「TypeError: 'NoneType' object is not callable」这种更难排查的假象。
+    if __name__ != "__main__":
+        raise
+    _IMPORT_ERROR = _ie
+    psycopg = None  # type: ignore[assignment]
+    psycopg_pool = None  # type: ignore[assignment]
+    get_settings = None  # type: ignore[assignment]
+    get_connection = None  # type: ignore[assignment]
+
+# ── 退出码契约（HC-006）：任何上层脚本/agent 必须能区分这三种情况 ──────
+EXIT_OK = 0
+EXIT_NOT_FOUND = 1            # 资产确实不存在（库可达、查过了、没有）
+EXIT_DB_UNREACHABLE = 3       # 库连不上 → 本次无法判定，不是「数据不可得」
+EXIT_ENV_BROKEN = 4           # 解释器缺依赖 / 环境坏了 → 先修环境
 
 # 资产解析用（public 表存在历史遗留，优先 biz 层）
 ASSET_LOOKUP_SQL = """
@@ -298,28 +330,69 @@ def render_health_md(health: dict) -> str:
     return "\n".join(lines)
 
 
+def _explain_db_unreachable(e: BaseException) -> None:
+    """库不可达的统一出口：明确区分「库挂了」与「数据缺失」（HC-006）。
+
+    背景：get_connection() 的重试日志全部走 stderr，且要等 20s+（池自身 60s 超时）
+    才抛异常。若调用方只读 stdout，看到的是一片空白 —— 这正是把「库连不上」
+    误判成「数据不可得」的成因。
+    """
+    print("", file=sys.stderr)
+    print("[health] ❌ DB_UNREACHABLE — 数据库不可达，本次体检未完成", file=sys.stderr)
+    print(f"[health]    异常: {type(e).__name__}: {str(e)[:150]}", file=sys.stderr)
+    print("[health]    ⚠️ 这不代表数据缺失。禁止据此判定「数据不可得」。", file=sys.stderr)
+    print("[health]    排查顺序:", file=sys.stderr)
+    print("[health]      1) tailscale status → 节点 active 且 rx > 0（rx=0 即数据面不通）",
+          file=sys.stderr)
+    print("[health]      2) nslookup derp9.tailscale.com → 返回 198.18.x 即 Clash fake-ip 劫持",
+          file=sys.stderr)
+    print("[health]      3) curl -w '%{remote_ip}' https://app.tokenomics.com → 是否 127.0.0.1",
+          file=sys.stderr)
+    print("[health]      4) 管理员: Stop-Service FlClashHelperService; Disable-NetAdapter okz",
+          file=sys.stderr)
+    print("[health]      5) 一键三层自检: py -3.12 diag_net.py（退出码 0=全通 2=隧道 3=DB）",
+          file=sys.stderr)
+
+
 def main() -> int:
     import argparse
+
+    if _IMPORT_ERROR is not None:
+        _name = getattr(_IMPORT_ERROR, "name", None) or str(_IMPORT_ERROR)
+        print(f"[health] ❌ ENV_BROKEN — 当前解释器缺依赖: {_name}", file=sys.stderr)
+        print(f"[health]    实际解释器: {sys.executable}", file=sys.stderr)
+        print("[health]    正确用法: py -3.12 bin/data_health.py --symbol BTC", file=sys.stderr)
+        print("[health]    ⚠️ 这不代表数据缺失。", file=sys.stderr)
+        return EXIT_ENV_BROKEN
 
     parser = argparse.ArgumentParser(description="投研数据体检（P1）")
     parser.add_argument("--symbol", required=True, help="币种符号或名称，如 BTC / BTCUSDT / Bitcoin")
     args = parser.parse_args()
 
-    settings = get_settings(require_database=True)
-    with get_connection(settings.database_url) as conn:
-        raw_query = args.symbol
-        q = int(raw_query) if raw_query.isdigit() else raw_query
-        candidates = resolve_asset(conn, q)
-        if not candidates:
-            print(f"[health] 未找到资产: {args.symbol}")
-            return 1
-        # 取市值排名最高者
-        cand = candidates[0]
-        print(f"[health] 命中: {cand['asset_id']} {cand['canonical_symbol']} {cand['canonical_name']} "
-              f"(rank={cand['market_cap_rank']}, sector={cand['sector']})")
-        health = check_data_health(conn, cand["asset_id"])
-        print(render_health_md(health))
-        return 0
+    try:
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            raw_query = args.symbol
+            q = int(raw_query) if raw_query.isdigit() else raw_query
+            candidates = resolve_asset(conn, q)
+            if not candidates:
+                print(f"[health] 未找到资产: {args.symbol}（库可达，已查证不存在）")
+                return EXIT_NOT_FOUND
+            # 取市值排名最高者
+            cand = candidates[0]
+            print(f"[health] 命中: {cand['asset_id']} {cand['canonical_symbol']} "
+                  f"{cand['canonical_name']} "
+                  f"(rank={cand['market_cap_rank']}, sector={cand['sector']})")
+            health = check_data_health(conn, cand["asset_id"])
+            print(render_health_md(health))
+            return EXIT_OK
+    except (psycopg_pool.PoolTimeout, psycopg.OperationalError, RuntimeError) as e:
+        # 只捕获这三类，不用 except Exception：
+        #   conn.py 只抛 PoolTimeout / OperationalError / RuntimeError("无法从连接池取得连接")
+        # 业务层若将来引入 RuntimeError，仍需保留可观测性（不静默吞异常）。
+        _explain_db_unreachable(e)
+        return EXIT_DB_UNREACHABLE
+
 
 
 if __name__ == "__main__":

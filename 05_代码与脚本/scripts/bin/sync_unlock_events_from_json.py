@@ -149,41 +149,26 @@ def _parse_token_amount_str(s: str) -> float | None:
 #       · ratio_mcap 动辄数百至数千个百分点（BEAM 4654%、BNB 8524%）
 #   ⚠️ **不能按 symbol 黑名单过滤**：命中面是 108 个资产且随页面变化，黑名单不可穷举，
 #      且 pct=12.0 / $123.46K 在 SHIB/SOL/YFI 等真实事件中也存在（非 PoW 专属签名）。
-#   ⇒ 正确解法是**按事件结构特征识别**（下面 _is_template_event 判定）。
+#   ⇒ 正确解法是**按事件结构特征识别**。
 #
-# 判据（三条同时成立才判为模板行，宁可漏杀不可错杀真实事件）：
-#   ① value_usd 精确等于 123460.0（源站写死的占位金额）
-#   ② pct 精确等于 12.0（源站写死的占位比例）
-#   ③ status 属于模板话术集合（"N months left" / "Next" 等倒计时文案）
-_TEMPLATE_PLACEHOLDER_VALUE_USD = 123460.0
-_TEMPLATE_PLACEHOLDER_PCT = 12.0
-_TEMPLATE_STATUS_PATTERNS = ("months left", "next unlock", "next")
+# 🔴 源头治理 G3.1：判据已抽到公共模块 crypto_research.unlock_quality，
+#    与采集端（phase_chain_token_unlocks.py）共用同一实现，避免判据漂移。
+#    本文件保留 `_is_template_event` 薄封装以兼容既有调用方。
+from crypto_research.unlock_quality import (  # noqa: E402
+    TEMPLATE_PLACEHOLDER_PCT,
+    TEMPLATE_PLACEHOLDER_VALUE_USD,
+    TEMPLATE_STATUS_PATTERNS,
+    is_template_event as _shared_is_template_event,
+)
 
 
 def _is_template_event(ev: dict) -> bool:
     """判定 tokenomist 模板占位行（跨资产重复的假解锁事件）。
 
+    实现见 crypto_research.unlock_quality.is_template_event。
     宁可漏杀（漏判的行只是多一条噪声数据）也不可错杀（错杀会丢掉真实解锁事件）。
     """
-    if not isinstance(ev, dict):
-        return False
-    val = ev.get("value_usd")
-    pct = ev.get("pct")
-    try:
-        val_f = float(val) if val is not None else None
-        pct_f = float(pct) if pct is not None else None
-    except (TypeError, ValueError):
-        return False
-    if val_f is None or pct_f is None:
-        return False
-    if abs(val_f - _TEMPLATE_PLACEHOLDER_VALUE_USD) > 0.01:
-        return False
-    if abs(pct_f - _TEMPLATE_PLACEHOLDER_PCT) > 1e-9:
-        return False
-    status = str(ev.get("status") or "").lower()
-    if not any(p in status for p in _TEMPLATE_STATUS_PATTERNS):
-        return False
-    return True
+    return _shared_is_template_event(ev)
 
 
 # ── 解锁价值重算底座（审计 P0-2，2026-09-26）──────────────────────────

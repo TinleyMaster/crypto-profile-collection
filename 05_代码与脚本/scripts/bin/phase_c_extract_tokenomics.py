@@ -37,6 +37,10 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 from crypto_research.config import get_settings
 from crypto_research.db.conn import get_connection
 from crypto_research.clients.llm_client import LLMClient, extract_json_from_llm_response
+from crypto_research.unlock_quality import (
+    MAX_SUPPLY_CIRC_MULTIPLE_MAX,
+    sanitize_supply_basis,
+)
 
 
 # ── 配置 ──────────────────────────────────────────────────
@@ -45,6 +49,12 @@ MAX_CONTENT_LENGTH = 8000    # 单页最大字符数（超过截断）
 MAX_TOTAL_CONTENT = 80000    # 总内容最大字符数
 MAX_PAGES = 20               # 最多收集多少页文档
 FETCH_TIMEOUT = 15           # 页面抓取超时（秒）
+
+# 🔴 CMC 下发的哨兵值（UNLOCK-SYS-002 源头治理 BUG2）：
+#   2^53-1 = 9007199254740991 是 JavaScript Number 的最大安全整数，
+#   CMC 在 max_supply 缺失/溢出时会下发该值。实测 1,458 条快照命中、10 个资产
+#   total_supply 正常而 max_supply 为哨兵 ⇒ 该值必须当作「无数据」而非真实供应量。
+CMC_SENTINEL_MAX_SUPPLY = 9007199254740991.0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -782,27 +792,55 @@ def get_authoritative_supply(conn, asset_id: int) -> dict | None:
     """从 src_cmc.cmc_asset_quote_snapshot（经 biz.coin_basic 映射）取权威 supply。
 
     这是多源交叉验证后的 CMC 权威数据，用于校验 LLM/平台提取的 supply 单位是否错误。
+
+    🔴 BUG1 修复（UNLOCK-SYS-002 源头治理，2026-10-26）：
+      原查询写死 `q.quote_time = (SELECT MAX(quote_time) FROM ...)`（全表最大时间）。
+      但快照是**分批入库**的——实测 8,658 个 cmc_id 中只有 3,099 个与全表 max 同批，
+      其余 **5,559 个（64%）** 的最新快照早于全表 max ⇒ 查不到任何行
+      ⇒ `get_authoritative_supply` 返回 None ⇒ `validate_supply_units` **静默跳过**
+      ⇒ 单位错误值直接入库（实测影响 5,153 个 coin_basic / 2,019 个 tokenomics 行）。
+      改为 **per-cmc_id 取各自最新一行**（DISTINCT ON），各批次互不影响。
+
+    🔴 BUG2 修复：CMC 自身会把 2^53-1（= 9007199254740991，JS Number 精度上限）
+      当作 max_supply 下发（实测 1,458 条快照 / 10 个资产 total_supply 正常）。
+      该哨兵值若被当作「权威值」与提取值比对，比对必然失效 ⇒ 权威值里的哨兵一律剔除。
     """
     try:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 """
-                SELECT q.total_supply, q.circulating_supply, q.max_supply
+                WITH latest AS (
+                    SELECT DISTINCT ON (cmc_id)
+                           cmc_id, total_supply, circulating_supply, max_supply
+                    FROM src_cmc.cmc_asset_quote_snapshot
+                    ORDER BY cmc_id, quote_time DESC
+                )
+                SELECT l.total_supply, l.circulating_supply, l.max_supply
                 FROM biz.coin_basic cb
-                JOIN src_cmc.cmc_asset_quote_snapshot q ON q.cmc_id = cb.cmc_id
+                JOIN latest l ON l.cmc_id = cb.cmc_id
                 WHERE cb.asset_id = %s
-                  AND q.quote_time = (SELECT MAX(quote_time) FROM src_cmc.cmc_asset_quote_snapshot)
                 """,
                 (asset_id,),
             )
             row = cur.fetchone()
             if row and any(v is not None for v in row.values()):
-                return {
+                out = {
                     "source": "CMC_SNAPSHOT",
                     "total_supply": row.get("total_supply"),
                     "max_supply": row.get("max_supply"),
                     "circulating_supply": row.get("circulating_supply"),
                 }
+                # BUG2：剔除 CMC 下发的哨兵值（2^53-1 等），否则比对必然失效
+                for k in ("total_supply", "max_supply", "circulating_supply"):
+                    v = out.get(k)
+                    try:
+                        fv = float(v) if v is not None else None
+                    except (TypeError, ValueError):
+                        fv = None
+                    if fv is not None and fv >= CMC_SENTINEL_MAX_SUPPLY:
+                        out[k] = None
+                        out.setdefault("_sentinel_dropped", []).append(k)
+                return out
     except Exception as e:
         print(f"  [WARN] 权威 supply 读取失败: {e}")
     return None
@@ -814,28 +852,78 @@ def validate_supply_units(conn, asset_id: int, data: dict) -> dict:
     LLM 常把「2.441 亿」提取成 244 之类的裸数字（单位丢失）。与 CMC 权威快照做
     ratio 对比，偏离 >10 倍（或 <0.1 倍）视为「单位疑似错误」，用 CMC 权威值覆盖，
     并在 notes 中标注，避免错误 supply 传导到通胀率/未流通占比/研究结论。
+
+    🔴 结构性盲区补丁（UNLOCK-SYS-002 源头治理 G1.1）：
+      **跨源校验在「污染源即权威源」时失效** —— 实测 BEAM 的 max_supply=584.7亿
+      本身就来自 CMC 快照（tokenomics.com 抽取值与 CMC 一致），拿 CMC 覆盖 CMC
+      等于没校验；ONEFUSE 的 max_supply=2^53-1 更是 CMC 下发的哨兵值。
+      ⇒ 追加**内部一致性护栏**：max_supply 必须落在
+      `[circulating_supply, circulating_supply × MAX_SUPPLY_CIRC_MULTIPLE_MAX]`，
+      且与 total_supply 不能差 10 倍以上。任一不满足 ⇒ 该值置 None（宁可缺失，
+      不用错值），并在 notes 标注。这条护栏**不依赖外部源**，对上述两类污染同样有效。
     """
     auth = get_authoritative_supply(conn, asset_id)
-    if not auth:
-        return data
-
     notes = []
+    if auth:
+        for key in ("total_supply", "circulating_supply", "max_supply"):
+            llm_val = data.get(key)
+            auth_val = auth.get(key)
+            if llm_val is None or auth_val is None:
+                continue
+            try:
+                llm_f = float(llm_val)
+                auth_f = float(auth_val)
+            except (ValueError, TypeError):
+                continue
+            if auth_f <= 0:
+                continue
+            ratio = llm_f / auth_f
+            if ratio > 10 or ratio < 0.1:
+                data[key] = auth_val
+                notes.append(f"{key} 提取值 {llm_f:g} 与 CMC 权威值 {auth_f:g} 偏差 {ratio:.2f}x，已用权威值覆盖")
+    else:
+        notes.append("CMC 权威 supply 不可得（该币快照批次落后或未入库），本次仅做内部一致性校验")
+
+    # ── 内部一致性护栏（不依赖外部源）──
+    # ⚠️ 必须走公共模块的转换函数：psycopg 的 NUMERIC 取回是 Decimal，
+    #    用 isinstance(v, (int, float)) 会把 Decimal 全判为「非数值」。
+    from crypto_research.unlock_quality import _to_float_or_none as _f
+
+    cur_circ = _f(data.get("circulating_supply"))
+    cur_total = _f(data.get("total_supply"))
+    cur_max = _f(data.get("max_supply"))
+    # 哨兵值检测（提取层也可能直接抓到 2^53-1）
     for key in ("total_supply", "circulating_supply", "max_supply"):
-        llm_val = data.get(key)
-        auth_val = auth.get(key)
-        if llm_val is None or auth_val is None:
-            continue
-        try:
-            llm_f = float(llm_val)
-            auth_f = float(auth_val)
-        except (ValueError, TypeError):
-            continue
-        if auth_f <= 0:
-            continue
-        ratio = llm_f / auth_f
-        if ratio > 10 or ratio < 0.1:
-            data[key] = auth_val
-            notes.append(f"{key} 提取值 {llm_f:g} 与 CMC 权威值 {auth_f:g} 偏差 {ratio:.2f}x，已用权威值覆盖")
+        raw = data.get(key)
+        fv = _f(raw)
+        if fv is not None and fv >= CMC_SENTINEL_MAX_SUPPLY:
+            data[key] = None
+            notes.append(f"{key} 命中 CMC 哨兵值（2^53-1 量级），已置空")
+
+    # max_supply vs total_supply：同口径应同量级，差 10 倍以上必有一方错
+    if cur_max and cur_total and cur_total > 0:
+        r = cur_max / cur_total
+        if r > 10 or r < 0.1:
+            data["max_supply"] = None
+            notes.append(f"max_supply={cur_max:g} 与 total_supply={cur_total:g} 偏差 {r:.2f}x（内部不一致），已置空待重采")
+
+    # max_supply vs circulating_supply：区间护栏
+    if cur_max is not None and cur_circ and cur_circ > 0:
+        usable, reason = sanitize_supply_basis(
+            cur_max, cur_circ, cur_total,
+            cmc_total_supply=(auth or {}).get("total_supply"),
+        )
+        if usable is None:
+            data["max_supply"] = None
+            reason_txt = {
+                "reject_circ_range": f"max_supply={cur_max:g} 超出 [流通量×0.5, 流通量×{MAX_SUPPLY_CIRC_MULTIPLE_MAX:g}] 区间",
+                "reject_total_range": f"max_supply={cur_max:g} 超出 [总量×0.5, 总量×{MAX_SUPPLY_CIRC_MULTIPLE_MAX:g}] 区间",
+                "reject_cmc_mismatch": f"max_supply={cur_max:g} 与 CMC total_supply 偏差过大",
+                "reject_nonpositive": f"max_supply={cur_max:g} 非法值",
+            }.get(reason, f"max_supply={cur_max:g} 未通过一致性校验（{reason}）")
+            notes.append(reason_txt + "，已置空待重采")
+        elif usable != cur_max:
+            data["max_supply"] = usable
 
     if notes:
         data["notes"] = (("；".join(notes) if data.get("notes") else "")

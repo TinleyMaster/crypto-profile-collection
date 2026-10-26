@@ -231,13 +231,20 @@ WHERE a.asset_id IN (SELECT asset_id FROM unlocked)
 ORDER BY a.asset_id
 """
 
-# ── 批量：全市场日线（一次拉全量，构建各币日线映射）──
+# ── 批量：日线（只拉本次要评估的 symbol）──
+# 🔴 2026-10-26：原版拉全市场（实测 41.7 万行 / 1,700+ symbol）。
+#   但 ser_by_sym **只在批量循环里按 `upper(canonical_symbol)+'USDT'` 查**
+#   （唯一读点见 batch_run 内 `series = ser_by_sym.get(...)`），
+#   非目标 symbol 的序列永远不会被用到 ⇒ 按目标 symbol 过滤是**语义等价**的。
+#   收益：41.7 万行 → 24.5 万行（-41%）；本机走 Tailscale DERP 时
+#   行传输是唯一瓶颈（server-side 聚合只要 2s，瓶颈全在传输）。
 BATCH_KLINES_SQL = """
 SELECT symbol,
        (open_time AT TIME ZONE 'UTC')::date AS d,
        (array_agg(close_px ORDER BY open_time DESC))[1] AS close
 FROM biz.asset_klines
 WHERE interval = '1d' AND (open_time AT TIME ZONE 'UTC')::date >= %s
+  AND symbol = ANY(%s)
 GROUP BY symbol, (open_time AT TIME ZONE 'UTC')::date
 ORDER BY symbol, d
 """
@@ -633,99 +640,111 @@ def persist(conn, asset, as_of, ev) -> str:
 def batch_run(conn, as_of, commit_every=200) -> dict:
     from collections import defaultdict
     cur = conn.cursor()
+    import time as _time
+    _t0 = _time.time()
+    def _lap(msg):
+        print(f"    [batch {as_of}] {_time.time() - _t0:7.1f}s  {msg}", flush=True)
 
-    # 1) 事件（v4：按 asset_id 聚合去重；服务端物化 + 分块读回，防 TUN 吞大响应）
-    cur.execute("DROP TABLE IF EXISTS tmp_react_events")
-    cur.execute("CREATE TEMP TABLE tmp_react_events AS " + BATCH_EVENTS_SQL)
+    # 1) 事件（v4：按 asset_id 聚合去重）
+    cur.execute(BATCH_EVENTS_SQL)
     ev_by_id = defaultdict(list)
-    offset = 0
-    while True:
-        cur.execute("SELECT asset_id, unlock_date, value FROM tmp_react_events "
-                    "ORDER BY asset_id, unlock_date LIMIT 5000 OFFSET %s", (offset,))
-        chunk = cur.fetchall()
-        if not chunk:
-            break
-        for aid, ud, val in chunk:
-            ev_by_id[aid].append((ud, val, 1, 1))
-        offset += len(chunk)
-    cur.execute("DROP TABLE IF EXISTS tmp_react_events")
+    for aid, ud, val in cur.fetchall():
+        ev_by_id[aid].append((ud, val, 1, 1))
+    _lap(f"events {sum(len(v) for v in ev_by_id.values())} 条 / {len(ev_by_id)} 资产")
 
     # 2) 资产（v4：每个有事件的 asset_id 一行）
     cur.execute(BATCH_ASSETS_SQL, (as_of,))
     assets = [{"asset_id": r[0], "symbol": r[1], "name": r[2], "market_cap": r[3], "rank": r[4]}
               for r in cur.fetchall()]
+    _lap(f"assets {len(assets)} 个")
 
-    # 3) 全市场日线
-    # 🔴 2026-10-26：本机 TUN 代理会**吞大响应**——BATCH_KLINES_SQL 结果 41.7 万行，
-    #   在已跑过几条查询的连接里 fetchall 会永久卡死（faulthandler 实测卡在此处）。
-    #   ⇒ 改为**服务端物化 + 分块读回**（每块 5,000 行，响应体积可控）。
-    cur.execute("DROP TABLE IF EXISTS tmp_react_klines")
-    # CREATE TABLE AS 不接受参数占位符 → 先把 %s 换成字面量
-    _kl_sql = BATCH_KLINES_SQL.replace("%s", "'%s'" % BENCH_START.isoformat())
-    cur.execute("CREATE TEMP TABLE tmp_react_klines AS " + _kl_sql)
+    # 3) 目标 symbol 的日线（只拉会被用到的那些，见 BATCH_KLINES_SQL 注释）
+    # 🔴 2026-10-26：这里曾用「CTAS 物化 + LIMIT/OFFSET 分块读回」，
+    #   那是**反向优化**——LIMIT/OFFSET 分块每块都要把全表重新排序，
+    #   84 块 × 41.7 万行排序 = 实测 300s+ 仍没读完（O(n²)）。
+    #   且当时的「TUN 吞大响应」结论是在**全机断网**期间测出来的，属误判：
+    #   同一脚本 11:24 用原始 fetchall 路径跑完全程只用了 85s。
+    # ✅ 正确解法：psycopg3 server-side cursor（cur.stream）——
+    #   一次查询、服务端游标分批吐行、无重复排序、也不产生超大单次响应；
+    #   再叠加「只拉目标 symbol」，把传输量从 41.7 万行降到 24.5 万行。
+    need_syms = sorted({(a["symbol"] or "").upper() + "USDT" for a in assets})
     ser_by_sym = defaultdict(list)
-    offset = 0
-    while True:
-        cur.execute("SELECT symbol, d, close FROM tmp_react_klines "
-                    "ORDER BY symbol, d LIMIT 5000 OFFSET %s", (offset,))
-        chunk = cur.fetchall()
-        if not chunk:
-            break
-        for sym, d, close in chunk:
+    _n_kl = 0
+    # 🔴 2026-10-26 性能实测与最终方案（prod 经 Tailscale 访问，链路会劣化）：
+    #   本机到 prod 的**大响应传输**在链路劣化时极慢——实测同一条
+    #   `SELECT symbol, open_time, close_px ... LIMIT 20000` 查询，
+    #   13:52 时 0.0s，14:50 时 **126.6s**（≈23KB/s）；而 `SELECT 1` 只要 0.3s。
+    #   ⇒ 是**传输体积**触发的，不是 SQL 慢（server-side 聚合仅 0.73~1.4s，
+    #      EXPLAIN ANALYZE 已验证）。
+    #   曾试过并否决的三种方案：
+    #     ① CTAS 物化 + LIMIT/OFFSET 分块 → O(n²)，每块重排全表，300s+ 没读完
+    #     ② psycopg3 cur.stream(size=N)     → 分块取行需 **libpq 17+ 且 PG 服务端 17+**；
+    #        本机 libpq 18.3 但 prod PG **16.15** ⇒ 静默退化成单行模式（24.5 万次往返）
+    #     ③ 命名游标 DECLARE + FETCH 20000  → 首次 FETCH 就要整表排序+聚合物化，
+    #        实测首取 20,000 行 = **85.7s**
+    # ✅ 最终方案：**按 symbol 分批**，每批响应控制在数千行（≈5,000 行上限）。
+    #   ① 语义等价：ser_by_sym 只在 `ser_by_sym.get(sym+'USDT')` 一处被查，
+    #      非目标 symbol 的序列永远用不到 ⇒ 只拉目标 symbol 不改变任何结果。
+    #   ② 先取每个 symbol 的行数（558 行的小结果），再按累计行数贪心分组，
+    #      保证每批响应体量可控；每批是独立查询，不重排序、无 O(n²)。
+    _KL_BATCH_ROWS = 5000
+    cur.execute("""SELECT symbol, count(*) FROM biz.asset_klines
+                   WHERE interval = '1d' AND (open_time AT TIME ZONE 'UTC')::date >= %s
+                     AND symbol = ANY(%s)
+                   GROUP BY symbol""", (BENCH_START, need_syms))
+    _cnt = {s: n for s, n in cur.fetchall()}
+    _batches, _cur_batch, _cur_rows = [], [], 0
+    for _s in need_syms:
+        _n = _cnt.get(_s, 0)
+        if _cur_batch and (_cur_rows + _n > _KL_BATCH_ROWS):
+            _batches.append(_cur_batch)
+            _cur_batch, _cur_rows = [], 0
+        _cur_batch.append(_s)
+        _cur_rows += _n
+    if _cur_batch:
+        _batches.append(_cur_batch)
+    _lap(f"klines 分 {len(_batches)} 批（目标 {len(need_syms)} symbol / "
+         f"{sum(_cnt.values())} 行，上限 {_KL_BATCH_ROWS} 行/批）")
+    for _bi, _batch in enumerate(_batches, 1):
+        cur.execute(BATCH_KLINES_SQL, (BENCH_START, _batch))
+        for sym, d, close in cur.fetchall():
+            _n_kl += 1
             if close is not None:
                 ser_by_sym[sym].append((d, float(close)))
-        offset += len(chunk)
-    cur.execute("DROP TABLE IF EXISTS tmp_react_klines")
+        if _bi % 10 == 0 or _bi == len(_batches):
+            _lap(f"  klines 批次 {_bi}/{len(_batches)} 累计 {_n_kl} 行")
     for v in ser_by_sym.values():
         v.sort()
+    _lap(f"klines 完成 {_n_kl} 行 / {len(ser_by_sym)} symbol")
 
-    # 4) 截面基准（全窗口一次算好）
-    # 🔴 同上：服务端物化，避免 TUN 吞大响应
-    cur.execute("DROP TABLE IF EXISTS tmp_react_bench")
-    # CREATE TABLE AS 不接受参数占位符 → 先把 %s 换成字面量
-    _bench_sql = BATCH_BENCH_SQL.replace("%s", "'%s'" % BENCH_START.isoformat())
-    cur.execute("CREATE TEMP TABLE tmp_react_bench AS " + _bench_sql)
+    # 4) 截面基准（全窗口一次算好，1,487 行——直接取，无需流式）
+    cur.execute(BATCH_BENCH_SQL, (BENCH_START,))
     bench = {}
-    offset = 0
-    while True:
-        cur.execute("SELECT * FROM tmp_react_bench ORDER BY 1 LIMIT 2000 OFFSET %s", (offset,))
-        chunk = cur.fetchall()
-        if not chunk:
-            break
-        for row in chunk:
-            d = row[0]
-            bench[d] = {
-                1: float(row[1]) if row[1] is not None else None,
-                3: float(row[2]) if row[2] is not None else None,
-                7: float(row[3]) if row[3] is not None else None,
-                14: float(row[4]) if row[4] is not None else None,
-                30: float(row[5]) if row[5] is not None else None,
-            }
-        offset += len(chunk)
-    cur.execute("DROP TABLE IF EXISTS tmp_react_bench")
+    for row in cur.fetchall():
+        d = row[0]
+        bench[d] = {
+            1: float(row[1]) if row[1] is not None else None,
+            3: float(row[2]) if row[2] is not None else None,
+            7: float(row[3]) if row[3] is not None else None,
+            14: float(row[4]) if row[4] is not None else None,
+            30: float(row[5]) if row[5] is not None else None,
+        }
+    _lap(f"bench {len(bench)} 个交易日")
 
     # 5) 分配构成
     cur.execute(BATCH_ALLOC_SQL)
     alloc_by_id = {r[0]: (float(r[1]) if r[1] is not None else None, r[2], r[3])
                    for r in cur.fetchall()}
+    _lap(f"alloc {len(alloc_by_id)} 行")
 
     # 5b) 下一次解锁的受益人构成（事件级，按 (asset_id, unlock_date) 聚合）
-    cur.execute("DROP TABLE IF EXISTS tmp_react_nmix")
-    cur.execute("CREATE TEMP TABLE tmp_react_nmix AS " + BATCH_NEXT_MIX_SQL)
+    cur.execute(BATCH_NEXT_MIX_SQL)
     _nmix = defaultdict(list)
-    offset = 0
-    while True:
-        cur.execute("SELECT asset_id, unlock_date, bucket, category, pct FROM tmp_react_nmix "
-                    "ORDER BY asset_id, unlock_date, pct DESC LIMIT 5000 OFFSET %s", (offset,))
-        chunk = cur.fetchall()
-        if not chunk:
-            break
-        for aid, ud, bucket, cat, pct in chunk:
-            _nmix[(aid, ud)].append({"category": cat, "bucket": bucket, "pct": float(pct)})
-        offset += len(chunk)
-    cur.execute("DROP TABLE IF EXISTS tmp_react_nmix")
+    for aid, ud, bucket, cat, pct in cur.fetchall():
+        _nmix[(aid, ud)].append({"category": cat, "bucket": bucket, "pct": float(pct)})
     # 行已按 pct DESC 排序 → 首元素即主导桶
     next_mix_by_key = {k: (v[0]["bucket"], v) for k, v in _nmix.items() if v}
+    _lap(f"next_mix {len(next_mix_by_key)} 键")
 
     # 5c) CMC 下一次解锁受益人（兜底源；v3）
     cur.execute(BATCH_CMC_SQL)
@@ -797,6 +816,7 @@ def batch_run(conn, as_of, commit_every=200) -> dict:
                 out["next_unlock_recipient_json"] = cm[1]
                 out["next_unlock_source"] = "cmc_next"
         rows_to_write.append(_reaction_params(asset, as_of, out))
+    _lap(f"计算完成 {len(rows_to_write)} 行待写")
 
     # 7b) 批量落库（executemany 一次往返；单条 upsert 实测 0.38s/条会超时）
     with conn.cursor() as cur:

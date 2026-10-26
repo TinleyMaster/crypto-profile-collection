@@ -32,7 +32,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 from crypto_research.config import get_settings
 from crypto_research.db.conn import get_connection
 # 🔴 UNLOCK-SYS-002 源头治理 G3.1：模板占位行判据与消费端共用，避免实现漂移
-from crypto_research.unlock_quality import is_template_event
+from crypto_research.unlock_quality import is_template_event, classify_event_quality
 
 NAV_TIMEOUT = 20  # 页面导航超时（秒）
 WAIT_MS = 3000      # 页面渲染等待（毫秒）
@@ -1515,6 +1515,61 @@ def _compute_unlock_ratio_mcap(data: dict) -> float | None:
     return None
 
 
+def _detect_symbol_collision(conn, asset_id: int) -> None:
+    """🔴 UNLOCK-SYS-002 源头治理 G2.5：检测并记录 canonical_symbol 撞名。
+
+    背景：`core.asset.canonical_symbol` 命名空间被长尾山寨币侵占——实测 2,108 个
+    symbol 有多个 asset_id（BTC 撞 "Big Titty Coin"、ETH 撞 "Bridged ETH"…）。
+    `core.asset_source_map` 的 `cmc_id → asset_id` 映射是干净的 1:1，问题不在映射，
+    而在于 symbol 本身不唯一 ⇒ 按 symbol 聚合的消费端（reaction 的 EVENTS_SQL）
+    会把 A 币的解锁事件算到 B 币头上。
+
+    本函数**只记录告警，不改 core.asset**——改 canonical_symbol 会破坏大量下游引用，
+    口径变更需主人拍板（工单 G2.3/G2.4）。
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                WITH me AS (
+                    SELECT asset_id, canonical_symbol, canonical_name FROM core.asset WHERE asset_id=%s
+                )
+                SELECT o.asset_id, o.canonical_name
+                FROM me JOIN core.asset o
+                  ON o.canonical_symbol = me.canonical_symbol AND o.asset_id <> me.asset_id
+                LIMIT 1
+            """, (asset_id,))
+            row = cur.fetchone()
+            if not row:
+                # 无撞名 ⇒ 清掉历史告警（若资产曾撞名后已修正）
+                cur.execute("DELETE FROM biz.asset_symbol_collision WHERE asset_id=%s", (asset_id,))
+                return
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS biz.asset_symbol_collision (
+                    asset_id BIGINT PRIMARY KEY,
+                    canonical_symbol VARCHAR(50),
+                    collided_with_asset_id BIGINT,
+                    collided_with_name VARCHAR(200),
+                    detected_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                INSERT INTO biz.asset_symbol_collision
+                    (asset_id, canonical_symbol, collided_with_asset_id, collided_with_name)
+                SELECT m.asset_id, m.canonical_symbol, o.asset_id, o.canonical_name
+                FROM core.asset m JOIN core.asset o
+                  ON o.canonical_symbol = m.canonical_symbol AND o.asset_id <> m.asset_id
+                WHERE m.asset_id = %s
+                ON CONFLICT (asset_id) DO UPDATE SET
+                    canonical_symbol = EXCLUDED.canonical_symbol,
+                    collided_with_asset_id = EXCLUDED.collided_with_asset_id,
+                    collided_with_name = EXCLUDED.collided_with_name,
+                    detected_at = NOW()
+            """, (asset_id,))
+    except Exception as e:
+        # 告警功能失败不应阻断主流程
+        _log(f"  [warn] 撞名检测失败（不影响入库）: {type(e).__name__}: {str(e)[:120]}")
+
+
 def save_to_db(conn, asset_id: int, data: dict) -> None:
     """写入或更新 biz.asset_token_unlocks。"""
     import json as json_mod
@@ -1528,12 +1583,19 @@ def save_to_db(conn, asset_id: int, data: dict) -> None:
     #   入库后表现为 ratio_total=12 假比例 + 荒谬解锁价值（BNB $8.32 万亿 / 占市值 8524%）。
     #   在**爬取端**丢弃 ⇒ 母表不再带毒，下游任何消费端都受益（不依赖消费端各自加护栏）。
     #   判据与消费端共用 crypto_research.unlock_quality，避免两处实现漂移。
+    #
+    # 🔴 G3.2：为每条保留的事件打上 `_quality` 标记（real / implausible / template），
+    #   写进 unlock_events_json 内的事件对象（不新增列——prod 的 navicat 角色非 owner，
+    #   ALTER TABLE 会被拒；CREATE TABLE 可以）。消费端可按标记过滤，无需硬编码常数。
     _events = list(data.get("unlock_events") or [])
     _kept, _dropped = [], 0
     for _ev in _events:
         if is_template_event(_ev):
             _dropped += 1
             continue
+        if isinstance(_ev, dict):
+            _ev = dict(_ev)
+            _ev["_quality"] = classify_event_quality(_ev)
         _kept.append(_ev)
     if _dropped:
         _log(f"  [SYS-002] 剔除模板占位行 {_dropped} 条（asset_id={asset_id}）")
@@ -1588,6 +1650,8 @@ def save_to_db(conn, asset_id: int, data: dict) -> None:
             "crawl_status": data.get("crawl_status", "ok"),
         })
     conn.commit()
+    # 🔴 G2.5：撞名告警（失败不阻断主流程）
+    _detect_symbol_collision(conn, asset_id)
     _log(f"  已写入数据库 (asset_id={asset_id}, crawl_status={data.get('crawl_status', 'ok')}, "
          f"unlock_ratio_mcap={unlock_ratio_mcap})")
 

@@ -399,18 +399,31 @@ def _attribution_from_trades(client, t: dict, prot: dict) -> tuple[dict | None, 
     entry = float(t["open_price"] or 0)
     sl = prot.get("stop_loss") or {}
     tp = prot.get("take_profit") or {}
+    tr = prot.get("trailing_stop") or {}
     reason = "manual_or_unknown"
     sl_trig = float(sl.get("triggerPrice") or sl.get("stopPrice") or 0)
+    has_tr = bool(tr and (tr.get("algoId") or tr.get("orderId") or tr.get("callbackRate")))
     if sl_trig > 0 and avg > 0 and abs(avg - sl_trig) / sl_trig <= 0.10:
         reason = "sl"
     else:
         tp_trig = float(tp.get("triggerPrice") or 0) if isinstance(tp, dict) else 0
         if tp_trig > 0 and avg > 0 and abs(avg - tp_trig) / tp_trig <= 0.02:
             reason = "tp"
-        elif entry > 0 and ((is_long and avg > entry * 0.97)
-                            or (not is_long and avg < entry * 1.03)):
-            # 多单 TR 触发价 ≥ 峰值×0.97 通常 > 入场价（深幅盈利币可远超）；
-            # 空单对称：触发价 ≤ 谷值×1.03 通常 < 入场价。按方向分别放宽边界。
+        elif entry > 0 and (
+            (is_long and avg >= entry * 0.97 - entry * 0.02)
+            or (not is_long and avg <= entry * 1.03 + entry * 0.02)
+        ):
+            # 多单：原生 TR callbackRate=3%，理论触发价 ≥ 峰值×0.97 ≥ 入场价×0.97；
+            # 空单：对称，触发价 ≤ 谷值×1.03 ≤ 入场价×1.03。
+            # 容差 ±2% 覆盖滑点（JCT #47 close 0.007608 vs entry×0.97 0.007613，
+            # 差 0.07% 因 tick 精度刚好没命中旧条件 > entry×0.97）。
+            reason = "trail"
+        elif has_tr and entry > 0 and (
+            (is_long and avg > entry * 0.85)
+            or (not is_long and avg < entry * 1.15)
+        ):
+            # 兜底：保护单里明确挂了原生 TR（algoId/callbackRate 存在），
+            # 且 close_price 没击穿 SL15% → 必是 TR 触发
             reason = "trail"
     return last, reason
 

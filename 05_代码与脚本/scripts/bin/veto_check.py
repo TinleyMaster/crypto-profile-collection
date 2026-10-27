@@ -67,17 +67,41 @@ POOL_WHERE = "m.market_cap_rank IS NOT NULL AND COALESCE(m.market_cap,0) >= 1000
 L5_LATERAL = """
 LEFT JOIN LATERAL (
     SELECT sum(e.unlock_value_usd) FILTER (WHERE e.unlock_date <= CURRENT_DATE + 180) AS u180,
-           -- 只统计「受益人类型已标注」的金额，用于判断内部抛压的真实覆盖率
+           -- 🔴 HC-014（2026-10-27）：只认「事件级精确来源」。
+           --    asset_level_only 是该资产**全生命周期**分配构成的主桶，与「本轮解锁
+           --    流向谁」是两件事 —— 实测 157 个双全样本仅三分之一一致（三分之二判反），
+           --    典型如 ARKM 资产级=community 但事件级 insider 占 63、ATH 更达 86。
+           --    拿它算内部抛压会把风险标的洗成安全，属方向性错误，故显式排除。
            sum(e.unlock_value_usd) FILTER (WHERE e.unlock_date <= CURRENT_DATE + 180
+                 AND e.beneficiary_source IN ('event_recipients','label','tokenomics_unlock_hero')
                  AND e.beneficiary_type IS NOT NULL)                                 AS u180_typed,
            count(*) FILTER (WHERE e.unlock_date <= CURRENT_DATE + 180)                AS n180,
            sum(e.unlock_value_usd) FILTER (WHERE e.unlock_date <= CURRENT_DATE + 180
+                 AND e.beneficiary_source IN ('event_recipients','label','tokenomics_unlock_hero')
                  AND e.beneficiary_type IN ('team','investor'))                       AS insider180
     FROM biz.asset_unlock_event e
     WHERE e.asset_id = m.asset_id AND e.unlock_date >= CURRENT_DATE
 ) u ON TRUE
+-- 下一期「有明细」的解锁：当 180d 全窗口覆盖率不足时，这一条往往才是决策相关的
+-- （近端解锁决定短期抛压；远端没有明细不代表近端未知）。只取已有的精确 type，
+-- 不做任何推断。
+LEFT JOIN LATERAL (
+    SELECT e2.unlock_date, e2.beneficiary_type,
+           e2.beneficiary_source,
+           NULLIF(e2.raw_ref->'beneficiary_parse'->>'insider_pct', '')::numeric AS ins_pct
+    FROM biz.asset_unlock_event e2
+    WHERE e2.asset_id = m.asset_id
+      AND e2.unlock_date >= CURRENT_DATE
+      AND e2.beneficiary_source IN ('event_recipients', 'label', 'tokenomics_unlock_hero')
+      AND e2.beneficiary_type IS NOT NULL
+    ORDER BY e2.unlock_date
+    LIMIT 1
+) nx ON TRUE
 """
 
+# 🔴 本 SQL 会被 psycopg 参数化（execute 带 params），因此**任何裸 `%` 都会报
+#    `incomplete placeholder`** —— 注释里也不许出现百分号，必须写成文字或 `%%`。
+#    （2026-10-27 已踩两次：HC-014 第一版与 insider_all 注释。）
 SELECT_SQL = """
 SELECT m.symbol, m.name, m.asset_id, m.market_cap, m.market_cap_rank,
        m.primary_sector, m.elasticity_grade, m.u_n_events, m.reaction_grade,
@@ -87,12 +111,24 @@ SELECT m.symbol, m.name, m.asset_id, m.market_cap, m.market_cap_rank,
        COALESCE(u.n180,0)                                                  AS n180,
        round(COALESCE(u.u180_typed,0) / NULLIF(COALESCE(u.u180,0),0) * 100, 0) AS insider_cov,
        round(COALESCE(u.insider180,0) / NULLIF(COALESCE(u.u180_typed,0),0) * 100, 1) AS insider_pct_180,
+       -- insider 占**全部**解锁额（含未标注部分）的比例：量级参考。
+       -- 与 insider_pct_180（占已标注部分）搭配看：
+       --   覆盖率低 + 占已标注百分之百 ≠ 全部都是内部人，只是「已知的都是」。
+       round(COALESCE(u.insider180,0) / NULLIF(COALESCE(u.u180,0),0) * 100, 1) AS insider_all,
+       -- 存量参考：该资产全生命周期里团队+投资人的占比（asset_allocation_mix）。
+       -- 与 insider_pct_180（未来 180d 解锁流向）含义不同，只作背景，不参与判定。
+       am.insider_pct                                                      AS stock_insider_pct,
+       -- 下一期有明细的解锁（见 L5_LATERAL 的 nx）；用于覆盖率不足时的近端参考
+       nx.unlock_date                                                      AS next_known_date,
+       nx.beneficiary_type                                                 AS next_known_type,
+       nx.ins_pct                                                          AS next_known_insider_pct,
        COALESCE(m.unlock_fut_n,0)                                          AS fut_n,
        r.fees_30d, r.revenue_30d, r.holders_rev_30d,
        round((m.market_cap / NULLIF(r.revenue_30d * 12.1667, 0))::numeric, 1)       AS ps,
        round((m.market_cap / NULLIF(r.holders_rev_30d * 12.1667, 0))::numeric, 1)   AS ps_holders
 FROM biz.mv_asset_screen m
 JOIN core.asset a ON a.asset_id = m.asset_id
+LEFT JOIN biz.asset_allocation_mix am ON am.asset_id = m.asset_id
 LEFT JOIN biz.asset_revenue_snapshot r
        ON r.asset_id = m.asset_id AND r.source_code = 'dl'
 {L5}
@@ -130,19 +166,40 @@ def verdict(row: dict, ctx: dict) -> tuple[list[str], list[str], list[str]]:
         warns.append(f"V2 中高稀释（180d {dil}% / FDV {fdv}x）")
 
     # V3 内部抛压
-    #   ⚠️ 实测：180d 窗口 1199 个事件里只有 6.6% 带 beneficiary_type（金额占 24.5%）；
-    #      362 个有未来解锁的资产中只有 40 只（11%）可算。故「insider 占比」在多数
-    #      标的上是**假零**而非真零 —— 覆盖率不足时必须报「无法判断」，不得默认通过。
+    #   HC-014（2026-10-27）修复后口径：只认事件级精确来源（event_recipients /
+    #   label / tokenomics_unlock_hero），资产级生命周期推断一律不计入（实测 67% 判反）。
+    #   修复前：180d 窗口 1199 事件仅 6.6% 有 type、362 只资产仅 40 只（11%）可算。
+    #   修复后覆盖率见运行时读数；覆盖率不足时必须报 GAP，不得默认通过。
     ins, cov = row["insider_pct_180"], row["insider_cov"]
+    stock = row.get("stock_insider_pct")
     if not row["n180"]:
         pass  # 无未来解锁，本项不适用（已由 V2 的 gap 提示）
     elif cov is None or float(cov) < 50:
-        gaps.append(f"V3 内部抛压无法判断：未来 180d 仅 {cov or 0}% 解锁额标注了受益人类型"
-                    f"（已标注部分 insider 占 {ins if ins is not None else '—'}%）")
+        msg = (f"V3 内部抛压无法判断：未来 180d 仅 {cov or 0}% 解锁额有事件级受益人明细"
+               f"（已标注部分 insider 占 {ins if ins is not None else '—'}%）")
+        # 全窗口覆盖率不足时，把「最近一期已知明细」单列出来 —— 远端无明细
+        # 不代表近端未知，而近端才是短期抛压的来源。
+        if row.get("next_known_date"):
+            nd = row["next_known_date"]
+            nt = row["next_known_type"]
+            ni = row.get("next_known_insider_pct")
+            seg = f"｜下一期 {nd} 已知主导={nt}"
+            if ni is not None:
+                seg += f"、insider {float(ni):.1f}%"
+            msg += seg + "（仅该期，不外推整窗）"
+        if stock is not None:
+            msg += f"｜存量参考：全生命周期 insider 占 {stock}%（非本次流向）"
+        gaps.append(msg)
     elif float(ins or 0) >= 50:
-        fails.append(f"V3 未来 180d 解锁 {ins}% 流向 team/investor → 内部抛压主导")
+        # 文案必须区分「占已标注」与「占全部」：覆盖 50% 时说成「100% 流向内部人」
+        # 是把半句真话当结论。故同时给出覆盖率与占全额的量级。
+        allp = row.get("insider_all")
+        fails.append(
+            f"V3 内部抛压主导：已标注的解锁额中 insider 占 {ins}%"
+            f"（明细覆盖 {cov:.0f}%），折算占全部未来解锁 {allp if allp is not None else '—'}%"
+        )
     elif float(ins or 0) >= 30:
-        warns.append(f"V3 insider 占比 {ins}% 偏高")
+        warns.append(f"V3 insider 占未来解锁 {ins}%（覆盖率 {cov}%）偏高")
 
     # V4 价值捕获
     fee, rev, hold = row["fees_30d"], row["revenue_30d"], row["holders_rev_30d"]
@@ -298,8 +355,17 @@ def main() -> int:
         print(f"## {d['symbol']} — {icon}\n")
         print(f"- 名称：{d['name']}｜市值 {float(d['market_cap'] or 0)/1e6:.0f}M"
               f"（排名 {d['market_cap_rank']}）｜板块 {d['primary_sector'] or '-'}")
-        ins_line = (f"｜insider 占比 {d['insider_pct_180']}%"
-                    f"（可算覆盖率 {d['insider_cov'] or 0}%）") if (d["n180"] or 0) else ""
+        # HC-014：覆盖率不足时不许把「仅 11% 样本里的 insider 占比」当结论摆在首行，
+        #   否则读者只会看到 100.0% 而忽略 11% 的覆盖率 —— 与 HC-012 的假零同源。
+        if not (d["n180"] or 0):
+            ins_line = ""
+        elif d["insider_pct_180"] is None:
+            ins_line = "｜insider 占比 —（无事件级明细）"
+        elif (d["insider_cov"] or 0) < 50:
+            ins_line = f"｜insider 占比 ❔无法判断（明细仅覆盖 {d['insider_cov'] or 0:.0f}%）"
+        else:
+            ins_line = (f"｜insider 占比 {d['insider_pct_180']}%"
+                        f"（覆盖 {d['insider_cov']:.0f}%）")
         fut_line = f"（未来解锁 {d['fut_n']} 个）" if (d["n180"] or 0) else ""
         print(f"- FDV/流通 {d['fdv_mc'] or '—'}x｜180d 稀释 {dil_disp(d)}{fut_line}{ins_line}")
         print(f"- 收入：fee30d={d['fees_30d']}｜rev30d={d['revenue_30d']}"

@@ -75,7 +75,12 @@ L5_LATERAL = """
 LEFT JOIN LATERAL (
     SELECT sum(e.unlock_value_usd) FILTER (WHERE e.unlock_date <= CURRENT_DATE + 180) AS u180,
            count(*) FILTER (WHERE e.unlock_date <= CURRENT_DATE + 180)                AS n180,
+           -- HC-014：只认事件级精确来源（资产级生命周期推断实测三分之二与事件级相反）
            sum(e.unlock_value_usd) FILTER (WHERE e.unlock_date <= CURRENT_DATE + 180
+                 AND e.beneficiary_source IN ('event_recipients','label','tokenomics_unlock_hero')
+                 AND e.beneficiary_type IS NOT NULL)                                 AS u180_typed,
+           sum(e.unlock_value_usd) FILTER (WHERE e.unlock_date <= CURRENT_DATE + 180
+                 AND e.beneficiary_source IN ('event_recipients','label','tokenomics_unlock_hero')
                  AND e.beneficiary_type IN ('team','investor'))                       AS insider180
     FROM biz.asset_unlock_event e
     WHERE e.asset_id = m.asset_id AND e.unlock_date >= CURRENT_DATE
@@ -104,7 +109,8 @@ SELECT m.symbol, m.name, m.asset_id,
        round(CASE WHEN a.ath_usd > 0 AND a.circulating_supply > 0
                   THEN (1 - (m.market_cap / a.circulating_supply) / a.ath_usd) * 100 END, 1) AS dd_ath,
        COALESCE(u.n180,0)                                        AS n180,
-       round(COALESCE(u.insider180,0) / NULLIF(COALESCE(u.u180,0),0) * 100, 1) AS insider_pct_180,
+       round(COALESCE(u.u180_typed,0) / NULLIF(COALESCE(u.u180,0),0) * 100, 0) AS insider_cov,
+       round(COALESCE(u.insider180,0) / NULLIF(COALESCE(u.u180_typed,0),0) * 100, 1) AS insider_pct_180,
        -- L5-B 收入估值（DeFiLlama，fix_117）。NULL = 无该口径，不是 0
        round(r.fees_30d, 0)                                      AS fee30,
        round(r.revenue_30d, 0)                                   AS rev30,
@@ -303,9 +309,18 @@ def main() -> int:
     print("|------|-----:|-------:|---------:|-----------:|------------:|------:|------|")
     VG = {"red": "🔴 高稀释", "amber": "🟡 中", "green": "🟢 低", "unknown": "❔ 无解锁数据"}
     for d in data:
+        # HC-014：insider 占比只在「事件级明细覆盖率 ≥50%」时才展示数字，
+        # 否则显示 ❔（覆盖率）。裸给一个数字会让「未标注」被读成「非 insider」。
+        cov = d.get("insider_cov")
+        if d["insider_pct_180"] is None:
+            ins_disp = "—"
+        elif cov is not None and float(cov) < 50:
+            ins_disp = f"❔ {d['insider_pct_180']}%（覆{cov:.0f}%）"
+        else:
+            ins_disp = f"{d['insider_pct_180']}%"
         print(f"| **{d['symbol']}** | {d['mcap_m']}M | {d['fdv_mc'] or '—'}x | "
               f"{d['dil_180'] if d['dil_180'] is not None else '—'}% | {d['n180']} | "
-              f"{d['insider_pct_180'] if d['insider_pct_180'] is not None else '—'}% | "
+              f"{ins_disp} | "
               f"{('−' + str(d['dd_ath']) + '%') if d['dd_ath'] is not None else '—'} | {VG[d['val_grade']]} |")
 
     print("\n## L5-B 收入估值（DeFiLlama 口径，覆盖仅 18%）\n")
@@ -363,8 +378,13 @@ def main() -> int:
             notes.append("🔴 **L5 否决**：" + "、".join(why))
         elif d["val_grade"] == "unknown":
             notes.append("❔ L5 无法判断（无解锁事件记录），**不得默认低稀释**")
-        if (d["insider_pct_180"] or 0) >= 50:
-            notes.append(f"未来 180 天解锁 **{d['insider_pct_180']}% 流向 team/investor** → 内部抛压主导")
+        # HC-014：insider 判定必须带覆盖率门槛，否则「未标注」会被误读成「非 insider」
+        ins, cov = d["insider_pct_180"], d.get("insider_cov")
+        if ins is not None and (cov is None or float(cov) < 50):
+            notes.append(f"❔ 内部抛压**无法判断**：未来 180d 仅 {cov or 0:.0f}% 解锁额有事件级受益人明细"
+                         f"（已标注部分 insider 占 {ins}%）")
+        elif (ins or 0) >= 50:
+            notes.append(f"未来 180 天解锁 **{ins}% 流向 team/investor** → 内部抛压主导（覆盖 {cov:.0f}%）")
         # L5-B 结论
         if d["capture"] == "no_capture":
             notes.append("🔴 收了手续费但协议不留存收入 → **价值不捕获**（或 DL 未配置口径，须人工复核）")

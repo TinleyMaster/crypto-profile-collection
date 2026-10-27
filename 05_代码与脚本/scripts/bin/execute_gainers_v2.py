@@ -619,13 +619,25 @@ def _reconcile_closed(client, settings, conn) -> int:
                 close_resp = exit_order
                 close_price = float(exit_order.get("_close_avg_price")
                                     or exit_order.get("avgPrice") or 0) or None
-                trades = client.get_user_trades(t["symbol"], order_id=exit_order_id)
-                if not trades:
+                exit_trades = client.get_user_trades(t["symbol"], order_id=exit_order_id)
+                if not exit_trades:
                     continue  # 成交明细尚未就绪，下轮再回填（避免误写 0 盈亏）
-                income_detail = trades
-                pnl = sum(float(x.get("realizedPnl", 0)) for x in trades)
-                # userTrades 的 commission 为正数（实付手续费）→ 取负，与 income 口径一致
-                comm = -sum(float(x.get("commission", 0)) for x in trades)
+                # 🔧 修复：补 entry 侧手续费
+                # 之前只查 exit 的 trades → commission_usdt 漏了开仓 MARKET 单的 taker fee
+                # 导致 "realized_pnl + commission" 净盈亏比交易所高 ~0.02~0.03U/笔
+                all_trades = list(exit_trades)
+                entry_oid = t.get("order_id")
+                if entry_oid:
+                    try:
+                        entry_trades = client.get_user_trades(t["symbol"], order_id=entry_oid)
+                        all_trades = list(entry_trades) + list(exit_trades)
+                    except Exception:  # noqa: BLE001 — entry 单查不到就只算 exit，别阻断
+                        pass
+                income_detail = all_trades
+                # realizedPnl 只取 exit 侧（它已经是从 entry 成本算到 exit 的完整 PnL）
+                pnl = sum(float(x.get("realizedPnl", 0)) for x in exit_trades)
+                # commission = entry + exit 全部（userTrades.commission 为正数→取负）
+                comm = -sum(float(x.get("commission", 0)) for x in all_trades)
             else:
                 exit_reason = "manual_or_unknown"
                 start_ms = int(t["open_ts"].replace(tzinfo=timezone.utc).timestamp() * 1000)
@@ -633,21 +645,23 @@ def _reconcile_closed(client, settings, conn) -> int:
                 income_detail = incomes
                 pnl = sum(float(i.get("income", 0)) for i in incomes
                           if i.get("incomeType") == "REALIZED_PNL")
+                # get_income 的 COMMISSION 已是全部手续费（entry+exit+funding 抵扣）→ 不用补
                 comm = sum(float(i.get("income", 0)) for i in incomes
                            if i.get("incomeType") == "COMMISSION")
 
+            net_pnl = pnl + comm
             with conn.cursor() as cur:
                 cur.execute(
                     "UPDATE biz.v2_trade_log SET close_ts=NOW(), close_price=%s, "
                     "realized_pnl_usdt=%s, commission_usdt=%s, win=%s, exit_reason=%s, "
                     "exit_order_id=%s, close_resp=%s::jsonb, income_detail=%s::jsonb, "
                     "updated_at=NOW() WHERE id=%s",
-                    (close_price, pnl, comm, pnl + comm > 0, exit_reason, exit_order_id,
+                    (close_price, pnl, comm, net_pnl > 0, exit_reason, exit_order_id,
                      json.dumps(close_resp) if close_resp else None,
                      json.dumps(income_detail) if income_detail else None, t["id"]),
                 )
             print(f"  [reconcile] {t['symbol']} 已平仓 exit={exit_reason} "
-                  f"pnl={pnl:+.4f} comm={comm:+.4f} win={pnl+comm>0}")
+                  f"pnl={pnl:+.4f} comm={comm:+.4f} net={net_pnl:+.4f} win={net_pnl>0}")
             n += 1
         except Exception as e:  # noqa: BLE001
             print(f"  [reconcile] {t['symbol']} 对账失败: {type(e).__name__}: {e}")

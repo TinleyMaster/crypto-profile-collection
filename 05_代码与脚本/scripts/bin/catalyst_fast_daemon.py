@@ -82,7 +82,7 @@ def _alert_consecutive_failures(rounds: int, err: Exception) -> None:
             f"含义：每轮 run_fast_once 抛出的异常被吞，A级即时推送与重大事件通报均不会发出，\n"
             f"而进程存活、心跳照常推进（对内存/日志以外无任何信号）。\n"
             f"常见根因：DB 不可达 / 连接池坏连接 / 上游接口异常。\n"
-            f"请检查容器内 /app/catalyst_fast_daemon.log 与 DB 连通性。"
+            f"请检查容器内 /app/logs/catalyst_fast_daemon.log 与 DB 连通性。"
         )
         ok, msg = _send_email(
             f"⚠️ 催化剂快通道连续 {rounds} 轮异常，邮件通道可能已静默",

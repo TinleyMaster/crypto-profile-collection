@@ -172,8 +172,8 @@ Caddyfile 里已经配了 `:80` 块，直接访问 http://43.165.185.221 就能�
 | 验证点 | 命令 | 预期 |
 |--------|------|------|
 | 60+ cron 任务在跑 | `tail -f runtime/logs/scheduler.log` | 每到点有 `[调度] 已提交 xxx` 日志 |
-| scan_daemon K 线刷新 | `tail -f runtime/scan_daemon.log` | 每 5 分钟有 `scan_klines` 日志 |
-| v2_executor 对账 | `tail -f runtime/v2_executor.log` | 每 60 秒轮询 |
+| scan_daemon K 线刷新 | `tail -f runtime/logs/scan_daemon.log` | 每 5 分钟有 `scan_klines` 日志 |
+| v2_executor 对账 | `tail -f runtime/logs/v2_executor.log` | 每 60 秒轮询 |
 | PG 表数据有更新 | `docker exec -it crypto-postgres psql -U postgres -d crypto -c "SELECT max(snapshot_time) FROM biz.asset_quote_snapshot;"` | 时间戳在 0-10 分钟内 |
 | 邮件能发出去 | 手动触发一次 `send_daily_brief.py` | SMTP 日志无报错 |
 | DNS 指向正确 | `dig crypto-profile-collection.zeabur.app`（或你的新域名）| Answer 段有 `43.165.185.221` |

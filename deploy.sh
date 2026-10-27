@@ -116,7 +116,7 @@ info "     docker exec -it crypto-postgres pg_restore -U postgres -d crypto --no
 info ""
 info "  3. 日志查看："
 info "     docker compose logs -f app        # 所有进程"
-info "     tail -f runtime/scan_daemon.log    # scan_daemon"
+info "     tail -f runtime/logs/scan_daemon.log    # scan_daemon"
 info ""
 info "  4. 常用维护命令："
 info "     docker compose down               # 停所有容器"

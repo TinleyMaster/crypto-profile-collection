@@ -23,16 +23,16 @@ services:
       # 代码目录直接挂载（优先，让仓库文件覆盖镜像内 COPY 的版本）
       - ./05_代码与脚本/workbench:/app
       - ./05_代码与脚本/scripts:/app/scripts
-      # 运行时目录持久化（task_state、docs_storage、scan_daemon.log 等）
+      # 运行时目录持久化（task_state、docs_storage、logs 等）
       - ./runtime/task_state:/app/task_state
       - ./runtime/docs_storage:/app/docs_storage
+      # ⚠️ 2026-10-27：daemon 日志改为**目录**挂载 ./runtime/logs:/app/logs。
+      # 原先是逐文件挂载（./runtime/x.log:/app/x.log，共 6 条）。单文件 bind-mount
+      # 上 rename() 返 EBUSY，而 supervisord 轮转正是「rename 成 .1 + 新建」⇒
+      # maxbytes 一到就轮转永久失败，日志冻在阈值边界，supervisord 每次重启都刷
+      # 数百条 OSError[Errno 16] / ValueError: write to closed file，淹没真实告警。
+      # 目录挂载下 rename 正常（容器内实测 RENAME_OK），轮转恢复。
       - ./runtime/logs:/app/logs
-      - ./runtime/scan_daemon.log:/app/scan_daemon.log
-      - ./runtime/scan_daemon.err.log:/app/scan_daemon.err.log
-      - ./runtime/v2_executor.log:/app/v2_executor.log
-      - ./runtime/v2_executor.err.log:/app/v2_executor.err.log
-      - ./runtime/catalyst_fast_daemon.log:/app/catalyst_fast_daemon.log
-      - ./runtime/catalyst_fast_daemon.err.log:/app/catalyst_fast_daemon.err.log
     depends_on:
       - postgres
     networks:

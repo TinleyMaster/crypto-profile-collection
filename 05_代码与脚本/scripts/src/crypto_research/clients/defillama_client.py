@@ -50,6 +50,52 @@ class DefiLlamaClient:
         """Get single protocol detail by slug."""
         return self._get(f"/protocol/{slug}")
 
+    # ── 费用 / 收入（L5 估值层数据源）────────────────────────────────────
+    # 2026-10-27 实测：三个 dataType 全部免费、无 key（协议数随上游浮动 ±5）：
+    #   /overview/fees?dataType=dailyFees            → 3084 个协议，2139 个 30d > 0
+    #   /overview/fees?dataType=dailyRevenue         → 2720 个协议，1711 个 30d > 0
+    #   /overview/fees?dataType=dailyHoldersRevenue  → 1250 个协议，  388 个 30d > 0
+    # ⚠️ 不带 dataType 时 `total*` 字段是 fees 口径，且 revenue* 字段全为 null
+    #    —— 误当收入用会把「手续费规模」当成「协议收入」，差一个量级。
+    FEES_DATA_TYPES = ("fees", "revenue", "holders_revenue")
+    # 显式映射，不用字符串拼接：holders_revenue 拼不出 dailyHoldersRevenue
+    _DL_TYPE_PARAM = {
+        "fees": "dailyFees",
+        "revenue": "dailyRevenue",
+        "holders_revenue": "dailyHoldersRevenue",
+    }
+
+    def get_fees_overview(self, data_type: str = "fees") -> dict[str, Any]:
+        """Get all protocols' fees/revenue aggregates in one call.
+
+        data_type: fees | revenue | holders_revenue
+        Returns {protocols: [{defillamaId, slug, name, category,
+                              total24h, total7d, total30d, total1y, ...}], ...}
+        """
+        if data_type not in self._DL_TYPE_PARAM:
+            raise ValueError(f"unsupported data_type: {data_type}")
+        return self._get(
+            "/overview/fees",
+            params={
+                "dataType": self._DL_TYPE_PARAM[data_type],
+                "excludeTotalDataChart": "true",
+                "excludeTotalDataChartBreakdown": "true",
+            },
+        )
+
+    def get_protocol_fees_history(self, slug: str, data_type: str = "revenue") -> dict[str, Any]:
+        """Get one protocol's full daily series for a given data_type.
+
+        实测 aave: totalDataChart 长度 2153（约 5.9 年日线）。
+        Returns {total24h, total30d, total1y, totalDataChart: [[unix_ts, value], ...], ...}
+        """
+        if data_type not in self._DL_TYPE_PARAM:
+            raise ValueError(f"unsupported data_type: {data_type}")
+        return self._get(
+            f"/summary/fees/{slug}",
+            params={"dataType": self._DL_TYPE_PARAM[data_type]},
+        )
+
     def get_chains(self) -> list[dict[str, Any]]:
         """Get all chains with latest TVL data.
 

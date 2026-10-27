@@ -3026,3 +3026,58 @@ null/negative**（A3 阈值 sweep 样本外反向 / `regime_label` `descriptive_
 - **763 墓碑定案：不建复活重试**。`not_found` 763 行中 753 行 `source_name='tokenomist'`（该源 HC-004 已下线）、761 行 `source_url` 为 NULL。决定性实验（只读）：ETH(1209) 用正确 slug `ethereum`、XLM(1173) 用 `stellar`，页面**均为空** ⇒ 全流通老币本就无 vesting 时间表，`not_found` 是**正确状态而非漏抓**。故重试循环纯消耗，不做。顺带纠正误导文案（旧文案点名已下线的 tokenomist，把排查方向指错）。
 - **污染核查（已排除）**：`asset_unlock_reaction.py:94` 的 `EVENTS_SQL` 按 `e.asset_id = %(asset_id)s` 聚合，**不走 symbol** ⇒ 解锁反应计算无撞名污染；`BENCH_SQL` 用 `asset_klines.symbol`（`ARBUSDT` 式），与 `canonical_symbol` 不同命名空间。故本单价值不在「修正算错的数」，而在「让符号歧义在库里可见」。
 - **遗留**：`not_found` 单态混装两种语义（①站点确无该币 ②slug 猜错没命中），当前无法从数据区分。要安全谈「复活」须先二拆为 `no_vesting` / `slug_miss`，见工单待拍板。
+
+### HC-014：解锁受益人链三处叠加缺陷（2026-10-27，已闭环）
+
+- **症状**：`biz.asset_unlock_event.beneficiary_type` 对 89% 的标的算不出来 —— 180d 窗口 1,199 个事件中仅 79 个（6.6%）有类型，362 只资产中仅 40 只（11%）能算 insider 占比。更坏的形态是**假象**：`source='asset_level_inferred'` 的 3,038 行里 2,974 行 `type` 却是 NULL（「来源说已标注、值却不存在」）。
+- **根因（三处叠加，缺任一都不会失效）**：
+  1. `sync_unlock_events_from_json.py` 的 UPSERT 写成 `beneficiary_type = EXCLUDED.beneficiary_type`，而源端多为 NULL ⇒ **每次同步把 backfill 算好的精准值打回 NULL**；同时 `raw_ref = EXCLUDED.raw_ref`（整体替换）把 backfill 写入的 `tokenomics_recipients` 证据一并销毁 —— 实测 `source='tokenomics_unlock_hero'` 的 296 行中 `tokenomics_recipients` 存在率 **0/296**（标签在、证据全无）。与 HC-012 的 `scraped_at` 同属 **UPSERT 的 SET 语义与字段生命周期不匹配**。
+  2. `build_allocation_mix.classify()` 词表缺 `insider`，而 tokenomics hero 区最常用的超级组名恰是 `Insiders`（官方口径 = Team and Advisors）⇒ `classify('Insiders')` 返回 `other`，把内部抛压判成无关类别。补词后 `label` 来源的 typed 行数 **11 → 76（全量命中）**。
+  3. 调用处传 `str(ev['allocations'])` 给推断函数，而 `allocations` 实际是**类别计数**（源 JSON 实测为数字 `1`/`2`/`4`），不是类别文本 ⇒ `_infer('4')` 恒返回 None。真正的类别数组在 `recipients` 字段（`[{"name":"Insiders","pct":35.8},...]`）。
+- **口径变更（关键，会改变结论方向）**：原做法用**资产级** `dominant_bucket` 写**事件级** `type`（`source='asset_level_inferred'`）。实测 157 个「资产级主桶 + 事件级精确明细」双全样本中**仅 33% 一致、67% 判反**：
+  - ARKM：资产级 `community`，事件级 Insiders 35.8 + Private Investors 27.2 = **63% insider**
+  - ATH：资产级 `other`，事件级 Insiders 43.3 + Private Investors 42.7 = **86% insider**
+  方向性错误会把内部抛压洗成社区解锁（假阴性）。**现废止**：资产级只标 `source='asset_level_only'`、**不写 type**；事件级 type 一律由 `raw_ref` 精确明细按 pct 加权回填（`source='event_recipients'`）。存量 3,031 行已按新口径统一。
+- **改动**：
+  - `migrations/fix_118_unlock_beneficiary_semantics.sql`：4 个 `COMMENT ON COLUMN` 定义 source 取值语义与可信度分级（事件级精确 / 仅资产级 / 无信息），dollar-quoted 幂等；本组表 owner=`navicat`，业务连接可直接 apply，**已执行**，直连 `col_description` 复核 **4/4 非 NULL**。
+  - `build_allocation_mix.py`：词表加 `insider`/`内部`/`团队`；新增 `parse_recipients()` / `mixture_from_recipients()`（按 pct 加权归一化，容忍 `None`/缺 name/JSON 字符串/`'None'` 字面量）作为**单一实现**；3b 改为只标 `asset_level_only`。
+  - `sync_unlock_events_from_json.py`：`_infer_beneficiary_type(ev)` 改读结构化数组；UPSERT 改 `COALESCE(EXCLUDED, 现有值)`（**NULL 不覆盖**）+ `raw_ref` 改 **jsonb 键级合并**（`||`）保住历史证据 + `source` 只在「库里原本无 type」时认领（避免每次同步改写审计线索）。
+  - `bin/backfill_beneficiary_event_level.py`（新增）：只读本地 `raw_ref`，按 pct 重算事件级主导桶并回填，不联网，支持 `--dry-run/--future-only/--symbol/--json`。首跑回填 **194 行 / 159 只资产**，dominant 分布 community 89 / team 43 / investor 36 / foundation 26。
+  - `veto_check.py` / `pick_candidates.py`：insider 统计**只认 source 白名单**（`event_recipients`/`label`/`tokenomics_unlock_hero`/`sync_recipients`），显式排除 `asset_level_only`；分母统一为 `u180_typed`（与 veto 一致，原先 pick 用全金额）；新增 `insider_cov` 覆盖率列，**覆盖率 <50% 时首行显示「❔无法判断」而非数字**（避免「仅 11% 样本里的 100.0%」被当结论），并附「存量参考：全生命周期 insider 占 X%」但明确标注非本次流向。
+- **回归（三段式）**：① `sync --asset-id 4231` 前后对比，ARKM 2026-11-18 的 `team` **保住未被冲空**、`raw_ref.beneficiary_parse` 保住、`source` 未被改写成 `sync_recipients`；② 幂等重跑 backfill 结果一致；③ 四个脚本 `py_compile` 全过，`veto_check ARKM/ATH` 输出正确 GAP 文案。
+- **坑**：`SELECT_SQL` 里有裸 `%` 会被 psycopg 当占位符（`incomplete placeholder`）—— 注释里写百分数必须换成文字或 `%%`。
+- **效果**：事件级精确 type **6.6% → 32.2%**（79→386/1199）、金额覆盖 **24.5% → 32.5%**、**资产级可算 insider 11% → 90.6%（40→328/362）**、全池 **V3 硬否决 0 → 14 只**。四态由 0/126/413/145 变为 0/120/411/153。**硬否决 +8 全是旧盲区被照亮，非新增风险**。14 只 V3 命中含 PENGU(461M)/STRK(340M)/MON(249M)/JTO(222M)/BR(149M) 等，全部为「已标注的解锁额中 insider 占 100%」。
+- **hero 证据已恢复**：重跑 `backfill_unlock_recipients.py` 全量 364 只，**348 成功 / 16 跳过 / 0 失败**（609s），落 mix 898 行、累计事件级受益人行 459；**112 行无 type 无证据的孤儿 `tokenomics_unlock_hero` 标签已降级为 `unspecified`**，使「source=hero 必有 type」成为可验证不变式（现库内 `tokenomics_unlock_hero` 行数为 0，全部转为 `event_recipients`）。
+- **遗留**：① 事件级精确覆盖率天花板受上游限制（源 JSON 仅 148/3627 事件带 `recipients`，其余靠 hero 只覆盖下一期）；② MV 侧 `next_unlock_beneficiary` 仍可能采信旧的资产级推断，未在本次口径内；③ `asset_unlock_reaction.insider_pct` 同为资产级口径，消费时勿与事件级混用。
+
+### HC-015：SOP 日更链路的三个断点（2026-10-27，已闭环）
+
+目标只有一句：**让「每天自动跑、且不静默丢标的」这件事成立**。查下来三处断点，彼此独立但同属「链路以为通了、其实漏」：
+
+#### 断点一：`asset_screen.py` 按排名切池，静默丢 hc 标的（SCREEN-TOPSLICE-001）
+
+- **症状**：`--top` 默认 400，按 `market_cap_rank <= 400` 切池。**实测 `--top 400` → 210 只 / hc 3 只；不切排名 → 333 只 / hc 4 只**，差的正是 **ARKM（#574，hc 全池前二）**。漏斗在最上游漏标的，且**零提示**（用户以为榜上没人）。
+- **根因**：排名是**流量口径**（市值大小），不是**质量口径**（能不能选）。L0 主入口 `pick_candidates.py` 早已改成「绝对市值下限」，但 SKILL 仍把 `asset_screen.py` 当入口文档引用，两处口径分裂。
+- **改动**：`--top` 默认改 **0（不排名切）** + 新增 `--min-mcap`（默认 10M）；显式给 `--top N` 时**回捞被切掉的行、二次跑 hc 条件**，把「丢了几只、是哪几只」打出来（md 输出 `🔴 排名切片丢标的：… ARKM(#574)`，JSON 输出 `cut_by_rank.{n_pool,n_hc_lost,hc_lost}`）。
+- **回归**：`--top 400` 正确报出 `ARKM(#574)`；`--top 0`/`--min-mcap 10`/`--min-mcap 50`/`--json`/控制台五种模式均通过；全池池规模 333、hc 4 与 L0 主入口一致。
+
+#### 断点二：mix 与事件表反向漂移，已抓到的证据没回写（fix_119）
+
+- **症状**：reaction 的 `next_unlock_beneficiary` 说「下次是 community/foundation」，事件表同一行却是 `unspecified` —— 两处对同一事实给出不同答案（最新快照 6 行）。
+- **根因**：`backfill_unlock_recipients` 落 mix 用 `unlock_date = hero_date or event_unlock_date`。**当时事件表还没有那个未来解锁日的事件行**，脚本写 mix 成功、`UPDATE ... WHERE unlock_date=?` 影响 0 行（且无告警）；之后 sync 才把事件补进来，`type` 为空。数据早就在库里（`biz.asset_unlock_recipient_mix`），只是没回写。
+- **实测面**：mix 覆盖 520 个 (asset_id, unlock_date) 组合 —— 已精确 379、`unspecified` 113、`asset_level_only` 26、无对应事件行 2（幽灵）。
+- **改动**：`migrations/fix_119_unlock_mix_event_reconcile.sql` + 在 `backfill_unlock_recipients.py` 收尾加**同一条反向对账 SQL**（每次跑完自动对齐，不只对当次抓到的资产）。取 mix 的主导桶写回同日期事件行，`source='tokenomics_unlock_hero'`，`raw_ref` 合并 `tokenomics_recipients`。**只回填 mix 里确实存在的日期，不做任何日期推断**；条件排除三个精确源 ⇒ 幂等。
+- **回归（三段式）**：① migration 执行后 `tokenomics_unlock_hero` +139 行 / 129 资产、`unspecified` 323→210；② 不变式校验（mix 有行 ⇒ 事件源必为精确源）**0 违约**；③ 同 SQL 二次执行 `rowcount=0`（幂等）。重跑 `asset_unlock_reaction --batch` 后，`next_unlock_source='tokenomics_hero'` 的 **330 行全部对齐精确源**（320 `event_recipients` + 10 `tokenomics_unlock_hero`），此前 6 行错位清零。
+
+#### 断点三：收入快照日更后，消费端 JOIN 会把标的复制成 N 行（L5-REV-MULTIDAY）
+
+- **症状（前瞻，尚未爆）**：`ingest_dl_fees.py` 此前只在手动跑，`biz.asset_revenue_snapshot` 只有 1 天（834 行），故 `pick_candidates` / `veto_check` 里 `JOIN ... ON asset_id AND source_code='dl'` 恰好一行。本轮把它注册进调度（`dl_fees_daily`，每日 22:20）后，**第 2 天起每个有收入的资产会被复制成 N 行** —— 候选清单出现重复标的、P/S 中位数被算歪、四态统计基数失真，且**全程静默**。
+- **注入测试（事务内注入后回滚，零残留）**：造 3 行 `as_of=2026-10-28` 快照后，未锚定的 JOIN 从 226 → **227**（只 1 个注入资产在池内即已 +1），改成 `LEFT JOIN LATERAL (... ORDER BY as_of DESC LIMIT 1)` 后仍为 **226**，不放大也不丢资产。
+- **改动**：`pick_candidates.py` / `veto_check.py` 主查询改 **per-asset LATERAL 取最新一天**（不用全局 `max(as_of)`：源站某天删协议时该资产会直接失去收入数据，per-asset 退化为「用上一天的数」，对估值判断无害）；P/S 中位数截面计算仍用**全局最新 as_of**（横截面必须同一时点）。
+- **回归**：单天数据下 `veto_check --all` 池 688、四态 158/120/410、`ps_median=69.2`、`rs_p20=-31.09` 与改动前**逐项一致，level 变化数 0**。
+
+#### 主线影响与遗留
+
+- **主线**：L0 入口不再因排名切片漏标的（hc 4 只含 ARKM）；解锁受益人两处口径合一，不变式可验证；L5-B 收入层进入日更且消费端防放大。V3 硬否决 14 → **15 只**（新增 PMT，仍是旧盲区被照亮，非新增风险）。
+- **全池四态现状（688 只）**：FAIL 158（V2 稀释 128 + FDV 45 + V3 15）/ WARN 120 / GAP 410 / **PASS 0**。PASS 0 不是本轮引入：V2 需「有未来解锁」、V4 需「有收入」才有资格判 PASS，而收入覆盖仅 18%（结构性天花板 29%）⇒ 绝大多数标的必落 GAP。**这说明「四态」目前仍是筛查器而非选币器，PASS 名单要等收入层覆盖面扩大后才可能非空**。
+- **遗留**：① `SCHEDULER_ENABLED` 环境变量若在容器里设了白名单，新任务 `dl_fees_daily` 需同步加入（本机仓库内无配置文件设置，须容器侧 `printenv` 确认）；② `not_found` 单态混装（站点确无 / slug 猜错）未二拆；③ 事件级精确覆盖率仍受上游 JSON 限制。

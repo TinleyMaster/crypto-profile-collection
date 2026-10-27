@@ -16,6 +16,11 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_SRC = SCRIPT_DIR.parent / "src"
 if str(PROJECT_SRC) not in sys.path:
     sys.path.insert(0, str(PROJECT_SRC))
+# HC-014：复用 build_allocation_mix 的单一词表与 recipients 解析（不另造一套分类规则）
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from build_allocation_mix import mixture_from_recipients, parse_recipients  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -260,17 +265,36 @@ def _load_supply_price_basis(conn, asset_ids: list[int]) -> dict[int, dict]:
         }
 
 
-def _infer_beneficiary_type(recipients: str) -> str | None:
-    """从 recipients 文本推断受益人类别（Team / Investors / Public）。"""
-    if not recipients:
-        return None
-    r = recipients.lower()
-    if any(k in r for k in ("team", "founder", "core contributor", "contributor")):
-        return "team"
-    if any(k in r for k in ("investor", "seed", "private sale", "vc", "strategic", "advisor")):
-        return "investors"
-    if any(k in r for k in ("public", "community", "ecosystem", "treasury", "marketing", "liquidity")):
-        return "public"
+def _infer_beneficiary_type(ev: dict) -> str | None:
+    """从事件的结构化 beneficiaries 推断主导桶（HC-014 重写）。
+
+    🔴 旧实现为何必然失效（2026-10-27 取证）：
+       旧签名 `_infer_beneficiary_type(recipients: str)`，调用处传
+           `str(ev.get("allocations") or ev.get("recipients") or "")`
+       而 tokenomics 源里 `allocations` 实际是**类别计数**（'1' / '2' / '4'），
+       不是类别文本 → `_infer("4")` 恒返回 None。同时 `Insiders` 因词表缺
+       'insider' 会被 classify 判成 other（第二个根因，已在 build_allocation_mix
+       词表修复）。两者叠加 = 即使源端给了 Insiders 42%，库里也是 NULL。
+
+    现口径：优先读带 pct 的结构化数组，按 pct 加权取主导桶；退化到文本时才扫关键词。
+    """
+    for key in ("recipients", "tokenomics_recipients", "beneficiaries"):
+        items = parse_recipients(ev.get(key))
+        if items:
+            mix = mixture_from_recipients(items)
+            if mix:
+                return mix["dominant_bucket"]
+
+    # 退化路径：只有一段人类可读文本时扫关键词（可靠性低，但仍好过直接丢弃）
+    txt = ev.get("allocations_text") or ""
+    if isinstance(txt, str) and txt.strip():
+        r = txt.lower()
+        if any(k in r for k in ("insider", "team", "founder", "contributor", "advisor")):
+            return "team"
+        if any(k in r for k in ("investor", "seed", "private sale", "vc", "strategic")):
+            return "investor"
+        if any(k in r for k in ("community", "ecosystem", "treasury", "marketing", "liquidity")):
+            return "community"
     return None
 
 
@@ -410,13 +434,12 @@ def main() -> int:
                     if not unlock_date:
                         continue
 
-                    # P2-2: type/category 兜底；recipients 推断 beneficiary
+                    # P2-2: type/category 兜底；beneficiary 走结构化 recipients（HC-014）
+                    #   旧实现直接把 ev.beneficiary 的原始文本当 beneficiary_type 存，
+                    #   会写进 "Insiders" / "Private Investors" 这类非 8 桶取值，下游
+                    #   `IN ('team','investor')` 永远匹配不到。现统一归一化到 8 桶。
                     unlock_type = str(ev.get("type") or ev.get("category") or "unspecified")[:50]
-                    recipients_txt = str(ev.get("allocations") or ev.get("recipients") or "")[:500]
-                    beneficiary = (
-                        str(ev.get("beneficiary") or ev.get("holder") or "")[:100]
-                        or _infer_beneficiary_type(recipients_txt)
-                    )
+                    beneficiary = _infer_beneficiary_type(ev)
                     source_code = str(source)[:50]
 
                     # P2-3: unlock_amount 从 amount_str / amount 解析
@@ -556,9 +579,34 @@ def main() -> int:
                                 unlock_ratio_circulating = EXCLUDED.unlock_ratio_circulating,
                                 unlock_ratio_mcap = EXCLUDED.unlock_ratio_mcap,
                                 unlock_value_usd = EXCLUDED.unlock_value_usd,
-                                beneficiary_type = EXCLUDED.beneficiary_type,
+                                -- 🔴 HC-014（2026-10-27）：旧写法 `= EXCLUDED.beneficiary_type`
+                                --    会用 NULL 覆盖 backfill_unlock_recipients / 词表回填
+                                --    已经算出来的精准值，而 beneficiary_source 又不在 SET
+                                --    子句里 → 留下「source 说已标注、type 却是 NULL」的矛盾行
+                                --    （实测 2,974 行）。与 HC-012 的 scraped_at 是同一类病：
+                                --    UPSERT 的 SET 语义与字段生命周期不匹配。
+                                --    现改为「NULL 不覆盖」，并在确有值时同步推进 source，
+                                --    避免 source 与 type 语义脱节。
+                                beneficiary_type = COALESCE(EXCLUDED.beneficiary_type,
+                                                            biz.asset_unlock_event.beneficiary_type),
+                                beneficiary_source = CASE
+                                    -- 只在「库里原本没有 type」时才认领来源，
+                                    -- 否则保留更早的精确来源标签（event_recipients /
+                                    -- label / tokenomics_unlock_hero），避免每次同步
+                                    -- 都把审计线索改写成 sync_recipients。
+                                    WHEN EXCLUDED.beneficiary_type IS NOT NULL
+                                         AND biz.asset_unlock_event.beneficiary_type IS NULL
+                                        THEN 'sync_recipients'
+                                    ELSE biz.asset_unlock_event.beneficiary_source
+                                END,
                                 risk_level = EXCLUDED.risk_level,
-                                raw_ref = EXCLUDED.raw_ref,
+                                -- 🔴 HC-014：原为 `raw_ref = EXCLUDED.raw_ref`（整体替换），
+                                --    会把 backfill_unlock_recipients 写进 raw_ref 的
+                                --    tokenomics_recipients 一并冲掉 —— 每次 sync 都在
+                                --    静默销毁事件级受益人的唯一原始证据。
+                                --    jsonb `||` 为键级合并（右侧覆盖同名键），既保历史
+                                --    也接受新抓值。
+                                raw_ref = biz.asset_unlock_event.raw_ref || EXCLUDED.raw_ref,
                                 updated_at = NOW()
                         """, (
                             asset_id, unlock_date, unlock_type, source_code,

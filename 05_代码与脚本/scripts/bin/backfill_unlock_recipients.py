@@ -396,7 +396,7 @@ def main() -> int:
     print(f"\n[抓取] 成功 {n_ok} / 跳过 {len(skipped)} / 失败 {len(failed)}"
           f"   用时 {elapsed:.0f}s ｜ slug 反查 {n_resolved}")
 
-    written = {"mix_rows": 0, "event_rows": 0, "mix_only": 0}
+    written = {"mix_rows": 0, "event_rows": 0, "mix_only": 0, "reconciled": 0}
     if not args.dry_run and fetched:
         now = datetime.now()
         mix_params, ev_params = [], []
@@ -447,12 +447,49 @@ def main() -> int:
                     """,
                     ev_params,
                 )
+
+                # 反向对账（HC-015 / migration fix_119）：
+                #   上面的 UPDATE 只覆盖「本次抓到且日期与事件行一致」的资产。历史上有过
+                #   「先落 mix、事件行后到」的顺序问题（抓的时候事件表还没有那个未来解锁日，
+                #   UPDATE 影响 0 行），结果 mix 里有事件级构成、事件表却仍写 unspecified。
+                #   这里每次收尾都全量对一次账：凡 mix 里有的 (asset_id, unlock_date)，
+                #   事件行若存在且来源还不是精确源，就用 mix 的主导桶补上。
+                #   幂等：条件排除了 event_recipients / label / tokenomics_unlock_hero。
+                cur.execute(
+                    """
+                    WITH mx AS (
+                        SELECT asset_id, unlock_date,
+                               (array_agg(bucket ORDER BY pct DESC, category))[1] AS dom_bucket,
+                               jsonb_agg(jsonb_build_object('category', category,
+                                                            'bucket',   bucket,
+                                                            'pct',      pct)
+                                         ORDER BY pct DESC, category) AS mix_json
+                        FROM biz.asset_unlock_recipient_mix
+                        GROUP BY asset_id, unlock_date
+                    )
+                    UPDATE biz.asset_unlock_event e
+                       SET beneficiary_type   = mx.dom_bucket,
+                           beneficiary_source = 'tokenomics_unlock_hero',
+                           raw_ref            = COALESCE(e.raw_ref, '{}'::jsonb)
+                                                || jsonb_build_object('tokenomics_recipients', mx.mix_json),
+                           updated_at         = NOW()
+                      FROM mx
+                     WHERE e.asset_id    = mx.asset_id
+                       AND e.unlock_date = mx.unlock_date
+                       AND mx.dom_bucket IS NOT NULL
+                       AND (e.beneficiary_source IS NULL
+                            OR e.beneficiary_source NOT IN
+                               ('event_recipients', 'label', 'tokenomics_unlock_hero'))
+                    """
+                )
+                written["reconciled"] = cur.rowcount
                 cur.execute(
                     "SELECT count(*) FROM biz.asset_unlock_event WHERE beneficiary_source = %s",
                     (SOURCE_CODE,),
                 )
                 written["event_rows"] = int(cur.fetchone()[0])
         print(f"[落库] mix {written['mix_rows']} 行 ｜ 累计事件级受益人行 {written['event_rows']} "
+              f"｜ 反向对账补 {written.get('reconciled', 0)} 行 "
               f"｜ 仅落 mix（日期不匹配）{written['mix_only']}")
 
     if args.json:

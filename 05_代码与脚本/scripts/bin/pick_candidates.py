@@ -119,8 +119,19 @@ SELECT m.symbol, m.name, m.asset_id,
        round((m.market_cap / NULLIF(r.holders_rev_30d * 12.1667, 0))::numeric, 1) AS ps_holders
 FROM biz.mv_asset_screen m
 JOIN core.asset a ON a.asset_id = m.asset_id
-LEFT JOIN biz.asset_revenue_snapshot r
-       ON r.asset_id = m.asset_id AND r.source_code = 'dl'
+-- 🔴 L5-REV-MULTIDAY（2026-10-27）：单资产维度取「该资产最新一天」。
+--   ingest_dl_fees 从 2026-10-27 起每日 22:20 落一行/资产/天；不锚定日期的话，
+--   JOIN 会在第 2 天起把每个资产复制成 N 行（静默放大：候选清单出现重复标的、
+--   P/S 中位数被算歪）。表主键是 (asset_id, as_of, source_code)，多天共存是设计内
+--   行为，故消费端必须自己收敛到一行。
+--   为什么不是「全局 max(as_of)」：源站某天删掉某协议时，该资产当天会缺行，
+--   全局锚定会让它直接失去收入数据（实测注入 3 行第二天快照后只剩 1 行匹配）；
+--   单资产取最新则退化为「用上一天的数」，对估值判断无害。
+LEFT JOIN LATERAL (
+    SELECT * FROM biz.asset_revenue_snapshot x
+    WHERE x.asset_id = m.asset_id AND x.source_code = 'dl'
+    ORDER BY x.as_of DESC LIMIT 1
+) r ON TRUE
 {L5}
 WHERE {where}
 ORDER BY m.screen_score DESC NULLS LAST
@@ -173,6 +184,7 @@ def main() -> int:
             FROM biz.mv_asset_screen s
             JOIN biz.asset_revenue_snapshot r
               ON r.asset_id = s.asset_id AND r.source_code = 'dl'
+             AND r.as_of = (SELECT max(as_of) FROM biz.asset_revenue_snapshot)
             WHERE r.revenue_30d > 0 AND s.market_cap_rank IS NOT NULL
               AND s.market_cap >= 10000000
         """)

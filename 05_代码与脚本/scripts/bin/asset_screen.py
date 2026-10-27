@@ -19,11 +19,21 @@
    + **有未来解锁事件（fut_n≥1，fix_114）**。
    ⚠️ **仅预筛**：报告层仍须叠加「无高危负向标签 + 因子冲突矩阵无强冲突」终判（铁律 #14）。
 
+🔴 切片口径（2026-10-27 修正，SCREEN-TOPSLICE-001）
+   旧实现只按 `market_cap_rank <= --top`（默认 400）切池。排名是**流量口径**，
+   不是**质量口径**：实测 `--top 400` 得 210 只、hc 3 只；不切排名得 333 只、hc 4 只，
+   被静默切掉的正是 ARKM（排名落在 400 外，但 hc 全池前二）。漏斗在上游就漏标的，
+   且**没有任何提示**（用户以为「榜上没人」）。
+   ⇒ 现在默认 `--top 0`（不按排名切）+ `--min-mcap`（市值绝对下限，默认 10M），
+     与 L0 主入口 `pick_candidates.py` 同口径。显式给 `--top N` 时仍可用，
+     但会额外打印「因排名被切掉、但本可进 hc 预筛」的标的清单，把静默变成可见。
+
 用法
 ----
-    python bin/asset_screen.py                 # 控制台（全部）
+    python bin/asset_screen.py                 # 控制台（全池，仅市值≥10M）
     python bin/asset_screen.py --md            # markdown 片段
-    python bin/asset_screen.py --top 300       # 只看市值前 300
+    python bin/asset_screen.py --min-mcap 50   # 市值下限 50M
+    python bin/asset_screen.py --top 300       # ⚠️ 按排名切前 300（会提示被切掉的 hc 标的）
     python bin/asset_screen.py --json
 """
 from __future__ import annotations
@@ -67,13 +77,28 @@ LEFT JOIN LATERAL (SELECT COUNT(*) FILTER (WHERE x.unlock_date >= CURRENT_DATE) 
                           MIN(x.unlock_date) FILTER (WHERE x.unlock_date >= CURRENT_DATE) AS next_dt
                    FROM biz.asset_unlock_event x WHERE x.asset_id=a.asset_id) fu ON TRUE
 LEFT JOIN biz.asset_unlock_next_cmc c ON c.asset_id = a.asset_id
-WHERE a.market_cap_rank IS NOT NULL AND a.market_cap_rank <= %s
+WHERE {where}
 """
 
 E_HI = {"高弹性", "中高弹性"}
 E_LO = {"低弹性", "负弹性"}
 U_UP = {"抗解禁型", "偏抗解禁"}
 U_DN = {"偏解禁即崩", "解禁即崩"}
+
+
+def build_where(top: int, min_mcap_m: float) -> str:
+    """切片条件：默认不按排名切（排名是流量口径，会静默丢小市值高分标的）。
+
+    · top > 0        → 保留旧行为（排名前 N），但调用方必须把被切掉的 hc 标的打出来
+    · min_mcap_m > 0 → 市值绝对下限，与 pick_candidates.py 同口径
+    数值已经过 int()/float() 强转，杜绝注入。
+    """
+    conds = ["a.market_cap_rank IS NOT NULL"]
+    if top and int(top) > 0:
+        conds.append(f"a.market_cap_rank <= {int(top)}")
+    if min_mcap_m and float(min_mcap_m) > 0:
+        conds.append(f"COALESCE(a.market_cap,0) >= {float(min_mcap_m) * 1e6:.0f}")
+    return " AND ".join(conds)
 
 
 def f2(v, s="%", sign=True):
@@ -84,17 +109,32 @@ def f2(v, s="%", sign=True):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="资产多维筛选（弹性×解锁 / 弹性×资金流）")
-    ap.add_argument("--top", type=int, default=400, help="市值前 N（默认 400）")
+    ap.add_argument("--top", type=int, default=0,
+                    help="按市值排名切前 N（默认 0=不切）。⚠️ 会丢小市值高分标的，优先用 --min-mcap")
+    ap.add_argument("--min-mcap", type=float, default=10.0,
+                    help="市值绝对下限（百万美元），默认 10；<=0 表示不限")
     ap.add_argument("--md", action="store_true")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
+    where = build_where(args.top, args.min_mcap)
+    all_cut = []
     with get_connection(get_settings(require_database=True).database_url) as conn:
         cur = conn.cursor()
-        cur.execute(SCREEN_SQL, (args.top,))
+        cur.execute(SCREEN_SQL.format(where=where))
         cols = [c[0] for c in cur.description]
         rows = [{k: (float(v) if isinstance(v, Decimal) else v)
                  for k, v in zip(cols, r)} for r in cur.fetchall()]
+
+        # 显式给 --top 时，把「被排名切掉」的行取回来 —— 后面按 hc 条件二次判定，
+        # 把「静默丢标的」变成可计量的事实（SCREEN-TOPSLICE-001）。
+        if args.top and args.top > 0:
+            loose = build_where(0, args.min_mcap)
+            cur.execute(SCREEN_SQL.format(
+                where=f"{loose} AND a.market_cap_rank > {int(args.top)}"))
+            ccols = [c[0] for c in cur.description]
+            all_cut = [{k: (float(v) if isinstance(v, Decimal) else v)
+                        for k, v in zip(ccols, r)} for r in cur.fetchall()]
 
     # 分桶
     quad = {"ideal": [], "elastic_dump": [], "defensive": [], "avoid": []}
@@ -155,9 +195,16 @@ def main() -> int:
                        if x["e_grade"] in E_HI and not _hc(x)
                        and ((x["e_n"] or 0) < 10 or (x["u_n"] or 0) < 5)],
                       key=lambda x: -(x["e_score"] or 0))
+    # 被 --top 排名切掉的池子里，有多少本来能进 hc 预筛（这才是「静默丢标的」的准确度量）
+    cut_hc = sorted([x for x in all_cut if _hc(x)], key=lambda x: -(x["e_score"] or 0))
 
     if args.json:
-        print(json.dumps({"hc_prefilter": hc_pool, "hc_small_sample": hc_small,
+        print(json.dumps({"pool_size": len(rows), "top": args.top,
+                          "min_mcap_m": args.min_mcap,
+                          "hc_prefilter": hc_pool, "hc_small_sample": hc_small,
+                          "cut_by_rank": {"n_pool": len(all_cut),
+                                          "n_hc_lost": len(cut_hc),
+                                          "hc_lost": cut_hc},
                           "quadrant": {k: quad[k] for k in quad},
                           "double_confirm": double_confirm, "divergence": divergence},
                          ensure_ascii=False, indent=2, default=str))
@@ -166,7 +213,9 @@ def main() -> int:
     L = []
     L.append("# 资产多维筛选：弹性 × 解锁 × 资金流")
     L.append("")
-    L.append(f"> 口径：市值前 {args.top} ｜ 弹性=P1.6 事件弹性 ｜ 解锁=P1.7 解锁反应 ｜ 资金流=P1.8")
+    scope = (f"市值前 {args.top}（按排名切）" if args.top and args.top > 0
+             else f"全池（市值 ≥ {args.min_mcap:g}M）")
+    L.append(f"> 口径：{scope} → {len(rows)} 只 ｜ 弹性=P1.6 事件弹性 ｜ 解锁=P1.7 解锁反应 ｜ 资金流=P1.8")
     L.append("")
 
     def tbl(title, items, note=""):
@@ -203,6 +252,17 @@ def main() -> int:
         L.append(f"> ⚠ 另有 {len(hc_small)} 个高弹性标的因**样本不足**（弹性 n<10 或 解锁 n<5）"
                  f"未入预筛：{', '.join(str(x['sym']) for x in hc_small[:15])}"
                  f"{' …' if len(hc_small) > 15 else ''}")
+        L.append("")
+    if args.top and args.top > 0:
+        if cut_hc:
+            names = ", ".join(f"{x['sym']}(#{x['rk']})" for x in cut_hc[:15])
+            L.append(f"> 🔴 **排名切片丢标的**：市值排名 > {args.top} 的池子共 {len(all_cut)} 只，"
+                     f"其中 **{len(cut_hc)} 只本可进 hc 预筛**，被 `--top` 静默切掉：{names}"
+                     f"{' …' if len(cut_hc) > 15 else ''}")
+        else:
+            L.append(f"> ✅ 排名切片未丢预筛标的：市值排名 > {args.top} 的池子共 {len(all_cut)} 只，"
+                     f"其中无本可进 hc 预筛的标的。")
+        L.append("> 建议改用 `--min-mcap` 按市值绝对下限切池（与 L0 主入口 pick_candidates.py 同口径）。")
         L.append("")
 
     tbl("★ 象限一：理想（高弹性 + 抗解禁）", quad["ideal"],

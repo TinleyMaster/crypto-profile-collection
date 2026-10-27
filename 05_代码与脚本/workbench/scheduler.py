@@ -481,6 +481,14 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
      "解锁表现批量物化（每日 21:55，P1.7 → biz.asset_unlock_reaction）", "core"),
     ("asset_flow_factor_batch", "10 22 * * *", "asset_flow_factor.py", ["--batch"],
      "资金流因子批量物化（每日 22:10，P1.8 → biz.asset_flow_factor）", "core"),
+    # L5-B 收入估值层（SOP v0.2 · fix_117，2026-10-27 补注册）：DeFiLlama 三口径
+    #   fees / revenue / holders_revenue → src_dl.protocol_fees + biz.asset_revenue_snapshot。
+    #   为什么必须日更：L5「贵不贵」的 P/S、P/持有者收入分母全来自它，且源站只给
+    #   「当日快照 + 历史日线」，断更即数据腐化（与 catalyst_outcome 停摆同类事故）。
+    #   实测 3 个 overview 端点共 7,059 行、耗时约 4s（免费、无 key），故放 22:20——
+    #   在三条 --batch 之后、MV 刷新之前，与 L5 其它数据同批就绪，次日选币直接可读。
+    ("dl_fees_daily", "20 22 * * *", "ingest_dl_fees.py", [],
+     "DeFiLlama 费用/收入入库（每日 22:20，L5-B → src_dl.protocol_fees + biz.asset_revenue_snapshot）", "core"),
     # 物化视图刷新必须排在三条 --batch 之后（22:30）；CONCURRENTLY 不阻塞看板读。
     ("asset_screen_mv_refresh", "30 22 * * *", "refresh_asset_screen_mv.py", [],
      "多维筛选物化视图刷新（每日 22:30，P1.9 biz.mv_asset_screen，跟三条 batch 之后）", "core"),

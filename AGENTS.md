@@ -3049,3 +3049,35 @@ null/negative**（A3 阈值 sweep 样本外反向 / `regime_label` `descriptive_
 - **效果**：事件级精确 type **6.6% → 32.2%**（79→386/1199）、金额覆盖 **24.5% → 32.5%**、**资产级可算 insider 11% → 90.6%（40→328/362）**、全池 **V3 硬否决 0 → 14 只**。四态由 0/126/413/145 变为 0/120/411/153。**硬否决 +8 全是旧盲区被照亮，非新增风险**。14 只 V3 命中含 PENGU(461M)/STRK(340M)/MON(249M)/JTO(222M)/BR(149M) 等，全部为「已标注的解锁额中 insider 占 100%」。
 - **hero 证据已恢复**：重跑 `backfill_unlock_recipients.py` 全量 364 只，**348 成功 / 16 跳过 / 0 失败**（609s），落 mix 898 行、累计事件级受益人行 459；**112 行无 type 无证据的孤儿 `tokenomics_unlock_hero` 标签已降级为 `unspecified`**，使「source=hero 必有 type」成为可验证不变式（现库内 `tokenomics_unlock_hero` 行数为 0，全部转为 `event_recipients`）。
 - **遗留**：① 事件级精确覆盖率天花板受上游限制（源 JSON 仅 148/3627 事件带 `recipients`，其余靠 hero 只覆盖下一期）；② MV 侧 `next_unlock_beneficiary` 仍可能采信旧的资产级推断，未在本次口径内；③ `asset_unlock_reaction.insider_pct` 同为资产级口径，消费时勿与事件级混用。
+
+### HC-015：SOP 日更链路的三个断点（2026-10-27，已闭环）
+
+目标只有一句：**让「每天自动跑、且不静默丢标的」这件事成立**。查下来三处断点，彼此独立但同属「链路以为通了、其实漏」：
+
+#### 断点一：`asset_screen.py` 按排名切池，静默丢 hc 标的（SCREEN-TOPSLICE-001）
+
+- **症状**：`--top` 默认 400，按 `market_cap_rank <= 400` 切池。**实测 `--top 400` → 210 只 / hc 3 只；不切排名 → 333 只 / hc 4 只**，差的正是 **ARKM（#574，hc 全池前二）**。漏斗在最上游漏标的，且**零提示**（用户以为榜上没人）。
+- **根因**：排名是**流量口径**（市值大小），不是**质量口径**（能不能选）。L0 主入口 `pick_candidates.py` 早已改成「绝对市值下限」，但 SKILL 仍把 `asset_screen.py` 当入口文档引用，两处口径分裂。
+- **改动**：`--top` 默认改 **0（不排名切）** + 新增 `--min-mcap`（默认 10M）；显式给 `--top N` 时**回捞被切掉的行、二次跑 hc 条件**，把「丢了几只、是哪几只」打出来（md 输出 `🔴 排名切片丢标的：… ARKM(#574)`，JSON 输出 `cut_by_rank.{n_pool,n_hc_lost,hc_lost}`）。
+- **回归**：`--top 400` 正确报出 `ARKM(#574)`；`--top 0`/`--min-mcap 10`/`--min-mcap 50`/`--json`/控制台五种模式均通过；全池池规模 333、hc 4 与 L0 主入口一致。
+
+#### 断点二：mix 与事件表反向漂移，已抓到的证据没回写（fix_119）
+
+- **症状**：reaction 的 `next_unlock_beneficiary` 说「下次是 community/foundation」，事件表同一行却是 `unspecified` —— 两处对同一事实给出不同答案（最新快照 6 行）。
+- **根因**：`backfill_unlock_recipients` 落 mix 用 `unlock_date = hero_date or event_unlock_date`。**当时事件表还没有那个未来解锁日的事件行**，脚本写 mix 成功、`UPDATE ... WHERE unlock_date=?` 影响 0 行（且无告警）；之后 sync 才把事件补进来，`type` 为空。数据早就在库里（`biz.asset_unlock_recipient_mix`），只是没回写。
+- **实测面**：mix 覆盖 520 个 (asset_id, unlock_date) 组合 —— 已精确 379、`unspecified` 113、`asset_level_only` 26、无对应事件行 2（幽灵）。
+- **改动**：`migrations/fix_119_unlock_mix_event_reconcile.sql` + 在 `backfill_unlock_recipients.py` 收尾加**同一条反向对账 SQL**（每次跑完自动对齐，不只对当次抓到的资产）。取 mix 的主导桶写回同日期事件行，`source='tokenomics_unlock_hero'`，`raw_ref` 合并 `tokenomics_recipients`。**只回填 mix 里确实存在的日期，不做任何日期推断**；条件排除三个精确源 ⇒ 幂等。
+- **回归（三段式）**：① migration 执行后 `tokenomics_unlock_hero` +139 行 / 129 资产、`unspecified` 323→210；② 不变式校验（mix 有行 ⇒ 事件源必为精确源）**0 违约**；③ 同 SQL 二次执行 `rowcount=0`（幂等）。重跑 `asset_unlock_reaction --batch` 后，`next_unlock_source='tokenomics_hero'` 的 **330 行全部对齐精确源**（320 `event_recipients` + 10 `tokenomics_unlock_hero`），此前 6 行错位清零。
+
+#### 断点三：收入快照日更后，消费端 JOIN 会把标的复制成 N 行（L5-REV-MULTIDAY）
+
+- **症状（前瞻，尚未爆）**：`ingest_dl_fees.py` 此前只在手动跑，`biz.asset_revenue_snapshot` 只有 1 天（834 行），故 `pick_candidates` / `veto_check` 里 `JOIN ... ON asset_id AND source_code='dl'` 恰好一行。本轮把它注册进调度（`dl_fees_daily`，每日 22:20）后，**第 2 天起每个有收入的资产会被复制成 N 行** —— 候选清单出现重复标的、P/S 中位数被算歪、四态统计基数失真，且**全程静默**。
+- **注入测试（事务内注入后回滚，零残留）**：造 3 行 `as_of=2026-10-28` 快照后，未锚定的 JOIN 从 226 → **227**（只 1 个注入资产在池内即已 +1），改成 `LEFT JOIN LATERAL (... ORDER BY as_of DESC LIMIT 1)` 后仍为 **226**，不放大也不丢资产。
+- **改动**：`pick_candidates.py` / `veto_check.py` 主查询改 **per-asset LATERAL 取最新一天**（不用全局 `max(as_of)`：源站某天删协议时该资产会直接失去收入数据，per-asset 退化为「用上一天的数」，对估值判断无害）；P/S 中位数截面计算仍用**全局最新 as_of**（横截面必须同一时点）。
+- **回归**：单天数据下 `veto_check --all` 池 688、四态 158/120/410、`ps_median=69.2`、`rs_p20=-31.09` 与改动前**逐项一致，level 变化数 0**。
+
+#### 主线影响与遗留
+
+- **主线**：L0 入口不再因排名切片漏标的（hc 4 只含 ARKM）；解锁受益人两处口径合一，不变式可验证；L5-B 收入层进入日更且消费端防放大。V3 硬否决 14 → **15 只**（新增 PMT，仍是旧盲区被照亮，非新增风险）。
+- **全池四态现状（688 只）**：FAIL 158（V2 稀释 128 + FDV 45 + V3 15）/ WARN 120 / GAP 410 / **PASS 0**。PASS 0 不是本轮引入：V2 需「有未来解锁」、V4 需「有收入」才有资格判 PASS，而收入覆盖仅 18%（结构性天花板 29%）⇒ 绝大多数标的必落 GAP。**这说明「四态」目前仍是筛查器而非选币器，PASS 名单要等收入层覆盖面扩大后才可能非空**。
+- **遗留**：① `SCHEDULER_ENABLED` 环境变量若在容器里设了白名单，新任务 `dl_fees_daily` 需同步加入（本机仓库内无配置文件设置，须容器侧 `printenv` 确认）；② `not_found` 单态混装（站点确无 / slug 猜错）未二拆；③ 事件级精确覆盖率仍受上游 JSON 限制。

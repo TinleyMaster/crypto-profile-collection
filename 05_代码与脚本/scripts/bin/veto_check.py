@@ -129,8 +129,15 @@ SELECT m.symbol, m.name, m.asset_id, m.market_cap, m.market_cap_rank,
 FROM biz.mv_asset_screen m
 JOIN core.asset a ON a.asset_id = m.asset_id
 LEFT JOIN biz.asset_allocation_mix am ON am.asset_id = m.asset_id
-LEFT JOIN biz.asset_revenue_snapshot r
-       ON r.asset_id = m.asset_id AND r.source_code = 'dl'
+-- 🔴 L5-REV-MULTIDAY（2026-10-27）：同 pick_candidates，单资产取最新一天。
+--   快照表一资产一天一行，ingest_dl_fees 日更后会多天共存；不收敛就会把每个标的
+--   复制成 N 行，使 688 只的池子变成 1376/2064 行，四态统计与 V5 分位数全部失真
+--   （实测注入 3 行第二天快照后，未锚定的 JOIN 从 227 行涨到 227 行+3 的倍数）。
+LEFT JOIN LATERAL (
+    SELECT * FROM biz.asset_revenue_snapshot x
+    WHERE x.asset_id = m.asset_id AND x.source_code = 'dl'
+    ORDER BY x.as_of DESC LIMIT 1
+) r ON TRUE
 {L5}
 WHERE {where}
 ORDER BY m.market_cap DESC NULLS LAST
@@ -249,6 +256,7 @@ def main() -> int:
             FROM biz.mv_asset_screen s
             JOIN biz.asset_revenue_snapshot r
               ON r.asset_id = s.asset_id AND r.source_code = 'dl'
+             AND r.as_of = (SELECT max(as_of) FROM biz.asset_revenue_snapshot)
             WHERE r.revenue_30d > 0 AND s.market_cap_rank IS NOT NULL AND s.market_cap >= 10000000
         """)
         ps_median = cur.fetchone()[0]

@@ -260,6 +260,7 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
         rec.update(decision="skipped", reason=f"balance_low {bal}")
         return rec
     held = account_positions(client)
+    rec["held"] = held  # 审计快照：当时的实际持仓（skip/ordered 全链路可追溯）
     if sig["symbol"] in held:
         # 同币已有未平持仓（含跨类型升级，如 MID_LONG→SHORT_LONG）→ 禁止叠仓
         rec.update(decision="skipped", reason="already_holding")
@@ -963,6 +964,8 @@ def main() -> int:
                             # （之前只写 exec_state 不写 reason，事后无法复盘跳过/失败原因）
                             _audit_patch = {"exec_reason": rec.get("reason", ""),
                                             "exec_at": datetime.now(timezone.utc).isoformat()}
+                            if rec.get("held") is not None:
+                                _audit_patch["held"] = rec["held"]
                             cur.execute(
                                 "UPDATE biz.scan_gainer_signal SET exec_state=%s, executed_at=%s, "
                                 "params = COALESCE(params, '{}'::jsonb) || %s::jsonb "

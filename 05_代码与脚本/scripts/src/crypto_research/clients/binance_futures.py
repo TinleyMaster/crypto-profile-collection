@@ -505,20 +505,26 @@ class BinanceFuturesClient:
         result["_price"] = order_price or cur
         entry_used = order_price or cur
 
-        # ⚠️ 市价单真实成交价可能显著偏离下单前 ticker（暴涨币滑点大，BTWUSDT 2026-10-14
-        # 实测 ticker 2.4763 → 成交 2.6029，+5.1%）：回查成交均价作为保护单基准价。
-        # 否则跟踪止盈激活价 = 下单前价×1.05 会被滑点吃穿（成交价 > 激活价 → TR 挂上即
-        # 激活 → 动量币回调 3% 即被扫掉，BTWUSDT 开仓 5 分钟平仓复盘）。回查失败则回退
-        # 下单前价兜底（不阻断开仓）。外层 execute_gainers_v2 仍会各自回查留痕成交明细。
+        # ⚠️ 市价单真实成交价/量可能偏离下单前 ticker（暴涨币滑点大，BTWUSDT 2026-10-14
+        # 实测 ticker 2.4763 → 成交 2.6029，+5.1%）：回查成交均价 + 真实成交量，
+        # 作为保护单基准价和 TR 平仓数量（关键！TRAILING_STOP_MARKET 不支持 closePosition，
+        # 必须按 quantity 平仓；用下单前估算 qty 会导致平仓后残留 dust 持仓，
+        # 2026-10-27 实盘复现：4 笔平仓后残留 dust → account_positions 算满仓 →
+        # max_positions 跳过 16 个 LIVE 信号持续 31 小时）。
         entry_for_protect = entry_used
+        qty_for_protect = qty  # 默认下单前估算量，市价单回查后用真实量覆盖
         if order_type == "MARKET" and result.get("orderId"):
             try:
                 fo = self.get_order(symbol, result["orderId"])
                 avg_fill = float(fo.get("avgPrice") or 0)
+                exec_qty = float(fo.get("executedQty") or 0)
                 if avg_fill > 0:
                     entry_for_protect = avg_fill
+                if exec_qty > 0:
+                    qty_for_protect = exec_qty
+                    result["_qty"] = exec_qty  # 同步更新 result 里的成交量
             except Exception as e:  # noqa: BLE001  best-effort 回查，失败不阻断开仓
-                print(f"  [warn] {symbol} 回查成交均价失败，保护单基准价用下单前价: {e}")
+                print(f"  [warn] {symbol} 回查成交明细失败，保护单用下单前估值: {e}")
 
         # 保护性平仓单：固定止损 / 跟踪止盈 / 固定止盈 —— 三者**相互独立、全部挂出**。
         # ⚠️ 2026-10-12 防裸奔：任一保护单失败**不得静默**——失败信息汇总到
@@ -541,7 +547,7 @@ class BinanceFuturesClient:
                         if direction == "long" \
                         else entry_for_protect * (1 - trailing_activation_pct / 100)
                 trl = self.place_trailing_stop(symbol, direction, trailing_stop_pct,
-                                               quantity=qty, activation_price=act)
+                                               quantity=qty_for_protect, activation_price=act)
                 result["_trailing_stop"] = trl
             except BinanceFuturesError as e:
                 result["_trailing_stop"] = {"error": str(e)}

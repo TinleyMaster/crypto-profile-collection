@@ -115,10 +115,29 @@ def account_positions(client) -> list[str]:
     """当前未平持仓的 symbol 列表（按币安账户实际持仓统计）。
 
     一次调用同时服务「总持仓数」与「同币不叠仓」两类校验。
+
+    ⚠️ 2026-10-28 实盘教训：Binance TRAILING_STOP_MARKET 不支持 closePosition，
+    平仓 quantity 挂单时按开仓估算量传入，市价单滑点会导致平仓后残留 dust 持仓
+    （positionAmt 不为 0 但名义价值 < 1 USDT），被误判为"还在持仓"→ max_positions
+    跳过后续信号。这里加了名义价值 >= 5 USDT 的过滤阈值，过滤掉 dust 持仓。
     """
+    DUST_NOTIONAL_USD = 5.0  # 低于此名义价值的持仓视为 dust（平仓残留）
     try:
         pos = client.get_position_risk()
-        return [p.get("symbol") for p in pos if abs(float(p.get("positionAmt", 0))) > 0]
+        held = []
+        for p in pos:
+            amt = abs(float(p.get("positionAmt", 0)))
+            if amt <= 0:
+                continue
+            # 用 entryPrice * positionAmt 估算名义价值
+            entry = float(p.get("entryPrice", 0))
+            notional = amt * entry
+            if notional >= DUST_NOTIONAL_USD:
+                held.append(p.get("symbol"))
+            else:
+                print(f"  [dust-filter] {p.get('symbol')} amt={amt} notional~${notional:.2f} "
+                      f"< ${DUST_NOTIONAL_USD}，视为 dust 持仓")
+        return held
     except Exception:
         return []
 

@@ -92,7 +92,42 @@ for i in {1..30}; do
     sleep 2
 done
 
-# ── 6. 状态检查 ──────────────────────────────────────────────
+# ── 6. 绑定挂载完整性校验（关键！常规健康检查漏过）────────
+echo ""
+info "═══════════════════════════════════════════════════"
+info "  绑定挂载完整性校验"
+info "═══════════════════════════════════════════════════"
+APP_CID=$(docker compose ps -q app)
+if [ -z "$APP_CID" ]; then
+    error "找不到 app 容器，检查 docker compose ps"
+fi
+
+# 检查 /app/logs 挂载（supervisord 日志轮转的根基）
+LOG_MOUNT_COUNT=$(docker exec "$APP_CID" cat /proc/1/mountinfo 2>/dev/null | grep -c " /app/logs " || echo 0)
+if [ "$LOG_MOUNT_COUNT" -gt 0 ]; then
+    info "✓ /app/logs 挂载存在（mountinfo 命中 $LOG_MOUNT_COUNT 条）"
+    # 实测写入（验证不是"僵尸挂载"）
+    if docker exec "$APP_CID" sh -c 'echo probe > /app/logs/.mount_probe && rm /app/logs/.mount_probe' 2>/dev/null; then
+        info "✓ /app/logs 写入测试 OK"
+    else
+        error "/app/logs 挂载存在但写入失败 — supervisord 轮转仍会卡死，请 force-recreate"
+    fi
+else
+    error "✗ /app/logs 挂载丢失！常规健康检查发现不了此问题，必须 force-recreate："
+    error "  docker compose up -d --force-recreate app"
+fi
+
+# 其他关键挂载
+for mp in "/app/scripts" "/app/task_state" "/app/docs_storage"; do
+    CNT=$(docker exec "$APP_CID" cat /proc/1/mountinfo 2>/dev/null | grep -c " $mp " || echo 0)
+    if [ "$CNT" -gt 0 ]; then
+        info "✓ $mp 挂载存在"
+    else
+        warn "⚠  $mp 挂载缺失（可能已在镜像内 COPY 过，临时可用但重启可能失效）"
+    fi
+done
+
+# ── 7. 状态检查 ──────────────────────────────────────────────
 echo ""
 info "═══════════════════════════════════════════════════"
 info "  部署完成！容器状态："

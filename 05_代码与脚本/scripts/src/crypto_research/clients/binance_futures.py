@@ -183,11 +183,29 @@ class BinanceFuturesClient:
         return self._request("GET", "/fapi/v2/account", signed=True)
 
     def get_balance(self, asset: str = "USDT") -> float:
-        """子账户可用余额（USDT）。"""
+        """子账户**可用**余额（USDT）—— 开仓前保证金校验用这个。
+
+        ⚠️ 2026-11-02：原实现返回 walletBalance（钱包余额，含被持仓占用的
+        保证金），实测 wallet 2789 而可用仅 1107，余额校验会高估 2.5 倍 →
+        信号被放行后由交易所拒绝。改用 availableBalance。
+        """
         account = self.get_account()
         for b in account.get("assets", []):
             if b["asset"] == asset:
-                return float(b.get("walletBalance", 0))
+                return float(b.get("availableBalance", 0))
+        return 0.0
+
+    def get_equity(self, asset: str = "USDT") -> float:
+        """子账户**总权益**（USDT）= marginBalance（钱包余额 + 未实现盈亏）。
+
+        用于风控硬顶换算（单笔亏损 ≤ 权益 × N%）。与 get_balance 的区别：
+        equity 是账户净值，不因持仓占用保证金而减少；availableBalance 才是
+        当前能动的钱。两者不可互换。
+        """
+        account = self.get_account()
+        for b in account.get("assets", []):
+            if b["asset"] == asset:
+                return float(b.get("marginBalance", 0))
         return 0.0
 
     def get_position_risk(self, symbol: str | None = None) -> list[dict]:

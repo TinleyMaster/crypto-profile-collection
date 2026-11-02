@@ -374,9 +374,12 @@ def trade_signal(settings, signal: dict[str, Any], live: bool) -> dict[str, Any]
             return rec
 
     # 3. 子账户权益（2% 硬顶换算需要）+ 余额校验（live 强校验）
+    # ⚠️ 2026-11-02：这里要的是**权益**(marginBalance)不是可用余额。
+    #    下方 need_margin 校验用的也是 equity——权益 >= 可用余额，用权益做
+    #    余额校验偏宽松，但真正的兜底是交易所；硬顶换算必须用权益才有意义。
     equity: float | None = None
     try:
-        equity = client.get_balance("USDT")
+        equity = client.get_equity("USDT")
     except BinanceFuturesError as e:
         if live:
             rec["skip_reason"] = f"余额查询失败: {e}"

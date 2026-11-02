@@ -43,7 +43,7 @@ fi
 
 ALL_MOUNTS_OK=true
 for mp in "/app/logs" "/app/scripts" "/app/task_state" "/app/docs_storage"; do
-    CNT=$(docker exec "$APP_CID" cat /proc/1/mountinfo 2>/dev/null | grep -c " $mp " || echo 0)
+    CNT=$(docker exec "$APP_CID" cat /proc/1/mountinfo 2>/dev/null | grep -c " $mp " || true)
     if [ "$CNT" -gt 0 ]; then
         info "✓ $mp 挂载存在"
     else
@@ -60,19 +60,23 @@ else
 fi
 
 if [ "$ALL_MOUNTS_OK" = false ]; then
-    warn "部分挂载缺失，尝试再次 force-recreate ..."
-    docker compose down
+    warn "部分挂载缺失，重建 app 容器 ..."
+    # ⚠️ 不能用 docker compose down：它会连 caddy/postgres 一起停，而
+    #    `up -d app` 不会把 caddy 拉回来 → 公网 80/443 直接挂掉。
+    docker rm -f "$APP_CID" 2>/dev/null || true
     docker compose up -d --force-recreate app
+    APP_CID=$(docker compose ps -q app)
+    sleep 10
 fi
 
 # ── 4. 健康检查 ──────────────────────────────────────────────
 info "[4/4] 健康检查 ..."
 
-# 等 supervisord 拉起
-sleep 5
+# 等 supervisord 拉起（scan_daemon/catalyst/v2_executor 的 startsecs=10，5s 会误报）
+sleep 15
 
 # 检查 8 个进程
-RUNNING=$(docker exec "$APP_CID" supervisorctl status 2>/dev/null | grep -c "RUNNING" || echo 0)
+RUNNING=$(docker exec "$APP_CID" supervisorctl status 2>/dev/null | grep -c "RUNNING" || true)
 if [ "$RUNNING" -ge 7 ]; then
     info "✓ supervisord $RUNNING/8 进程 RUNNING"
 else
@@ -80,15 +84,18 @@ else
 fi
 
 # HTTP 检查
-HTTP_CODE=$(docker exec "$APP_CID" sh -c 'wget -q -O - http://localhost:9999/health 2>/dev/null | head -c 4' || echo "FAIL")
-if [ "$HTTP_CODE" = "ok" ]; then
-    info "✓ 应用 HTTP 200"
+HTTP_CODE=$(docker exec "$APP_CID" curl -s -o /dev/null -w '%{http_code}' -m 8 \
+    http://127.0.0.1:9999/healthz 2>/dev/null || true)
+if [ "$HTTP_CODE" = "200" ]; then
+    info "✓ 应用 HTTP 200 (/healthz)"
 else
-    warn "⚠ 应用 HTTP 响应: $HTTP_CODE"
+    warn "⚠ 应用 HTTP 响应: ${HTTP_CODE:-无响应}"
 fi
 
 # traceback 检查
-TB_COUNT=$(docker compose logs app --tail=1000 2>/dev/null | grep -c "Traceback" || echo 0)
+# 只数应用层栈帧（File "/app"）：supervisord 自身打不开日志通道时会刷自己的
+# traceback，按 "Traceback" 计数会误判为部署失败。
+TB_COUNT=$(docker compose logs app --since 5m 2>/dev/null | grep -c 'File "/app' || true)
 if [ "$TB_COUNT" -eq 0 ]; then
     info "✓ 最近日志无 traceback"
 else

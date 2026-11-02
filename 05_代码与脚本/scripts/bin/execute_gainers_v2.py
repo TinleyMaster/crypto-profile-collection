@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -48,7 +49,9 @@ PARAMS: dict[str, dict] = {
 }
 
 # 风控（100U 实验）
-MAX_POSITIONS = 3          # 最大同时持仓数
+# ⚠️ 2026-11-02：改为可用环境变量覆盖。账户里常驻手工持仓时（本次为 3 个币），
+#    固定 3 会让 max_positions 永久打满、所有新信号 skipped。改配置不需要再动代码。
+MAX_POSITIONS = int(os.getenv("V2_MAX_POSITIONS", "3"))   # 最大同时持仓数
 MAX_LOSS_EQUITY_PCT = 15.0  # 单笔最大亏损占总权益 %（硬顶，回测风险约束）
 
 # 分层杠杆/名义（2026-10-07 决策：纯 A 高胜率高赔率 → 加杠杆重仓；其他信号 1x 不加杠杆）
@@ -124,22 +127,60 @@ def account_positions(client) -> list[str]:
     DUST_NOTIONAL_USD = 5.0  # 低于此名义价值的持仓视为 dust（平仓残留）
     try:
         pos = client.get_position_risk()
-        held = []
+        held: list[str] = []
+        seen: set[str] = set()
         for p in pos:
             amt = abs(float(p.get("positionAmt", 0)))
             if amt <= 0:
                 continue
+            sym = p.get("symbol")
             # 用 entryPrice * positionAmt 估算名义价值
             entry = float(p.get("entryPrice", 0))
             notional = amt * entry
-            if notional >= DUST_NOTIONAL_USD:
-                held.append(p.get("symbol"))
-            else:
-                print(f"  [dust-filter] {p.get('symbol')} amt={amt} notional~${notional:.2f} "
+            if notional < DUST_NOTIONAL_USD:
+                print(f"  [dust-filter] {sym} amt={amt} notional~${notional:.2f} "
                       f"< ${DUST_NOTIONAL_USD}，视为 dust 持仓")
+                continue
+            # ⚠️ 2026-11-02 实盘教训：双向持仓模式(dual)下 /fapi/v2/positionRisk
+            #    每个币返回多空**两条腿**，逐条 append 会把 3 个币数成 6 个持仓
+            #    → len(held) >= MAX_POSITIONS 永久成立 → 所有新信号 skipped。
+            #    实测：['KORUUSDT','KORUUSDT','GOOGLUSDT','GOOGLUSDT','BTCUSDT','BTCUSDT']
+            #    按 symbol 去重，一个币只算一个持仓。
+            if sym not in seen:
+                seen.add(sym)
+                held.append(sym)
         return held
-    except Exception:
-        return []
+    except Exception as exc:
+        # ⚠️ 原实现 except: return [] 是 fail-open：API 抖动时返回空列表会让
+        #    max_positions / already_holding 两道闸门全部放行，异常状态下开新仓。
+        #    改为返回 None，由调用方拒绝下单（fail-closed）。
+        print(f"  [account-positions] 查询失败，本次拒绝下单: {type(exc).__name__}: {exc}")
+        return None
+
+
+def bot_open_positions(settings) -> list[str] | None:
+    """本执行器自己开的、尚未平仓的 symbol 列表（按 DB origin='bot' 统计）。
+
+    与 account_positions() 的分工：
+      - account_positions() 看币安账户**全量**持仓（含手工/其他系统开的），用于「同币不叠仓」
+      - bot_open_positions() 只看机器人自己的持仓，用于「持仓上限」
+
+    ⚠️ 2026-11-02 实盘教训：账户里 3 个手工持仓（KORUU/GOOGLU/BTCU）把
+    MAX_POSITIONS=3 永久占满，10-31~11-01 共 14 条 LIVE 信号全部 skipped。
+    手工持仓不该占用机器人自己的开仓额度。
+    查询失败返回 None，由调用方 fail-closed 拒绝下单。
+    """
+    try:
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT symbol FROM biz.v2_trade_log "
+                    "WHERE close_ts IS NULL AND origin = 'bot'"
+                )
+                return [r[0] for r in cur.fetchall()]
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [bot-positions] 查询失败，本次拒绝下单: {type(exc).__name__}: {exc}")
+        return None
 
 
 # ───────────────────────── 防裸奔：保护单失败 → 回滚 + 告警 ─────────────────────────
@@ -280,11 +321,20 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
         return rec
     held = account_positions(client)
     rec["held"] = held  # 审计快照：当时的实际持仓（skip/ordered 全链路可追溯）
+    if held is None:
+        # 持仓查询失败 → fail-closed：宁可跳过，也不在状态未知时开新仓
+        rec.update(decision="skipped", reason="positions_unknown")
+        return rec
     if sig["symbol"] in held:
         # 同币已有未平持仓（含跨类型升级，如 MID_LONG→SHORT_LONG）→ 禁止叠仓
         rec.update(decision="skipped", reason="already_holding")
         return rec
-    if len(held) >= MAX_POSITIONS:
+    bot_held = bot_open_positions(settings)
+    rec["bot_held"] = bot_held  # 审计快照：机器人自己持有的 symbol
+    if bot_held is None:
+        rec.update(decision="skipped", reason="bot_positions_unknown")
+        return rec
+    if len(bot_held) >= MAX_POSITIONS:
         rec.update(decision="skipped", reason="max_positions")
         return rec
     # 下单

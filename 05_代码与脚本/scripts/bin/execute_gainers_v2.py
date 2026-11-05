@@ -297,7 +297,22 @@ def _alert_protective_failed(settings, sig: dict, p_err: str, rollback_msg: str)
         print(f"  [ALERT] 告警邮件发送异常: {type(e).__name__}: {e}")
 
 
-def momentum_gate(settings, sig: dict) -> tuple[bool, dict]:
+def _momentum_bars(conn, symbol: str, anchor: datetime) -> list:
+    """取锚点前 6h 的 5m K 线（[anchor−6h, anchor)，升序）。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT open_time, open_px, close_px"
+            "  FROM biz.asset_klines"
+            " WHERE symbol = %s AND interval = '5m'"
+            "   AND open_px > 0 AND close_px > 0"
+            "   AND open_time >= %s AND open_time < %s"
+            " ORDER BY open_time",
+            (symbol, anchor - timedelta(hours=6), anchor),
+        )
+        return cur.fetchall()
+
+
+def momentum_gate(settings, sig: dict, conn=None) -> tuple[bool, dict]:
     """5m 动量衰减入场闸门（2026-11-04 新增）。
 
     规则（前半段 88 条定规则、后半段 94 条冻结样本外验证：
@@ -309,6 +324,9 @@ def momentum_gate(settings, sig: dict) -> tuple[bool, dict]:
     fail-open：数据不足（新币 5m 历史 <7 根）或查询异常 → 放行。本闸门是收益优化
     而非风控兜底，异常时保持旧行为（不因特征管道故障而停摆）。
 
+    conn：可选的外部连接（日报复用同一连接批量重算，避免每信号新建连接）；
+    不传则内部自建（执行器下单路径）。
+
     返回 (是否放行, 特征快照)，快照随审计写进 params JSON 便于事后归因。
     """
     anchor = sig.get("scan_ts")
@@ -316,18 +334,11 @@ def momentum_gate(settings, sig: dict) -> tuple[bool, dict]:
     if anchor is None:
         return True, {**info, "gate": "fail_open_no_anchor"}
     try:
-        with get_connection(settings.database_url) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT open_time, open_px, close_px"
-                    "  FROM biz.asset_klines"
-                    " WHERE symbol = %s AND interval = '5m'"
-                    "   AND open_px > 0 AND close_px > 0"
-                    "   AND open_time >= %s AND open_time < %s"
-                    " ORDER BY open_time",
-                    (sig["symbol"], anchor - timedelta(hours=6), anchor),
-                )
-                bars = cur.fetchall()
+        if conn is not None:
+            bars = _momentum_bars(conn, sig["symbol"], anchor)
+        else:
+            with get_connection(settings.database_url) as own:
+                bars = _momentum_bars(own, sig["symbol"], anchor)
     except Exception as e:  # noqa: BLE001 — 闸门故障不应阻断交易主流程
         print(f"  [gate] {sig['symbol']} 5m 查询失败(fail-open): "
               f"{type(e).__name__}: {e}")

@@ -10,7 +10,10 @@
   2. **累积追踪线**：近 7 天 / 近 N 天 / 全部，**「信号结算」与「真实成交」并排**；
   3. **三方对比**：信号结算 × 真实成交 × 回测基准（`data/exit_profile.json`）并排；
   4. **样本量警示**：任一分组 matured n<30 或真实成交 n<30 → 标注「⚠ 样本不足」；
-  5. 顶部一句话结论（信号结算 A 档近 7 天 vs 回测基准 + 同期真实成交）。
+  5. **动量闸门验证**（④）：用执行器同一个 `momentum_gate` 对窗口内信号按信号时刻
+     重算放行/拦截，滚动对比两组收益并自动判断方向是否仍与样本外验证一致（✓/⚠），
+     附实盘 momentum_decayed 拦截数——回答「闸门放的对不对」；
+  6. 顶部一句话结论（信号结算 A 档近 7 天 vs 回测基准 + 同期真实成交）。
 
 口径（重要）
 ------------
@@ -73,6 +76,13 @@ try:
 except Exception:                     # noqa: BLE001 — 任何 import 异常都回退，保证日报可用
     LIVE_SIGNALS = _LIVE_SIGNALS_FALLBACK
 
+# 动量闸门：与执行器共用同一实现（单一事实来源，避免日报/实盘两处规则漂移）。
+# 导入失败（路径/环境异常）→ 闸门验证节降级为提示，不影响日报其余部分。
+try:
+    from execute_gainers_v2 import momentum_gate as _momentum_gate
+except Exception:                     # noqa: BLE001
+    _momentum_gate = None
+
 # 实盘 = A + B（B 为 MID_LONG 右上角子集）；C（TRAP_SHORT）不实盘。
 # 告警邮件仅推 A（scan_gainers_v2.py 259-262），B 虽实盘但不发告警。
 ALERT_SIGNALS = ("SHORT_LONG",)
@@ -89,6 +99,14 @@ SELECT t.signal_type, t.scan_ts, t.close_ts, t.realized_pnl_usdt, t.notional_usd
   FROM biz.v2_trade_log t
  WHERE t.origin = 'bot'
  ORDER BY t.scan_ts
+"""
+
+# 实盘闸门实际拦截数：执行器写进 params JSON 的 exec_reason（闸门部署后才有非零值）
+GATE_SKIP_SQL = """
+SELECT s.scan_ts
+  FROM biz.scan_gainer_signal s
+ WHERE s.signal_type = ANY(%s::text[])
+   AND s.params->>'exec_reason' = 'momentum_decayed'
 """
 
 
@@ -200,6 +218,35 @@ def load_trades(conn) -> list[dict]:
                     if pnl is not None and notional else None)
         out.append(r)
     return out
+
+
+def load_gates(conn, settings, rows: list[dict]) -> list[dict]:
+    """对每条已结算信号用**执行器同一 momentum_gate** 重算放行/拦截（复用连接）。
+
+    rows：已过滤到实盘白名单、matured 且有 ret_net 的结算行。
+    返回追加了 pass / gate_info 的行（fail_open 也计为放行，info 里带 gate 原因）。
+    """
+    if _momentum_gate is None:
+        return []
+    out = []
+    for r in rows:
+        sig = {"symbol": r["symbol"], "scan_ts": r["scan_ts"]}
+        try:
+            ok, info = _momentum_gate(settings, sig, conn=conn)
+        except Exception as e:  # noqa: BLE001 — 日报其余部分不应被闸门故障拖垮
+            ok, info = True, {"gate": f"error_{type(e).__name__}"}
+        out.append({**r, "pass": ok, "gate_info": info})
+    return out
+
+
+def load_gate_skips(conn, live_types: tuple[str, ...]) -> list[dict]:
+    """实盘真正被 momentum_decayed 拦截的信号（params.exec_reason），带 day 供窗口过滤。"""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(GATE_SKIP_SQL, [list(live_types)])
+        rows = cur.fetchall()
+    for r in rows:
+        r["day"] = r["scan_ts"].astimezone(SH).date()
+    return rows
 
 
 def window_rows(rows: list[dict], anchor: date, days: int | None) -> list[dict]:
@@ -318,6 +365,83 @@ def _bench_table(rows: list[dict], trades: list[dict], anchor: date, days: int,
     return html, warn_html
 
 
+def _gate_table(gate_rows: list[dict], skips: list[dict], anchor: date, days: int) -> str:
+    """④ 动量闸门验证：按信号时刻重算放行/拦截，滚动对比两组结算收益。
+
+    gate_rows：已跑过 momentum_gate 的结算行（含 pass/ret_net）。
+    skips：实盘 momentum_decayed 拦截行（params.exec_reason）。
+    底部自动判断：全部窗口放行胜率 − 拦截胜率 > 0 → ✓ 方向与样本外验证一致。
+    """
+    if _momentum_gate is None:
+        return ('<p style="margin:14px 0 4px"><b>④ 动量闸门验证</b>'
+                '<span style="color:#b91c1c">— 闸门模块导入失败，本节不可用</span></p>')
+    if not gate_rows:
+        return ('<p style="margin:14px 0 4px"><b>④ 动量闸门验证</b>'
+                '<span style="color:#777">— 窗口内无已结算信号，暂无数据</span></p>')
+
+    def grp(sub: list[dict]) -> dict:
+        xs = [float(g["ret_net"]) for g in sub]
+        if not xs:
+            return {"n": 0, "wr": None, "mean": None, "median": None}
+        return {"n": len(xs),
+                "wr": sum(1 for x in xs if x > 0) / len(xs),
+                "mean": statistics.mean(xs), "median": statistics.median(xs)}
+
+    def cell(g: dict) -> str:
+        mark = " ⚠" if 0 < g["n"] < 15 else ""     # 小样本标记
+        return (f"<td>{g['n']}{mark}</td><td>{_pct(g['wr'])}</td>"
+                f"<td>{_sgn(g['mean'])}</td><td>{_sgn(g['median'])}</td>")
+
+    wins = [("近 7 天", 7), (f"近 {days} 天", days), ("全部", None)]
+    trs = []
+    all_pass = all_blk = None
+    for label, w in wins:
+        sub = window_rows(gate_rows, anchor, w)
+        gp, gb = grp([g for g in sub if g["pass"]]), grp([g for g in sub if not g["pass"]])
+        n_skip = len(window_rows(skips, anchor, w))
+        if w is None:
+            all_pass, all_blk = gp, gb
+        trs.append(f"<tr><td>{label}</td>{cell(gp)}{cell(gb)}<td>{n_skip}</td></tr>")
+
+    fo = sum(1 for g in gate_rows if str(g["gate_info"].get("gate", "")).startswith("fail_open"))
+    warns = ""
+    verdict = ""
+    if all_pass and all_blk and all_pass["n"] and all_blk["n"]:
+        diff = (all_pass["wr"] - all_blk["wr"]) * 100
+        if diff > 0:
+            verdict = (f'<div style="margin:8px 0 0;padding:8px 10px;background:#ecfdf5;'
+                       f'border-left:4px solid #059669;font-size:12px;color:#065f46">'
+                       f'✓ 全部窗口：放行组胜率 {_pct(all_pass["wr"])} − 拦截组 {_pct(all_blk["wr"])}'
+                       f' = <b>{diff:+.1f}pct</b>，方向与样本外验证一致（拦掉的确实更差）。</div>')
+        else:
+            verdict = (f'<div style="margin:8px 0 0;padding:8px 10px;background:#fff7ed;'
+                       f'border-left:4px solid #e67e22;font-size:12px;color:#7c2d12">'
+                       f'⚠ 全部窗口：放行组胜率 {_pct(all_pass["wr"])} ≤ 拦截组 {_pct(all_blk["wr"])}'
+                       f'（{diff:+.1f}pct）——<b>闸门方向反转</b>，需关注是否市场状态变化，'
+                       f'样本不足时勿据此单独下结论。</div>')
+        if all_blk["n"] < 30:
+            warns += (f'<div style="margin:6px 0 0;color:#b45309;font-size:12px">'
+                      f'⚠ 拦截组全部窗口 n={all_blk["n"]}（&lt;30），判断易受个别样本扰动。</div>')
+    return f"""
+    <p style="margin:14px 0 4px"><b>④ 动量闸门验证 · 放行 vs 拦截</b>
+      <span style="color:#777;font-weight:normal">— 与执行器同一 momentum_gate 按信号时刻重算
+      （规则：最近30min收益≥0 OR 上根5m涨幅&gt;2%），结算收益口径同①</span></p>
+    <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;font-size:12px">
+      <tr style="background:#f5f5f5"><th rowspan="2">窗口</th>
+          <th colspan="4" style="background:#ecfdf5">放行（闸门会买入）</th>
+          <th colspan="4" style="background:#fef2f2">拦截（闸门会跳过）</th>
+          <th rowspan="2" style="background:#f5f5f5">实盘拦截数</th></tr>
+      <tr style="background:#f5f5f5"><th>n</th><th>胜率</th><th>均收益</th><th>中位</th>
+          <th>n</th><th>胜率</th><th>均收益</th><th>中位</th></tr>
+      {''.join(trs)}
+    </table>
+    <p style="margin:6px 0 0;color:#777;font-size:12px">
+      「实盘拦截数」= 执行器真实写入 exec_reason=momentum_decayed 的信号数（闸门部署前恒为 0）；
+      fail-open 放行（K线不足/查询失败）{fo} 条计入放行组。⚠ = n&lt;15 小样本。
+      本表每日重算，用于滚动验证闸门是否仍然有效。</p>
+    {verdict}{warns}"""
+
+
 def _conclusion(rows: list[dict], trades: list[dict], anchor: date, profiles: dict) -> str:
     """顶部一句话结论：信号结算 A 档（SHORT_LONG）近 7 天 vs 回测基准 + 同期真实成交。
 
@@ -357,7 +481,7 @@ def _research_table(rows: list[dict], anchor: date, days: int) -> str:
                    f"<td>{st['matured']}</td><td>{st['censored']}</td><td>{_pct(st['win_rate'])}</td>"
                    f"<td>{_num(st['pf'])}</td><td>{_sgn(st['mean'])}</td></tr>")
     return f"""
-    <p style="margin:14px 0 4px"><b>④ 研究观察（非实盘）</b>
+    <p style="margin:14px 0 4px"><b>⑤ 研究观察（非实盘）</b>
       <span style="color:#b91c1c">⚠ 不交易、不计入累积追踪线</span>（近 {days} 天）</p>
     <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;font-size:12px">
       <tr style="background:#f5f5f5"><th>信号</th><th>n</th><th>已结算</th><th>剔除(OPEN)</th>
@@ -368,14 +492,20 @@ def _research_table(rows: list[dict], anchor: date, days: int) -> str:
 
 def render_html(rows: list[dict], trades: list[dict], anchor: date, days: int, profiles: dict,
                 live_types: tuple[str, ...] = LIVE_SIGNALS,
-                include_research: bool = False) -> tuple[str, str]:
-    """渲染日报 HTML。rows=全部结算行、trades=全部真实成交行；内部按 live_types 拆分实盘/研究。"""
+                include_research: bool = False,
+                gate_rows: list[dict] | None = None,
+                gate_skips: list[dict] | None = None) -> tuple[str, str]:
+    """渲染日报 HTML。rows=全部结算行、trades=全部真实成交行；内部按 live_types 拆分实盘/研究。
+
+    gate_rows/gate_skips：动量闸门重算结果与实盘拦截记录（None → ④节显示不可用）。
+    """
     live_rows = [r for r in rows if r["signal_type"] in live_types]
     research_rows = [r for r in rows if r["signal_type"] not in live_types]
     live_trades = [t for t in trades if t["signal_type"] in live_types]
     conclusion = _conclusion(live_rows, live_trades, anchor, profiles)
     bench, warns = _bench_table(live_rows, live_trades, anchor, days, profiles)
     research = _research_table(research_rows, anchor, days) if include_research else ""
+    gate = _gate_table(gate_rows or [], gate_skips or [], anchor, days)
     now = datetime.now(SH).strftime("%Y-%m-%d %H:%M")
     html = f"""<html><body style="font-family:Arial,'Microsoft YaHei',sans-serif;color:#222">
       <h2 style="margin:0 0 4px">涨幅榜实盘策略日报 · {anchor}</h2>
@@ -386,6 +516,7 @@ def render_html(rows: list[dict], trades: list[dict], anchor: date, days: int, p
       {_daily_table(live_rows)}
       {_track_table(live_rows, live_trades, anchor, days)}
       {bench}
+      {gate}
       {research}
       {warns}
       <p style="margin:14px 0 0;color:#999;font-size:12px">
@@ -440,17 +571,27 @@ def main() -> int:
     with get_connection(settings.database_url) as conn:
         rows = load(conn)
         trades = load_trades(conn)
+        gate_skips = load_gate_skips(conn, live_types)
+        # 闸门重算仅需实盘白名单、已结算（有 ret_net）的行
+        gate_rows = load_gates(
+            conn, settings,
+            [r for r in rows if r["signal_type"] in live_types
+             and r["matured"] and r["ret_net"] is not None])
     live_n = sum(1 for r in rows if r["signal_type"] in live_types)
     profiles = load_exit_profile()
     html, conclusion = render_html(rows, trades, anchor, args.days, profiles,
-                                   live_types, args.include_research)
+                                   live_types, args.include_research,
+                                   gate_rows, gate_skips)
     subject = build_subject(_subject_line(
         [r for r in rows if r["signal_type"] in live_types],
         [t for t in trades if t["signal_type"] in live_types], anchor, profiles))
     closed_n = sum(1 for t in trades if t["signal_type"] in live_types
                    and t.get("close_ts") is not None)
+    gp_n = sum(1 for g in gate_rows if g["pass"])
     print(f"[gainer-report] {anchor} · 结算 {len(rows)} 条（实盘 {live_n} / 白名单 {list(live_types)}）"
-          f" · 真实成交 {closed_n} 笔已平仓 · {conclusion}")
+          f" · 真实成交 {closed_n} 笔已平仓"
+          f" · 闸门重算 放行 {gp_n} / 拦截 {len(gate_rows) - gp_n}"
+          f"（实盘 momentum_decayed 拦截 {len(gate_skips)}）· {conclusion}")
 
     if args.dry_run:
         print(subject)

@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -49,9 +48,10 @@ PARAMS: dict[str, dict] = {
 }
 
 # 风控（100U 实验）
-# ⚠️ 2026-11-02：改为可用环境变量覆盖。账户里常驻手工持仓时（本次为 3 个币），
-#    固定 3 会让 max_positions 永久打满、所有新信号 skipped。改配置不需要再动代码。
-MAX_POSITIONS = int(os.getenv("V2_MAX_POSITIONS", "3"))   # 最大同时持仓数
+# ⚠️ 2026-11-03：MAX_POSITIONS 持仓上限取消（用户决策：策略信号本来就少，有多少信号开多少仓）。
+#    实际约束改由「余额闸门」(bal < margin*1.2 即 skip) 自然限制：余额不足自然不开新仓。
+#    保留的闸门：balance_low / 同币不叠仓(already_holding) / 持仓状态未知 fail-closed /
+#    5m 动量衰减(momentum_decayed，2026-11-04 新增，见 momentum_gate)。
 MAX_LOSS_EQUITY_PCT = 15.0  # 单笔最大亏损占总权益 %（硬顶，回测风险约束）
 
 # 分层杠杆/名义（2026-10-07 决策：纯 A 高胜率高赔率 → 加杠杆重仓；其他信号 1x 不加杠杆）
@@ -163,7 +163,8 @@ def bot_open_positions(settings) -> list[str] | None:
 
     与 account_positions() 的分工：
       - account_positions() 看币安账户**全量**持仓（含手工/其他系统开的），用于「同币不叠仓」
-      - bot_open_positions() 只看机器人自己的持仓，用于「持仓上限」
+      - bot_open_positions() 只看机器人自己的持仓（2026-11-03 起仅作审计快照，
+        MAX_POSITIONS 持仓上限已取消，不再用于闸门判断）
 
     ⚠️ 2026-11-02 实盘教训：账户里 3 个手工持仓（KORUU/GOOGLU/BTCU）把
     MAX_POSITIONS=3 永久占满，10-31~11-01 共 14 条 LIVE 信号全部 skipped。
@@ -296,6 +297,55 @@ def _alert_protective_failed(settings, sig: dict, p_err: str, rollback_msg: str)
         print(f"  [ALERT] 告警邮件发送异常: {type(e).__name__}: {e}")
 
 
+def momentum_gate(settings, sig: dict) -> tuple[bool, dict]:
+    """5m 动量衰减入场闸门（2026-11-04 新增）。
+
+    规则（前半段 88 条定规则、后半段 94 条冻结样本外验证：
+    放行 81.2% / +11.1% vs 拦截 43.3% / 中位 −1.1%，Fisher p=0.0003）：
+        放行 = (最近 30min 收益 ≥ 0) OR (上一根 5m 涨幅 > 2%)
+    特征锚定**信号时刻 scan_ts**，取 [scan_ts−6h, scan_ts) 的 5m K 线——与验证口径
+    完全一致（执行延迟 ≤ MAX_SIGNAL_AGE_H=2h，不改锚点以免引入未验证的分布偏移）。
+
+    fail-open：数据不足（新币 5m 历史 <7 根）或查询异常 → 放行。本闸门是收益优化
+    而非风控兜底，异常时保持旧行为（不因特征管道故障而停摆）。
+
+    返回 (是否放行, 特征快照)，快照随审计写进 params JSON 便于事后归因。
+    """
+    anchor = sig.get("scan_ts")
+    info: dict = {"anchor": anchor.isoformat() if anchor else None}
+    if anchor is None:
+        return True, {**info, "gate": "fail_open_no_anchor"}
+    try:
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT open_time, open_px, close_px"
+                    "  FROM biz.asset_klines"
+                    " WHERE symbol = %s AND interval = '5m'"
+                    "   AND open_px > 0 AND close_px > 0"
+                    "   AND open_time >= %s AND open_time < %s"
+                    " ORDER BY open_time",
+                    (sig["symbol"], anchor - timedelta(hours=6), anchor),
+                )
+                bars = cur.fetchall()
+    except Exception as e:  # noqa: BLE001 — 闸门故障不应阻断交易主流程
+        print(f"  [gate] {sig['symbol']} 5m 查询失败(fail-open): "
+              f"{type(e).__name__}: {e}")
+        return True, {**info, "gate": "fail_open_error",
+                      "error": f"{type(e).__name__}: {e}"}
+    if len(bars) < 7:
+        # 7 根 = 30min：不足则 R30 无法计算（上市极新的币），放行并留痕
+        return True, {**info, "gate": "fail_open_insufficient_bars",
+                      "bars": len(bars)}
+    c_last = float(bars[-1][2])
+    r30 = c_last / float(bars[-7][2]) - 1          # 最近 30min 收益（−7 根 = −30min）
+    spke = c_last / float(bars[-1][1]) - 1          # 上一根 5m 涨幅（close/open − 1）
+    passed = (r30 >= 0) or (spke > 0.02)
+    info.update(gate="pass" if passed else "block",
+                r30=round(r30, 5), spke=round(spke, 5), bars=len(bars))
+    return passed, info
+
+
 def place_order(client, settings, sig: dict, live: bool) -> dict:
     """单信号风控 + 下单。返回决策记录。"""
     p = PARAMS.get(sig["signal_type"])
@@ -329,13 +379,17 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
         # 同币已有未平持仓（含跨类型升级，如 MID_LONG→SHORT_LONG）→ 禁止叠仓
         rec.update(decision="skipped", reason="already_holding")
         return rec
-    bot_held = bot_open_positions(settings)
-    rec["bot_held"] = bot_held  # 审计快照：机器人自己持有的 symbol
-    if bot_held is None:
-        rec.update(decision="skipped", reason="bot_positions_unknown")
-        return rec
-    if len(bot_held) >= MAX_POSITIONS:
-        rec.update(decision="skipped", reason="max_positions")
+    # 持仓数量无上限（2026-11-03 取消 MAX_POSITIONS：策略信号少，有多少开多少；
+    # 余额闸门 bal < margin*1.2 已在上面兜底）。bot_held 仅留作审计快照。
+    rec["bot_held"] = bot_open_positions(settings)
+    # 5m 动量衰减闸门（2026-11-04）：信号时刻前 30min 已回落且上根无 >2% 冲刺
+    # → 期望归零（样本外拦截组 43.3% 胜率、中位 −1.1%），跳过入场。
+    mom_ok, mom_info = momentum_gate(settings, sig)
+    rec["momentum"] = mom_info  # 审计快照：r30/spke/gate 随 params JSON 落库
+    if not mom_ok:
+        rec.update(decision="skipped", reason="momentum_decayed")
+        print(f"  [gate] {sig['symbol']} 动量衰减拦截: "
+              f"r30={mom_info.get('r30')} spke={mom_info.get('spke')}")
         return rec
     # 下单
     client.set_leverage(sig["symbol"], lev)
@@ -1035,6 +1089,9 @@ def main() -> int:
                                             "exec_at": datetime.now(timezone.utc).isoformat()}
                             if rec.get("held") is not None:
                                 _audit_patch["held"] = rec["held"]
+                            if rec.get("momentum") is not None:
+                                # 动量闸门快照（r30/spke/gate）：事后归因「为何拦/为何放」
+                                _audit_patch["momentum"] = rec["momentum"]
                             cur.execute(
                                 "UPDATE biz.scan_gainer_signal SET exec_state=%s, executed_at=%s, "
                                 "params = COALESCE(params, '{}'::jsonb) || %s::jsonb "

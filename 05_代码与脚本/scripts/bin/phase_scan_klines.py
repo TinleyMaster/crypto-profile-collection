@@ -83,16 +83,34 @@ def get_earliest(conn, interval: str) -> dict[str, datetime]:
         return dict(cur.fetchall())
 
 
-def get_usdt_perpetuals() -> list[str]:
-    """返回 Binance 全部 TRADING 状态的 USDT 永续合约符号。"""
+def get_usdt_perpetuals(include_tradfi: bool = False,
+                        tradfi_underlying_types: set[str] | None = None) -> list[str]:
+    """返回 Binance TRADING 状态的 USDT 永续合约符号列表。
+
+    Args:
+        include_tradfi: True 时同时收 TRADIFI_PERPETUAL（美股/ETF/贵金属/港股等）；
+                        False 时只收加密币 PERPETUAL（默认，保持历史行为）。
+        tradfi_underlying_types: 当 include_tradfi=True 时可额外按 underlyingType 白名单过滤
+                                 （如 {"EQUITY","COMMODITY"} 只拉美股+贵金属，排除港股/韩股）；
+                                 None=全部 TradFi 都要。
+
+    注意：contractType 是币安原生区分字段（加密=PERPETUAL，TradFi=TRADIFI_PERPETUAL），
+    不要靠 symbol 名做启发式——后续 TradFi 市场规模已达 235+，涵盖美股/港股/韩股/A股/
+    贵金属/外汇/加密影子标的（COIN/MSTR）。
+    """
     data = fapi_get(f"{FAPI_BASE}/fapi/v1/exchangeInfo")
-    syms = [
-        s["symbol"]
-        for s in data.get("symbols", [])
-        if s.get("quoteAsset") == "USDT"
-        and s.get("contractType") == "PERPETUAL"
-        and s.get("status") == "TRADING"
-    ]
+    syms = []
+    for s in data.get("symbols", []):
+        if s.get("quoteAsset") != "USDT" or s.get("status") != "TRADING":
+            continue
+        ct = s.get("contractType")
+        if ct == "PERPETUAL":
+            syms.append(s["symbol"])
+        elif ct == "TRADIFI_PERPETUAL" and include_tradfi:
+            if tradfi_underlying_types is None:
+                syms.append(s["symbol"])
+            elif s.get("underlyingType") in tradfi_underlying_types:
+                syms.append(s["symbol"])
     return sorted(syms)
 
 
@@ -154,11 +172,19 @@ def fetch_backfill(symbol: str, interval: str, start_ms: int, end_ms: int) -> li
 
 def build_symbols(args, conn) -> list[str]:
     """确定本次扫描的合约列表：Binance USDT 永续 ∩ 可选过滤。"""
-    syms = get_usdt_perpetuals()
+    tradfi_types = None
+    if getattr(args, "tradfi_types", None):
+        tradfi_types = {t.strip() for t in args.tradfi_types.split(",") if t.strip()}
+    syms = get_usdt_perpetuals(include_tradfi=args.tradfi,
+                               tradfi_underlying_types=tradfi_types)
+    print(f"[symbols] 全量 USDT 永续 {len(syms)} 个（含 TradFi={args.tradfi}"
+          + (f"，underlyingType whitelist={tradfi_types}" if tradfi_types else "") + "）")
     if args.top:
         core = get_core_asset_symbols(conn, args.top)
         syms = [s for s in syms if s in core]
-        print(f"[symbols] 市值 top{args.top} 过滤后 {len(syms)} 个")
+        print(f"[symbols] 市值 top{args.top} 过滤后 {len(syms)} 个"
+              f"（注意：--top 基于 core.asset，TradFi 合约默认不在 core.asset 里，"
+              f"加 --tradfi 后如需纳入 TradFi 建议同时关闭 --top 或单独跑一轮）")
     if args.min_vol_usd:
         vol_map = get_24h_quote_volume()
         syms = [s for s in syms if vol_map.get(s, 0) >= args.min_vol_usd]
@@ -188,6 +214,14 @@ def main() -> int:
                              "（扩展历史用；--force 是补中间缺口，两者用途不同）")
     parser.add_argument("--dry-run", action="store_true", help="只拉取打印，不写库")
     parser.add_argument("--workers", type=int, default=8, help="并发数（默认 8）")
+    parser.add_argument("--tradfi", action="store_true",
+                        help="同时拉取币安 TradFi 永续合约（TRADIFI_PERPETUAL：美股/港股/ETF/贵金属等，"
+                             "共 235+ 个；默认只拉加密 PERPETUAL 永续，保持历史行为）")
+    parser.add_argument("--tradfi-types", default="",
+                        help="--tradfi 启用时可按 underlyingType 白名单二次过滤，"
+                             "逗号分隔，如 EQUITY,COMMODITY,HK_EQUITY。"
+                             "可取值：EQUITY/PREMARKET/COMMODITY/HK_EQUITY/KR_EQUITY/CN_EQUITY/FX。"
+                             "留空=全部 TradFi 都要")
     args = parser.parse_args()
 
     intervals = [i.strip() for i in args.intervals.split(",") if i.strip()]

@@ -17,8 +17,14 @@
 出场规则（币安条件单 STOP_MARKET/TAKE_PROFIT_MARKET 同构）：
   先触止盈 → +TP；先触止损 → -SL；同 bar 同时触 → 保守算止损；持有 N 小时未触 → 按第 N 根收盘平仓。
 
-服务端一次性计算每事件的「首次触达序号 + 各时点收盘」，本地 numpy 向量化跑网格。
-用法：python bin/backtest_trade_params.py [--signal A] [--limit 200000]
+成交口径（--realistic，真实口径重测）：
+  - 默认（乐观）：触发 bar 按阈值价成交（隐含"价格连续穿越无跳空"假设）。
+  - --realistic：若触发 bar **开盘价已穿越阈值**（跳空），按开盘价成交——对齐实盘
+    STOP_MARKET/TAKE_PROFIT_MARKET 在跳空后按首笔 ≤/≥ 停价成交的行为；
+    开盘缺失则回退阈值成交。做多止盈跳空上穿=更好、止损跳空下穿=更差（做空对称）。
+
+服务端一次性计算每事件的「首次触达序号 + 各时点收盘 + 触发 bar 开盘」，本地 numpy 向量化跑网格。
+用法：python bin/backtest_trade_params.py [--signal A] [--limit 200000] [--realistic]
 """
 from __future__ import annotations
 
@@ -88,12 +94,12 @@ ev AS (
 ),
 bars AS (
     SELECT ev.symbol, ev.eo, ev.entry, ev.chg1h, ev.vr, ev.chg24,
-           k.high_px, k.low_px, k.close_px,
+           k.high_px, k.low_px, k.close_px, k.open_px,
            (EXTRACT(EPOCH FROM (k.open_time - ev.eo)) / 3600)::int AS h_off
     FROM ev
     JOIN biz.asset_klines k ON k.symbol = ev.symbol AND k.interval = '1h'
          AND k.open_time > ev.eo AND k.open_time <= ev.eo + interval '168 hours'
-         AND k.high_px > 0 AND k.low_px > 0 AND k.close_px > 0
+         AND k.high_px > 0 AND k.low_px > 0 AND k.close_px > 0 AND k.open_px > 0
 ),
 bq AS MATERIALIZED (
     SELECT b.*,
@@ -135,7 +141,30 @@ agg AS (
        MIN(h_off) FILTER (WHERE low_px <= ph * 0.92)  AS tr8,
        MIN(h_off) FILTER (WHERE low_px <= ph * 0.90)  AS tr10,
        MIN(h_off) FILTER (WHERE low_px <= ph * 0.85)  AS tr15,
-       MAX(ph) AS px_peak   -- 168h 窗口内滚动最高（仅用于参考，不出场计算）
+       MAX(ph) AS px_peak,   -- 168h 窗口内滚动最高（仅用于参考，不出场计算）
+       -- 真实口径（--realistic）：各阈值**首次触发 bar 的开盘价**——开盘已穿越阈值
+       -- （跳空）时按开盘成交，否则仍按阈值价成交
+       (ARRAY_AGG(open_px ORDER BY h_off) FILTER (WHERE high_px >= entry * 1.02))[1] AS hp2o,
+       (ARRAY_AGG(open_px ORDER BY h_off) FILTER (WHERE high_px >= entry * 1.03))[1] AS hp3o,
+       (ARRAY_AGG(open_px ORDER BY h_off) FILTER (WHERE high_px >= entry * 1.05))[1] AS hp5o,
+       (ARRAY_AGG(open_px ORDER BY h_off) FILTER (WHERE high_px >= entry * 1.08))[1] AS hp8o,
+       (ARRAY_AGG(open_px ORDER BY h_off) FILTER (WHERE high_px >= entry * 1.10))[1] AS hp10o,
+       (ARRAY_AGG(open_px ORDER BY h_off) FILTER (WHERE high_px >= entry * 1.20))[1] AS hp20o,
+       (ARRAY_AGG(open_px ORDER BY h_off) FILTER (WHERE high_px >= entry * 1.30))[1] AS hp30o,
+       (ARRAY_AGG(open_px ORDER BY h_off) FILTER (WHERE high_px >= entry * 1.50))[1] AS hp50o,
+       (ARRAY_AGG(open_px ORDER BY h_off) FILTER (WHERE low_px <= entry * 0.98))[1] AS sl2o,
+       (ARRAY_AGG(open_px ORDER BY h_off) FILTER (WHERE low_px <= entry * 0.97))[1] AS sl3o,
+       (ARRAY_AGG(open_px ORDER BY h_off) FILTER (WHERE low_px <= entry * 0.95))[1] AS sl5o,
+       (ARRAY_AGG(open_px ORDER BY h_off) FILTER (WHERE low_px <= entry * 0.92))[1] AS sl8o,
+       (ARRAY_AGG(open_px ORDER BY h_off) FILTER (WHERE low_px <= entry * 0.90))[1] AS sl10o,
+       (ARRAY_AGG(open_px ORDER BY h_off) FILTER (WHERE low_px <= entry * 0.80))[1] AS sl20o,
+       (ARRAY_AGG(open_px ORDER BY h_off) FILTER (WHERE low_px <= entry * 0.70))[1] AS sl30o,
+       (ARRAY_AGG(open_px ORDER BY h_off) FILTER (WHERE low_px <= entry * 0.50))[1] AS sl50o,
+       (ARRAY_AGG(open_px ORDER BY h_off) FILTER (WHERE low_px <= ph * 0.97))[1] AS tr3o,
+       (ARRAY_AGG(open_px ORDER BY h_off) FILTER (WHERE low_px <= ph * 0.95))[1] AS tr5o,
+       (ARRAY_AGG(open_px ORDER BY h_off) FILTER (WHERE low_px <= ph * 0.92))[1] AS tr8o,
+       (ARRAY_AGG(open_px ORDER BY h_off) FILTER (WHERE low_px <= ph * 0.90))[1] AS tr10o,
+       (ARRAY_AGG(open_px ORDER BY h_off) FILTER (WHERE low_px <= ph * 0.85))[1] AS tr15o
     FROM bq
     GROUP BY symbol, eo, entry, chg1h, vr, chg24
 ),
@@ -252,8 +281,11 @@ def load_events() -> list[dict]:
 def _vec_rows(rows):
     """把事件列表转成 numpy 结构化数组（NaN=缺失），供向量化网格。"""
     TR_PH_COLS = ["ph_tr3", "ph_tr5", "ph_tr8", "ph_tr10", "ph_tr15"]
-    keys = (["entry", "chg24", "eo", "px_peak"] + [c for c, _ in HP_COLS]
-            + [c for c, _ in SL_COLS] + [c for c, _ in C_COLS] + [c for c, _ in TR_COLS]
+    keys = (["entry", "chg24", "eo", "px_peak"]
+            + [c for c, _ in HP_COLS] + [c + "o" for c, _ in HP_COLS]
+            + [c for c, _ in SL_COLS] + [c + "o" for c, _ in SL_COLS]
+            + [c for c, _ in C_COLS]
+            + [c for c, _ in TR_COLS] + [c + "o" for c, _ in TR_COLS]
             + TR_PH_COLS)
     out: dict[str, np.ndarray] = {}
     for k in keys:
@@ -265,11 +297,13 @@ def _vec_rows(rows):
     return out
 
 
-def _returns_vec(arr, direction, n, tp, sl, tr):
+def _returns_vec(arr, direction, n, tp, sl, tr, realistic=False):
     """向量化单笔毛收益。模式：
       - 固定（tr=None）：先触固定止盈 tp / 固定止损 sl / 时间到期
       - 跟踪（tp=None，仅做多）：先触跟踪止盈 tr / 固定止损 sl / 时间到期
         跟踪止盈出场收益 = 峰值×(1-tr)/entry - 1（用 168h 全窗口峰值近似，略偏乐观）
+      - realistic=True：触发 bar 开盘已穿越阈值（跳空）→ 按开盘价成交（对齐实盘
+        STOP_MARKET 跳空后按首笔价成交）；开盘缺失(NaN)→ 比较为 False → 回退阈值成交。
     做空不启用跟踪（SQL 未算做空侧滚动最低回撤）。"""
     entry = arr["entry"]
     cn = arr[f"c{n}"]
@@ -277,12 +311,17 @@ def _returns_vec(arr, direction, n, tp, sl, tr):
     if direction == 1:      # 做多
         if tr is not None:
             t_tp = arr[f"tr{int(tr*100)}"]
+            tp_open = arr[f"tr{int(tr*100)}o"] if realistic else None
         else:
             t_tp = np.full_like(entry, np.nan) if tp == 0 else arr[f"hp{int(tp*100)}"]
+            tp_open = arr[f"hp{int(tp*100)}o"] if realistic and tp != 0 else None
         t_sl = np.full_like(entry, np.nan) if sl == 0 else arr[f"sl{int(sl*100)}"]
+        sl_open = arr[f"sl{int(sl*100)}o"] if realistic and sl != 0 else None
     else:                   # 做空
         t_tp = np.full_like(entry, np.nan) if tp == 0 else arr[f"sl{int(tp*100)}"]
+        tp_open = arr[f"sl{int(tp*100)}o"] if realistic and tp != 0 else None
         t_sl = np.full_like(entry, np.nan) if sl == 0 else arr[f"hp{int(sl*100)}"]
+        sl_open = arr[f"hp{int(sl*100)}o"] if realistic and sl != 0 else None
     t_tp = np.where(t_tp <= n, t_tp, np.nan)
     t_sl = np.where(t_sl <= n, t_sl, np.nan)
     ret_time = direction * (cn / entry - 1)
@@ -290,15 +329,35 @@ def _returns_vec(arr, direction, n, tp, sl, tr):
     hit_sl = ~np.isnan(t_sl) & (np.isnan(t_tp) | (t_sl <= t_tp))
     if tr is not None:      # 跟踪止盈出场收益：触发时刻的滚动峰值 ×(1-tr)
         ph_at_tr = arr[f"ph_tr{int(tr * 100)}"]
-        tp_val = ph_at_tr * (1 - tr) / entry - 1
+        stop = ph_at_tr * (1 - tr)
+        if realistic and tp_open is not None:
+            # 开盘已跌破跟踪停价（跳空）→ 按开盘成交，否则按停价
+            tp_val = np.where(tp_open <= stop, tp_open, stop) / entry - 1
+        else:
+            tp_val = stop / entry - 1
     else:
-        tp_val = tp
-    ret = np.where(hit_tp, tp_val, np.where(hit_sl, -sl, ret_time))
+        if realistic and tp_open is not None:
+            # 止盈阈值：做多 lvl=entry*(1+tp)，开盘 ≥ lvl（跳空上穿）→ 按开盘（更好）；
+            # 做空 lvl=entry*(1-tp)，开盘 ≤ lvl（跳空下穿）→ 按开盘（更好）
+            lvl_tp = entry * (1 + direction * tp)
+            tp_val = direction * (np.where(direction * (tp_open - lvl_tp) >= 0,
+                                           tp_open, lvl_tp) / entry - 1)
+        else:
+            tp_val = tp
+    if realistic and sl_open is not None:
+        # 止损阈值：做多 lvl=entry*(1-sl)，开盘 ≤ lvl（跳空下穿）→ 按开盘（更差）；
+        # 做空 lvl=entry*(1+sl)，开盘 ≥ lvl（跳空上穿）→ 按开盘（更差）
+        lvl_sl = entry * (1 - direction * sl)
+        sl_val = direction * (np.where(direction * (sl_open - lvl_sl) <= 0,
+                                      sl_open, lvl_sl) / entry - 1)
+    else:
+        sl_val = -sl
+    ret = np.where(hit_tp, tp_val, np.where(hit_sl, sl_val, ret_time))
     ret = np.where(valid, ret, np.nan)
     return ret
 
 
-def grid_signal(arr, direction):
+def grid_signal(arr, direction, realistic=False):
     """对一组事件做网格，返回统计列表（固定/跟踪两种出场模式，单笔统计 + 风险约束）。"""
     results = []
     for n in N_LIST:
@@ -307,7 +366,7 @@ def grid_signal(arr, direction):
             continue
         for sl in SL_LIST:
             for tp in TP_LIST:      # 固定止盈
-                ret = _returns_vec(arr, direction, n, tp, sl, None)
+                ret = _returns_vec(arr, direction, n, tp, sl, None, realistic=realistic)
                 rs = ret[~np.isnan(ret)]
                 if len(rs) < MIN_N:
                     continue
@@ -319,7 +378,7 @@ def grid_signal(arr, direction):
                                 "worst": float(np.nanmin(rs))})
             if direction == 1:      # 跟踪止盈（仅做多）
                 for tr in TR_LIST:
-                    ret = _returns_vec(arr, direction, n, 0, sl, tr)
+                    ret = _returns_vec(arr, direction, n, 0, sl, tr, realistic=realistic)
                     rs = ret[~np.isnan(ret)]
                     if len(rs) < MIN_N:
                         continue
@@ -336,14 +395,18 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--signal", default="ALL", choices=["ALL", *SIGNALS])
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--realistic", action="store_true",
+                    help="真实成交口径：触发 bar 开盘跳空穿越阈值时按开盘价成交")
     args = ap.parse_args()
 
     rows = load_events()
     print(f"[events] {len(rows):,} 条（涨异动×滚动24h口径）；缓存 {CACHE}")
+    print(f"[fill] 口径 = {'真实（跳空按开盘成交）' if args.realistic else '乐观（一律按阈值价成交）'}")
     if args.limit:
         rows = rows[: args.limit]
 
-    out_csv = DATA_DIR / "backtest_trade_params.csv"
+    out_csv = DATA_DIR / ("backtest_trade_params_realistic.csv" if args.realistic
+                          else "backtest_trade_params.csv")
     with out_csv.open("w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["signal", "label", "mode", "N_h", "TP_pct", "TR_pct", "SL_pct",
@@ -356,7 +419,7 @@ def main() -> int:
             if len(sub) < MIN_N:
                 continue
             arr = _vec_rows(sub)
-            grid = grid_signal(arr, direction)
+            grid = grid_signal(arr, direction, realistic=args.realistic)
             # 选择标准：单笔最差 ≥ WORST_LIMIT（风险约束）→ PF 降序 → 胜率降序
             safe = [g for g in grid if g["worst"] >= WORST_LIMIT]
             pool = safe if len(safe) >= 3 else grid

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -260,6 +261,61 @@ def load_emitted_events(conn) -> set[tuple[str, str]]:
         return {(r[0], r[1]) for r in cur.fetchall() if r[1]}
 
 
+def load_wick_metrics(conn, events: list[dict]) -> dict[tuple[str, str], dict]:
+    """影子指标（2026-11-06，只记录不拦截）：入场前波动率与插针度，落库进 params 供后续验证。
+
+    背景：离线回测（63 事件，_wick_filter.py / _vol_probe.py）显示「爱插针」（Spearman
+    ≈ -0.21~-0.29）与「波动率 Q4」都是方向性负资产，剔最插针 1/3 或剔波动 Q4 都能把
+    PF 提升约 +0.1；但样本仅 63，阈值有过拟合风险 → 影子模式先积累实盘样本再开闸。
+    口径与回测严格一致：
+      窗口 = [eo-24h, eo+1h) 的 5m bars（eo=事件 bar open_time，eo+1h=入场时刻）
+      wick_r    = mean((h-l)/c) / mean(|c-o|/c) —— 聚合振幅/实体比，越大越爱插针
+      vol24_pct = std(diff(log c)) * sqrt(288)  —— 24h 实现波动率（%）
+    窗口内 5m bar < 100 视为数据不足，不写指标（与回测过滤一致）。
+    返回 {(symbol, eo_iso): {"wick_r": float, "vol24_pct": float}}。
+    """
+    if not events:
+        return {}
+    syms = sorted({e["symbol"] for e in events})
+    t_min = min(e["eo"] for e in events) - timedelta(hours=24)
+    t_max = max(e["eo"] for e in events) + timedelta(hours=1)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT symbol, open_time, open_px, high_px, low_px, close_px "
+            "FROM biz.asset_klines "
+            "WHERE interval = '5m' AND symbol = ANY(%s) "
+            "  AND open_time >= %s AND open_time < %s "
+            "  AND open_px > 0 AND close_px > 0 "
+            "ORDER BY symbol, open_time",
+            (syms, t_min, t_max),
+        )
+        rows = cur.fetchall()
+    bars_by_sym: dict[str, list] = {}
+    for sym, t, o, h, l, c in rows:
+        bars_by_sym.setdefault(sym, []).append((t, float(o), float(h), float(l), float(c)))
+
+    out: dict[tuple[str, str], dict] = {}
+    for e in events:
+        eo = e["eo"]
+        lo, hi = eo - timedelta(hours=24), eo + timedelta(hours=1)
+        bars = [b for b in bars_by_sym.get(e["symbol"], []) if lo <= b[0] < hi]
+        if len(bars) < 100:
+            continue
+        rng = sum((b[2] - b[3]) / b[4] for b in bars) / len(bars)
+        body = sum(abs(b[4] - b[1]) / b[4] for b in bars) / len(bars)   # o=b[1], c=b[4]
+        if body <= 0:
+            continue
+        closes = [b[4] for b in bars]
+        logret = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
+        mu = sum(logret) / len(logret)
+        var = sum((x - mu) ** 2 for x in logret) / (len(logret) - 1)
+        out[(e["symbol"], eo.isoformat())] = {
+            "wick_r": round(rng / body, 4),
+            "vol24_pct": round(math.sqrt(var) * math.sqrt(288) * 100, 2),
+        }
+    return out
+
+
 def recent_signals(conn, hours: float) -> set[tuple[str, str]]:
     """最近 hours 小时内已出信号的 (symbol, signal_type) 集合（可选冷却去重）。"""
     if hours <= 0:
@@ -280,6 +336,12 @@ def scan(conn, min_vol: float, cooldown_h: float) -> list[dict]:
     funding = load_funding()
     emitted = load_emitted_events(conn)
     cooled = recent_signals(conn, cooldown_h)
+    # 影子指标（只记录不拦截）：只对通过基础过滤、未去重的候选事件算插针度/波动率，
+    # 一次批量查询。指标随 params 落库，实盘样本积累后验证「剔插针/剔波动 Q4」再决定开闸。
+    cand = [e for e in events
+            if float(e["vol_24h"] or 0) >= min_vol and e["chg24"] is not None
+            and (e["symbol"], e["eo"].isoformat()) not in emitted]
+    wick = load_wick_metrics(conn, cand)
     now = datetime.now(timezone.utc)
 
     hits: list[dict] = []
@@ -295,6 +357,7 @@ def scan(conn, min_vol: float, cooldown_h: float) -> list[dict]:
         # 同一事件 bar 只出一次（不再依赖 30min 轮询频率去重）
         if (sym, eo_iso) in emitted:
             continue
+        mk = wick.get((sym, eo_iso)) or {}
         for sig_type, window, direction, ok in SIGNAL_DEFS:
             if not ok(chg24_pct, vr):
                 continue
@@ -305,6 +368,8 @@ def scan(conn, min_vol: float, cooldown_h: float) -> list[dict]:
                 "chg1h": chg1h, "vol": vol24, "vr": vr, "fund": funding.get(sym),
                 "sig_type": sig_type, "window": window, "direction": direction,
                 "ts": now, "event_bar_ts": eo_iso,
+                # 影子指标（不参与任何闸门，仅落库观察）
+                "wick_r": mk.get("wick_r"), "vol24_pct": mk.get("vol24_pct"),
             })
     return hits
 
@@ -326,9 +391,12 @@ def main() -> int:
     for h in hits:
         vr_s = "n/a" if h["vr"] is None else f"{h['vr']:.2f}"
         fund_s = "n/a" if h["fund"] is None else f"{h['fund']:.4%}"
+        wick_s = "n/a" if h["wick_r"] is None else f"{h['wick_r']:.2f}"
+        v24_s = "n/a" if h["vol24_pct"] is None else f"{h['vol24_pct']:.1f}%"
         print(f"  {_fmt(h['ts'])} {h['symbol']:<12} {h['sig_type']:<12} {h['window']:<5} "
               f"{h['direction']:<6} chg24={h['chg']:+.1f}% chg1h={h['chg1h']:+.1f}% "
               f"vr1h={vr_s} fund={fund_s} vol=${h['vol']/1e6:.0f}M "
+              f"wick={wick_s} v24={v24_s} "
               f"@${h['price']:,.4f} bar={h['event_bar_ts']}")
         if args.apply:
             with get_connection(settings.database_url) as conn:
@@ -343,7 +411,11 @@ def main() -> int:
                          json.dumps({"caliber": "1h_event", "event_bar_ts": h["event_bar_ts"],
                                      "chg1h_pct": round(h["chg1h"], 4),
                                      "vr_1h": round(h["vr"], 4),
-                                     "vol_24h_usd": h["vol"]})),
+                                     "vol_24h_usd": h["vol"],
+                                     # 影子指标（2026-11-06）：不参与闸门，仅供
+                                     # 「剔插针/剔波动Q4」开闸前的实盘样本验证
+                                     "wick_r": h["wick_r"],
+                                     "vol24_pct": h["vol24_pct"]})),
                     )
 
     # 邮件告警（实盘白名单 A=SHORT_LONG + B=MID_LONG 右上角；C 不实盘、不告警）

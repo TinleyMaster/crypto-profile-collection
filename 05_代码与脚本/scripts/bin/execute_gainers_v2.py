@@ -41,6 +41,9 @@ from crypto_research.db.conn import get_connection  # noqa: E402
 # 实盘硬止损 -15%（2026-10-19 从 10% 上调：回测 act=0+SL=15% PF=2~24 vs SL=10% PF=1.12，
 #   82k 样本中 SL=15% 出场占比<0.1%，与 SL=0 等价；DOSUSDT 级闪崩-65% 属极端长尾，
 #   168h 窗口内未出现过）
+# ⚠️ 2026-11-06：做多+带 TR 的单，首小时初始止损改用 EMA20×(1-2%) 线（与 SL15%
+#   取更紧者，15% 为风险帽）——统一口径回测 ema_init -0.88%/PF0.80 vs
+#   固定-15% -1.60%/0.65；详见 EMA_INIT_* 常量处注释
 PARAMS: dict[str, dict] = {
     "SHORT_LONG": {"N": 24,  "TP": None, "TR": 0.03, "SL": 0.15},
     "MID_LONG":   {"N": 168, "TP": None, "TR": 0.03, "SL": 0.15},
@@ -357,6 +360,64 @@ def momentum_gate(settings, sig: dict, conn=None) -> tuple[bool, dict]:
     return passed, info
 
 
+# ── 首小时初始止损 = EMA20 线（2026-11-06 统一口径回测拍板）──────────────────────
+# 回测（66 组统一 immune 口径 / 72 事件，results_unified.json）：
+#   ema_init(EMA20, ebuf2%) mean -0.88% / PF 0.80  vs  现行固定 -15% 的 -1.60% / 0.65
+#   且首小时 0 单被 EMA 线打掉 —— 「贴线被噪音甩车」的顾虑在线离现价 5%+ 时不成立
+# 规则：入场时初始 STOP_MARKET = 最后一根已收盘 1h（含信号 bar，对齐回测 pre_idx）
+# EMA20 ×(1-2%)，与硬止损 entry×(1-SL) 取**更紧者**（见 open_position 的 stop_price
+# 封顶逻辑：单根 +40% 大阳线时 EMA20 可落后 20%+，不封顶首小时最坏亏损会击穿 15%
+# 风险帽；该封顶只在极端行情收紧，方向保守）。1h 后由 _hourly_trail_check 接管，
+# 与 peak trail 取高者、只上移（回测 ema_init 即 max(EMA, peak) ratchet）。
+EMA_INIT_PERIOD = 20
+EMA_INIT_BUF = 0.02        # 线 = EMA20 ×(1-2%)（回测 ebuf=2% 最优）
+EMA_INIT_MIN_GAP = 0.03    # 线须低于现价 ≥3%，否则回退固定 SL（防贴线即触发，
+                           # 3% = 原生 TR 被甩车的回踩幅度）
+EMA_INIT_MIN_BARS = 60     # 1h 收盘样本不足 → 回退固定 SL
+
+
+def ema_init_stop_line(settings, symbol: str, event_bar_ts: str | None) -> float | None:
+    """首小时初始止损线（EMA20×(1-2%)），守卫不满足返回 None（调用方回退固定 SL）。
+
+    口径对齐回测 _ema_vs_peak.py ema_init：
+      - K 线截至事件 bar（event_bar_ts ≤ open_time，含信号 bar）——与回测
+        bars_1h < eo+1h 一致；event_bar_ts 缺失时退化为「所有已收盘 1h」
+      - seed = 前 20 根均值，再迭代到末端（120 根窗口 → seed 距事件 100+ 根，
+        初值影响 (1-2/21)^100 ≈ 0，EMA 已收敛）
+    """
+    try:
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                if event_bar_ts:
+                    cur.execute(
+                        "SELECT close_px FROM ("
+                        "  SELECT close_px, ROW_NUMBER() OVER (ORDER BY open_time DESC) rn"
+                        "    FROM biz.asset_klines"
+                        "   WHERE symbol=%s AND interval='1h' AND close_px > 0"
+                        "     AND open_time <= %s"
+                        ") x WHERE rn <= 120", (symbol, event_bar_ts))
+                else:
+                    cur.execute(
+                        "SELECT close_px FROM ("
+                        "  SELECT close_px, ROW_NUMBER() OVER (ORDER BY open_time DESC) rn"
+                        "    FROM biz.asset_klines"
+                        "   WHERE symbol=%s AND interval='1h' AND close_px > 0"
+                        "     AND open_time + interval '1 hour' <= NOW()"
+                        ") x WHERE rn <= 120", (symbol,))
+                closes = [float(r[0]) for r in cur.fetchall()][::-1]
+        if len(closes) < EMA_INIT_MIN_BARS:
+            return None
+        ema = sum(closes[:EMA_INIT_PERIOD]) / EMA_INIT_PERIOD
+        alpha = 2.0 / (EMA_INIT_PERIOD + 1)
+        for c in closes[EMA_INIT_PERIOD:]:
+            ema = ema + alpha * (c - ema)
+        return ema * (1 - EMA_INIT_BUF)
+    except Exception as e:  # noqa: BLE001 — EMA 线故障不应阻断下单（回退固定 SL）
+        print(f"  [ema-init] {symbol} 计算 EMA 止损线失败(fail-open→固定SL): "
+              f"{type(e).__name__}: {e}")
+        return None
+
+
 def place_order(client, settings, sig: dict, live: bool) -> dict:
     """单信号风控 + 下单。返回决策记录。"""
     p = PARAMS.get(sig["signal_type"])
@@ -408,27 +469,53 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
     #    传大写 "LONG" 会落入其 else 分支 → 实际下 SELL/SHORT，多空完全反向
     #    （2026-10-11 实盘复现：SHORT_LONG 信号开出了 -539.1 的空头持仓）。
     direction = "long" if sig["direction"] == "LONG" else "short"
+    # 首小时初始止损线（EMA20）：仅做多 + 带 TR 的 hourly_lag 信号（回测覆盖范围），
+    # 空单/TRAP_SHORT 不启用（回测未验证）。None → 固定 SL 照旧。
+    init_line = None
+    if direction == "long" and p.get("SL") and p.get("TR"):
+        evt = (sig.get("params") or {}).get("event_bar_ts")
+        line = ema_init_stop_line(settings, sig["symbol"], evt)
+        if line is not None:
+            try:
+                cur_px = client.get_price(sig["symbol"])
+            except Exception:  # noqa: BLE001
+                cur_px = 0
+            if cur_px > 0 and line <= cur_px * (1 - EMA_INIT_MIN_GAP):
+                init_line = line
+                rec["ema_init"] = {"line": line, "period": EMA_INIT_PERIOD,
+                                   "buf": EMA_INIT_BUF, "cur_px": cur_px}
+            else:
+                print(f"  [ema-init] {sig['symbol']} 线 {line:.6g} 与现价 {cur_px:.6g} "
+                      f"间隙不足 {EMA_INIT_MIN_GAP:.0%} → 回退固定 SL")
+                rec["ema_init"] = {"line": line, "cur_px": cur_px, "skip": "gap"}
+        else:
+            rec["ema_init"] = {"skip": "insufficient_bars"}
     try:
         r = client.open_position(
             sig["symbol"], direction, notional,
             entry_price=None, leverage=lev,
             stop_loss_pct=p["SL"] * 100 if p.get("SL") else 0,
+            # EMA 初始止损线（None=固定 SL）：open_position 内与 fill×(1-SL) 取更紧者，
+            # 15% 风险帽始终生效（防 EMA 落后大阳线时首小时亏损超限）
+            stop_price=init_line,
             take_profit_pct=p["TP"] * 100 if p.get("TP") else 0,
-            # 原生 TRAILING_STOP_MARKET（交易所侧即时兜底）：
-            #   callbackRate=TR%，**入场即激活**（act=0，回测 PF 7.93 远优于 act=5% 的 0.88），
-            #   从持仓期最高价回调 TR% 由**交易所瞬间接住**（轮询式软件 TR 对 5 分钟级崩盘
-            #   无能为力，DOSUSDT 21:45 一根 5m 崩 −65% 教训）。
-            # 软件 _trail_check 仍保留负责回测对齐的慢速回撤出场；两者竞争先触发者胜。
-            trailing_stop_pct=p["TR"] * 100 if p.get("TR") else 0,
-            trailing_activation_pct=0,   # 回测结论：act=0 入场即激活（PF 7.93）远优于 act=5%（PF 0.88）
-                                          # 涨过 5% 才激活的设计让"冲不到 5% 就掉头"的动量币全部亏损
+            # ⚠️ 不再挂 Binance 原生 TRAILING_STOP_MARKET（2026-11-06 决策）：
+            #    act=0 callbackRate=3% 让 3,131 笔 100% 在入场后几分钟内被正常 3% 回踩
+            #    甩下车，期望 +0.85% 仅是"每小时滞后止损 + 首小时免疫" +3.18% 的 27%。
+            #    改由 _hourly_trail_check 实现：入场首小时只保留硬止损，之后每轮按
+            #    「入场后已收盘 1h bar 的 MAX(high) × (1-3%)」重挂 STOP_MARKET，
+            #    浮盈 ≥5% 时上移到成本线（entry+0.4%）。
         )
         order_id = r.get("orderId")
         # 全量留痕：开仓单原始响应（剔除内部下划线字段）+ 各保护单原始响应（含 orderId）
         entry_resp = {k: v for k, v in r.items() if not k.startswith("_")}
         protective = {
             "stop_loss": r.get("_stop_loss"),
-            "trailing_stop": r.get("_trailing_stop"),
+            "trailing_stop": {"mode": "hourly_lag", "tr_pct": p.get("TR") or 0,
+                              # EMA 初始止损线（None=固定 SL）：供出场归因区分
+                              # 「首小时 EMA 止损」vs「滞后 trail 线」
+                              "init_stop_px": init_line,
+                              "note": "原生 TRAILING 已移除，由 _hourly_trail_check 接管"},
             "take_profit": r.get("_take_profit"),
         }
         qty = float(r.get("_qty") or 0)
@@ -453,8 +540,12 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
             print(f"  [verify] {sig['symbol']} 止损未挂上"
                   f"（{protective.get('stop_loss') or '响应缺失'}）→ 补挂一次")
             try:
+                # 补挂与首挂同口径：EMA 线与 fill×(1-SL) 取更紧者（风险帽不变）
+                trig = None
+                if init_line is not None:
+                    trig = max(init_line, avg * (1 - p["SL"]))
                 sl2 = client.place_sltp(sig["symbol"], direction, avg,
-                                        p["SL"] * 100, is_stop=True)
+                                        p["SL"] * 100, is_stop=True, stop_price=trig)
                 protective["stop_loss"] = sl2
                 print(f"  [verify] {sig['symbol']} 补挂止损 "
                       f"{'成功 algoId=' + str(sl2.get('algoId')) if _prot_ok(sl2) else f'仍失败: {sl2}'}")
@@ -472,11 +563,8 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
             print(f"  [ROLLBACK] {sig['symbol']} 止损两次未挂上→回滚开仓: {p_err} | {rb_msg}")
             _alert_protective_failed(settings, sig, p_err, rb_msg)
             return rec
-        # 可选保护降级：原生 TR 失败 → 标注软件 TR 接管（_trail_check）；TP 失败 → 仅告警
-        trl = protective.get("trailing_stop")
-        if isinstance(trl, dict) and "error" in trl:
-            print(f"  [verify] {sig['symbol']} 原生 TR 挂单失败，降级软件 TR: {trl['error']}")
-            protective["trailing_stop"] = {"mode": "software", "tr_pct": p.get("TR") or 0}
+        # trailing_stop 不再是原生 Binance 挂单（已改为 hourly_lag 模式标注）；
+        # 首次入场只挂硬止损 STOP_MARKET，每小时滞后止损由 _hourly_trail_check 上移触发价
         tp = protective.get("take_profit")
         if isinstance(tp, dict) and "error" in tp:
             print(f"  [verify] {sig['symbol']} TP 挂单失败（SL/TR 仍在，继续）: {tp['error']}")
@@ -538,7 +626,34 @@ def _attribution_from_trades(client, t: dict, prot: dict) -> tuple[dict | None, 
     reason = "manual_or_unknown"
     sl_trig = float(sl.get("triggerPrice") or sl.get("stopPrice") or 0)
     has_tr = bool(tr and (tr.get("algoId") or tr.get("orderId") or tr.get("callbackRate")))
+    tr_mode = tr.get("mode") if isinstance(tr, dict) else None
+    # 新逻辑（2026-11-06 起）：hourly_lag 模式下 trail 与 sl 共用一张 STOP_MARKET
+    # triggerPrice 即当前止损线，须区分是硬止损兜底还是滞后止损上移
     if sl_trig > 0 and avg > 0 and abs(avg - sl_trig) / sl_trig <= 0.10:
+        if tr_mode == "hourly_lag":
+            # 硬止损兜底 vs 滞后止损上移的区分：
+            # sl_pct 落库即小数（0.15 = 15%），触发价与 entry×(1-sl_pct) 接近则是硬止损
+            sl_pct = float(t.get("sl_pct") or 0.15)
+            if is_long:
+                hard_sl = entry * (1 - sl_pct)
+            else:
+                hard_sl = entry * (1 + sl_pct)
+            # 5% 容差防 tick 精度 + round；滞后止损线（peak×0.97）必然 > 硬止损
+            if abs(sl_trig - hard_sl) / max(hard_sl, 1e-12) <= 0.05:
+                reason = "sl"  # 硬止损兜底打掉（-15% 闪崩）
+            else:
+                # 首小时 EMA 初始止损线（2026-11-06）：挂在 hard 与 trail 之间，
+                # 触发价 ≈ init_stop_px → 归为 sl（保命止损，非止盈出场）
+                init_px = float(
+                    ((prot.get("trailing_stop") or {}).get("init_stop_px")) or 0)
+                if init_px > 0 and abs(sl_trig - init_px) / init_px <= 0.03:
+                    reason = "sl"  # 首小时 EMA 线打掉
+                else:
+                    reason = "trail"  # 每小时滞后止损线打掉（主出场路径）
+        else:
+            reason = "sl"  # 原生逻辑：硬止损触发
+    elif sl_trig > 0 and avg > 0 and abs(avg - sl_trig) / sl_trig <= 0.15:
+        # 闪崩 15% 以上滑点（DOSUSDT -65% 级）仍归为 sl
         reason = "sl"
     else:
         tp_trig = float(tp.get("triggerPrice") or 0) if isinstance(tp, dict) else 0
@@ -618,6 +733,7 @@ def _trail_check(client, conn) -> int:
             "WHERE t.close_ts IS NULL AND t.exit_order_id IS NULL "
             "  AND t.origin = 'bot' AND COALESCE(t.tr_pct, 0) > 0 "
             "  AND COALESCE(t.protective_orders->'trailing_stop'->>'algoId', 'NULL') = 'NULL' "
+            "  AND COALESCE(t.protective_orders->'trailing_stop'->>'mode', '') = 'software' "
             "ORDER BY t.open_ts")
         rows = [dict(zip([d.name for d in cur.description], r)) for r in cur.fetchall()]
     n = 0
@@ -661,6 +777,158 @@ def _trail_check(client, conn) -> int:
             n += 1
         except Exception as e:  # noqa: BLE001
             print(f"  [trail] {t['symbol']} 异常: {type(e).__name__}: {e}")
+    return n
+
+
+def _hourly_trail_check(client, conn, settings) -> int:
+    """每小时滞后止损 + 浮盈保本止损（主出场逻辑，--watch 每轮调用）。
+
+    出场规则（对齐 _hourly_lag.py 5m 回测，trail3%/SL10% +3.18%，现状 +0.85% 的 3.7 倍）：
+      - 入场后首小时**只保留入场时的初始止损**（EMA20 线 / 回退 -SL%，2026-11-06 起），
+        免疫 3% 回踩甩车
+      - 首小时起，每轮按「入场后已收盘 1h bar 的 MAX(high) × (1-TR%)」算跟踪线
+      - 浮盈 ≥5% 时止损上移到成本覆盖线（entry ± 0.4%），跳空也不亏
+      - 同一张 STOP_MARKET 只往上移不回撤（幂等；0.5% 容差防 tick 抖动）
+
+    与旧逻辑的差异与根因：
+      - 旧：Binance TRAILING_STOP_MARKET callbackRate=3% act=0 → 3,131 笔 100% 被入场几分钟内
+        的正常 3% 回踩甩下车（原生 TR 从入场价激活，回测峰值从入场后 bar high 累积，两者
+        触发价差了整整"入场到首根 bar"的涨幅）
+      - 新：回测结论明确「等 1h K 线跑完再决定止损位」是唯一能让期望提升的路径——
+        每小时看一次峰值，入场即回调 3% 不会被打掉，趋势币能吃到突破
+      - 仅管 protective_orders.trailing_stop.mode='hourly_lag' 的单；存量 mode='software'
+        由 _trail_check 处理，互不干扰
+
+    返回本轮实际重挂止损的笔数。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT t.id, t.symbol, t.direction, t.open_ts, t.open_price, "
+            "       t.sl_pct, t.tr_pct, t.protective_orders, t.signal_type, "
+            "       (SELECT MAX(k.high_px) FROM biz.asset_klines k "
+            "         WHERE k.symbol = t.symbol AND k.interval = '1h' "
+            # peak 起点 = 事件收盘时刻（event_bar_ts + 1h），对齐回测 peak_min_t：
+            # open_ts 是成交时刻（永远不在整点），若直接 >= open_ts 会把入场后第一根
+            # 1h bar（open_time=整点 < open_ts）排除 → trail 晚生效 1h、peak 少一根。
+            # 无 event_bar_ts 的存量单退回到 open_ts 向下取整到小时。
+            "           AND k.open_time >= COALESCE(t.event_bar_ts + interval '1 hour', "
+            "                                       date_trunc('hour', t.open_ts)) "
+            "           AND k.open_time + interval '1 hour' <= NOW() "
+            "       ) AS peak_1h "
+            "FROM biz.v2_trade_log t "
+            "WHERE t.close_ts IS NULL AND t.exit_order_id IS NULL "
+            "  AND t.origin = 'bot' "
+            "  AND COALESCE(t.protective_orders->'trailing_stop'->>'mode', '') = 'hourly_lag' "
+            "ORDER BY t.open_ts")
+        rows = [dict(zip([d.name for d in cur.description], r)) for r in cur.fetchall()]
+    n = 0
+    for t in rows:
+        try:
+            amt = client.get_position_amt(t["symbol"])
+            if abs(amt) <= 0:
+                continue  # 已平仓，交给 _reconcile_closed 回填
+
+            direction = "long" if str(t["direction"]).upper() == "LONG" else "short"
+            entry = float(t["open_price"] or 0)
+            if entry <= 0:
+                continue
+            sl_pct = float(t.get("sl_pct") or 0.15)
+            tr_pct = float(t.get("tr_pct") or 0.03)
+
+            prot = t.get("protective_orders") or {}
+            sl = prot.get("stop_loss") or {}
+            cur_stop = float(sl.get("triggerPrice") or sl.get("stopPrice") or 0)
+
+            # ── 目标触发价计算 ──
+            elapsed = datetime.now(timezone.utc) - t["open_ts"]
+            elapsed_h = elapsed.total_seconds() / 3600.0
+
+            # 基础：硬止损兜底线
+            if direction == "long":
+                base_stop = entry * (1 - sl_pct)
+            else:
+                base_stop = entry * (1 + sl_pct)
+            target_stop = base_stop
+
+            # 首小时免疫：防线 = 入场时挂的 EMA 初始线（或回退硬止损，见
+            # ema_init_stop_line）。target 下限保持硬止损不变、只上移——
+            # EMA 线比 target 高时幂等检查自然不重挂，EMA 线得以保留
+            if elapsed_h >= 1.0:
+                peak_1h = float(t.get("peak_1h") or 0)
+                if peak_1h > 0:
+                    # 每小时滞后线：入场后已收盘 1h peak × (1 - TR%)
+                    if direction == "long":
+                        trail_stop = peak_1h * (1 - tr_pct)
+                        if trail_stop > target_stop:
+                            target_stop = trail_stop
+                    else:
+                        trail_stop = peak_1h * (1 + tr_pct)
+                        if trail_stop < target_stop:
+                            target_stop = trail_stop
+
+            # 浮盈保本：峰值浮盈 ≥5% 时止损上移到成本覆盖线（entry ± 0.4%）
+            # 峰值口径 = 已收盘 1h peak（与 trail 同源，避免额外查询）；
+            # 要求价格已走到 peak_1h 才能触发保本（否则 peak 只是假顶）
+            peak_for_be = float(t.get("peak_1h") or 0) if elapsed_h >= 1.0 else 0
+            cur_px = client.get_price(t["symbol"])
+            if direction == "long" and peak_for_be > 0 and cur_px >= peak_for_be * 0.995:
+                pnl_pct = peak_for_be / entry - 1
+                if pnl_pct >= BREAKEVEN_TRIGGER_PCT / 100:
+                    be_stop = entry * (1 + BREAKEVEN_COST_COVER_PCT / 100)
+                    if be_stop > target_stop:
+                        target_stop = be_stop
+            elif direction == "short" and peak_for_be > 0 and cur_px <= peak_for_be * 1.005:
+                pnl_pct = 1 - peak_for_be / entry
+                if pnl_pct >= BREAKEVEN_TRIGGER_PCT / 100:
+                    be_stop = entry * (1 - BREAKEVEN_COST_COVER_PCT / 100)
+                    if be_stop < target_stop:
+                        target_stop = be_stop
+
+            # ── 幂等检查 ──
+            if cur_stop > 0:
+                # 0.5% 容差防 tick 抖动重复撤挂（每次撤挂会消耗 API 额度）
+                if direction == "long" and cur_stop >= target_stop * 0.995:
+                    continue
+                if direction == "short" and cur_stop <= target_stop * 1.005:
+                    continue
+
+            # ── 撤旧挂新 ──
+            try:
+                if sl.get("algoId"):
+                    client.cancel_algo_order(algo_id=sl["algoId"])
+                elif sl.get("clientAlgoId"):
+                    client.cancel_algo_order(client_algo_id=sl["clientAlgoId"])
+                elif sl.get("orderId"):
+                    client.cancel_order(t["symbol"], sl["orderId"])
+            except Exception as e:  # noqa: BLE001
+                print(f"  [hourly-trail] 撤旧止损失败 {t['symbol']}，跳过本轮: "
+                      f"{type(e).__name__}: {e}")
+                continue
+
+            try:
+                new_sl = client.place_sltp(t["symbol"], direction, entry, 0.0,
+                                           is_stop=True, stop_price=target_stop)
+            except Exception as e:  # noqa: BLE001
+                print(f"  [hourly-trail] 挂新止损失败 {t['symbol']} id={t['id']}: "
+                      f"{type(e).__name__}: {e}")
+                continue
+
+            new_sl["mode"] = "hourly_lag"
+            new_sl["target_stop"] = target_stop
+            new_sl["elapsed_hours"] = round(elapsed_h, 2)
+            new_sl["peak_1h"] = float(t.get("peak_1h") or 0)
+            prot["stop_loss"] = new_sl
+            _save_prot(conn, t["id"], prot)
+
+            if elapsed_h < 1.0:
+                why = "首小时免疫（仅硬止损）"
+            else:
+                why = f"trail线={float(t.get('peak_1h') or 0):.6g}×(1-{tr_pct:.0%})"
+            print(f"  [hourly-trail] {t['symbol']} 止损 {cur_stop:.6g}→{target_stop:.6g} "
+                  f"elapsed={elapsed_h:.1f}h {why}")
+            n += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"  [hourly-trail] {t['symbol']} 异常: {type(e).__name__}: {e}")
     return n
 
 
@@ -826,80 +1094,26 @@ def _save_prot(conn, tid, prot: dict) -> None:
             (json.dumps(prot), tid))
 
 
-def _restore_or_alert(client, conn, settings, t, prot, direction, entry, reason) -> bool:
-    """「撤旧止损成功、挂新止损失败」的兜底：立刻按原 sl_pct 恢复硬止损。
-
-    2026-10-12 DOSUSDT 事故根因（id=8，−45%）：持仓浮盈 +100% 触发保本上移 →
-    旧止损（0.3799）撤掉、新止损挂单失败被外层 except 吞掉 → DB 里仍留着**旧的
-    已失效记录**，看起来"有止损"，实则从 21:1x 一路裸奔到 21:45 崩盘。
-    本函数杜绝该假象：
-      - 恢复成功 → 写回原单，仓位重新有 -sl_pct 硬止损；
-      - 恢复失败 → stop_loss 写 `{"error": ...}` 标记（下轮自愈分支会重挂）+
-        邮件告警，绝不静默。
-    返回是否恢复成功。
-    """
-    sl_pct = float(t.get("sl_pct") or 0)
-    if sl_pct > 0:
-        try:
-            orig = client.place_sltp(t["symbol"], direction, entry, sl_pct * 100, is_stop=True)
-            orig["restored"] = True
-            prot["stop_loss"] = orig
-            _save_prot(conn, t["id"], prot)
-            print(f"  [ensure] 已恢复原硬止损 {t['symbol']} -{sl_pct*100:.0f}% "
-                  f"id={t['id']}（{reason}）")
-            return True
-        except Exception as e2:  # noqa: BLE001
-            err = f"{reason}；恢复原止损亦失败: {type(e2).__name__}: {e2}"
-    else:
-        err = f"{reason}；无 sl_pct 可恢复"
-    prot["stop_loss"] = {"error": err}
-    _save_prot(conn, t["id"], prot)
-    print(f"  [ensure] ⚠️ 裸奔告警 {t['symbol']} id={t['id']}: {err}")
-    _alert_protective_failed(
-        settings,
-        {"symbol": t["symbol"], "signal_type": t.get("signal_type") or "-",
-         "direction": t.get("direction"), "price_usd": entry},
-        err, "止损已撤且新挂/恢复均失败 → 该仓位当前无止损，下轮自愈分支将重挂")
-    return False
-
-
 def _ensure_protective(client, conn, settings) -> int:
-    """保护单自愈 + 浮盈保本止损（--watch 每轮调用）。
+    """保护单自愈补挂缺失硬止损（--watch 每轮调用）。
 
-    两类动作（幂等；单笔异常只打印不阻断整体；仅处理未平仓 bot 单）：
+    职责（2026-11-06 精简：浮盈保本已统一进 _hourly_trail_check）：
+      仅处理 **硬止损 STOP_MARKET 缺失或挂单失败** 的裸奔仓（protective_orders 里
+      stop_loss 是 error 或缺 algoId/clientAlgoId）→ 按 sl_pct 重新补挂（Close-All）。
+      存量「按数量」SL（closePosition=false）一并重挂为 Close-All，一次性收敛。
+      trailing_stop.mode 标注尊重原值：新单默认 hourly_lag，存量 software 保持不变。
 
-    1. 自愈补挂：**硬止损（STOP_MARKET）** 缺失或挂单失败（protective_orders 里
-       stop_loss 是 error 或缺 orderId，如子账户 -4120 历史裸奔单）→ 按 sl_pct 重新
-       补挂（binance_futures 已走 Algo Order API）。部署后首轮即给存量裸奔仓补挂 SL。
-       存量「按数量」SL（closePosition=false，仓位页不显示止损价）一并重挂为 Close-All。
-       **跟踪止盈由软件 TR 接管（_trail_check，峰值=入场后已收盘 5m/15m/1h bar 的
-       max high，回调 tr_pct 触发），不再挂原生 TRAILING_STOP_MARKET** —— 2026-10-12 对齐回测：
-       回测峰值从「入场后 bar 的 high」累积、实盘原生 TR 从「入场价」激活，导致
-       「入场即回调≥3%再突破」的币实盘被 TR 打掉而回测吃到突破，故改用软件复刻回测。
+    为什么浮盈保本挪走：它需要「撤旧→挂新」不是原子操作（同持仓侧只允许一张
+    closePosition 单），且挂新失败时需 `_restore_or_alert` 紧急恢复——这条链路
+    恰好与「每小时滞后上移」走同一张 STOP_MARKET，合并进 _hourly_trail_check
+    后只需一个函数维护触发价，不再需要单独的恢复兜底。
 
-    2. 浮盈保本：硬止损已就绪且**入场后峰值浮盈** ≥ BREAKEVEN_TRIGGER_PCT% → 撤旧止损、
-       把硬止损上移到入场价 ± BREAKEVEN_COST_COVER_PCT（覆盖手续费+滑点的净保本线），
-       锁盈利防跳空。浮盈用「入场后 5m/15m/1h bar 的最高价」（不是轮询时刻瞬时价，
-       瞬时价会漏掉插针）；且仅当当前价仍在保本线盈利侧才上移（否则挂出即触发）。
-       幂等：止损触发价已不低于保本线则跳过。正常回撤由软件 TR
-       （峰值-3%）先兑现，保本止损只在跳空/闪崩跌破保本线时兜底。
-       ⚠️ 「撤旧→挂新」不是原子操作：币安同一持仓侧只允许一张 closePosition 单，
-       必须先撤后挂。故撤单失败即终止本次上移（旧单仍在）；**新单挂单失败则立刻恢复
-       原硬止损**，恢复失败写 error 标记 + 邮件告警（`_restore_or_alert`）——绝不
-       留下「DB 有止损记录、实际裸奔」的假象（2026-10-12 DOSUSDT −45% 事故）。
-
-    返回处理笔数。
+    返回本轮补挂笔数。
     """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, symbol, direction, signal_type, open_ts, open_price, "
-            "       sl_pct, tr_pct, protective_orders, "
-            "       (SELECT COALESCE(MAX(k.high_px), 0) FROM biz.asset_klines k "
-            "         WHERE k.symbol = t.symbol AND k.interval IN ('5m','15m','1h') "
-            "           AND k.open_time >= t.open_ts) AS peak_intra, "
-            "       (SELECT COALESCE(MIN(k.low_px), 1e18) FROM biz.asset_klines k "
-            "         WHERE k.symbol = t.symbol AND k.interval IN ('5m','15m','1h') "
-            "           AND k.open_time >= t.open_ts) AS trough_intra "
+            "       sl_pct, tr_pct, protective_orders "
             "FROM biz.v2_trade_log t "
             "WHERE close_ts IS NULL AND origin='bot' "
             "ORDER BY open_ts")
@@ -924,105 +1138,35 @@ def _ensure_protective(client, conn, settings) -> int:
             # （WUSDT id=5 实盘复现）→ 重挂为 Close-All，一次性收敛。
             sl_not_close_all = _prot_ok(sl) and sl.get("closePosition") is False
 
-            # ── 1) 自愈补挂缺失硬止损（TR 由 _trail_check 软件接管，不补原生单）──
-            if sl_missing or sl_not_close_all:
-                # 清残留挂单（避免同侧多张 closePosition 单 -4045 冲突）
-                _cancel_protective_orders(client, t["symbol"], prot)
-                new_prot = prot.copy()
-                # 保留已生效的原生 TR 记录（algoId 等）；仅当无有效原生 TR 时才标注软件 TR 接管
-                if not _prot_ok(prot.get("trailing_stop") or {}):
-                    new_prot["trailing_stop"] = {"mode": "software",
-                                                 "tr_pct": float(t.get("tr_pct") or 0)}
-                if (t.get("sl_pct") or 0) > 0:
-                    try:
-                        r = client.place_sltp(t["symbol"], direction, entry,
-                                              float(t["sl_pct"]) * 100, is_stop=True)
-                    except Exception as e:  # noqa: BLE001
-                        # 补挂失败：写 error 标记（下轮本分支重试），**绝不保留
-                        # "看起来有止损"的旧记录**（否则下一轮会被判为有效而永不重挂）。
-                        new_prot["stop_loss"] = {
-                            "error": f"recover_place_failed: {type(e).__name__}: {e}"}
-                        _save_prot(conn, t["id"], new_prot)
-                        print(f"  [ensure] 补挂硬止损失败 {t['symbol']} id={t['id']}: "
-                              f"{type(e).__name__}: {e}")
-                        continue  # 留待下轮重试
-                    new_prot["stop_loss"] = r
-                    _save_prot(conn, t["id"], new_prot)
-                    why = "缺失" if sl_missing else "改 Close-All"
-                    print(f"  [ensure] 补挂硬止损 {t['symbol']} id={t['id']} "
-                          f"原因={why} sl=ok（TR=软件接管）")
-                    n += 1
-                continue  # 本轮先补挂，浮盈保本下轮评估
+            if not (sl_missing or sl_not_close_all):
+                continue  # 止损正常，_hourly_trail_check 管上移
 
-            # ── 2) 浮盈保本止损 ──
-            # 浮盈口径 = 入场后已记录的峰值价（5m/15m/1h bar 的 high），不是轮询时刻
-            # 瞬时价——瞬时价会漏掉插针（WUSDT id=5：07:25 插针 +5.32% 后回落至 +3~4%，
-            # 保本损始终不触发）。空单用最低价。
-            cur_px = client.get_price(t["symbol"])
-            peak_intra = float(t.get("peak_intra") or 0)
-            trough_intra = float(t.get("trough_intra") or 0)
-            if direction == "long":
-                ref_px = peak_intra if peak_intra > 0 else cur_px
-                pnl = ref_px / entry - 1
-            else:
-                ref_px = trough_intra if 0 < trough_intra < 1e17 else cur_px
-                pnl = 1 - ref_px / entry
-            if pnl < BREAKEVEN_TRIGGER_PCT / 100:
-                continue
-            # 保本线 = 入场价 ± 成本覆盖（0.4%：0.1% 双边 taker + 0.3% 滑点预算），
-            # 不是 0%（纯保本）——市价止损触发有滑点+手续费，停在入场价实际是亏。
-            target_stop = (entry * (1 + BREAKEVEN_COST_COVER_PCT / 100)) if direction == "long" \
-                else (entry * (1 - BREAKEVEN_COST_COVER_PCT / 100))
-            # 仅在当前价处于保本线盈利侧才上移止损：否则挂出即触发市价止损（追保平仓）。
-            if direction == "long" and cur_px <= target_stop:
-                continue
-            if direction == "short" and cur_px >= target_stop:
-                continue
-            # Algo 条件单的触发价字段是 triggerPrice（closePosition 单的 stopPrice 恒为 0），
-            # 只看 stopPrice 会导致幂等判断永远落空 → 每轮撤单重挂止损（churn）。
-            cur_stop = float(sl.get("triggerPrice") or sl.get("stopPrice") or 0)
-            if cur_stop and ((direction == "long" and cur_stop >= target_stop) or
-                             (direction == "short" and cur_stop <= target_stop)):
-                continue  # 已到保本线，幂等跳过
-            # 撤旧止损（algo 单按 algoId/clientAlgoId 撤，普通单按 orderId 撤）。
-            # ⚠️ 撤单失败 → 旧止损仍在挂，**本轮放弃上移**：继续挂新单会与旧
-            # closePosition 单 -4130 冲突，且会把「旧单仍有效」的真实状态搅乱。
-            try:
-                if sl.get("algoId"):
-                    client.cancel_algo_order(algo_id=sl["algoId"])
-                elif sl.get("clientAlgoId"):
-                    client.cancel_algo_order(client_algo_id=sl["clientAlgoId"])
-                elif sl.get("orderId"):
-                    client.cancel_order(t["symbol"], sl["orderId"])
-            except Exception as e:  # noqa: BLE001
-                print(f"  [ensure] 撤旧止损失败 {t['symbol']}，跳过本次保本上移: "
-                      f"{type(e).__name__}: {e}")
-                continue
-            # 挂保本止损（保留 TR 不动）；stop_price 直传目标触发价。
-            # 不传 quantity → Close-All（仓位页可见 + 自动跟随仓位数量）。
-            # ⚠️ 此处**旧止损已被撤掉**：挂单失败即裸奔，必须立刻恢复原硬止损
-            # （DOSUSDT 事故就是这一步失败被吞掉、裸奔到崩盘 −45%）。
-            try:
-                new_sl = client.place_sltp(t["symbol"], direction, entry, 0.0,
-                                           is_stop=True, stop_price=target_stop)
-            except Exception as e:  # noqa: BLE001
-                print(f"  [ensure] 保本止损挂单失败 {t['symbol']} id={t['id']}: "
-                      f"{type(e).__name__}: {e}")
-                _restore_or_alert(client, conn, settings, t, prot, direction, entry,
-                                  f"保本上移({cur_stop}→{target_stop:.6g})挂单失败: "
-                                  f"{type(e).__name__}: {e}")
-                continue
-            new_sl["breakeven"] = True
-            new_sl["breakeven_trigger_pct"] = BREAKEVEN_TRIGGER_PCT
-            new_sl["breakeven_ref"] = "peak_intra"
-            new_sl["peak_price"] = ref_px
-            new_sl["moved_from_pct"] = t.get("sl_pct")
-            prot["stop_loss"] = new_sl
-            _save_prot(conn, t["id"], prot)
-            print(f"  [ensure] 浮盈保本 {t['symbol']} 峰值浮盈={pnl*100:+.1f}% "
-                  f"(峰值价 {ref_px:.6g} 现价 {cur_px:.6g}) "
-                  f"止损 {cur_stop}→{target_stop:.6g} id={t['id']}")
-            n += 1
+            # 清残留挂单（避免同侧多张 closePosition 单 -4045 冲突）
+            _cancel_protective_orders(client, t["symbol"], prot)
+            new_prot = prot.copy()
+            # trailing_stop.mode 标注：尊重原值（hourly_lag / software）；
+            # 完全缺失（历史原生 TR 已移除）时默认 hourly_lag（新逻辑）
+            if not isinstance(trl, dict) or not trl.get("mode"):
+                new_prot["trailing_stop"] = {"mode": "hourly_lag",
+                                             "tr_pct": float(t.get("tr_pct") or 0)}
+            if (t.get("sl_pct") or 0) > 0:
+                try:
+                    r = client.place_sltp(t["symbol"], direction, entry,
+                                          float(t["sl_pct"]) * 100, is_stop=True)
+                except Exception as e:  # noqa: BLE001
+                    # 补挂失败：写 error 标记（下轮本分支重试），**绝不保留
+                    # "看起来有止损"的旧记录**（否则下一轮会被判为有效而永不重挂）。
+                    new_prot["stop_loss"] = {
+                        "error": f"recover_place_failed: {type(e).__name__}: {e}"}
+                    _save_prot(conn, t["id"], new_prot)
+                    print(f"  [ensure] 补挂硬止损失败 {t['symbol']} id={t['id']}: "
+                          f"{type(e).__name__}: {e}")
+                    continue  # 留待下轮重试
+                new_prot["stop_loss"] = r
+                _save_prot(conn, t["id"], new_prot)
+                why = "缺失" if sl_missing else "改 Close-All"
+                print(f"  [ensure] 补挂硬止损 {t['symbol']} id={t['id']} 原因={why}")
+                n += 1
         except Exception as e:  # noqa: BLE001
             print(f"  [ensure] {t['symbol']} 异常: {type(e).__name__}: {e}")
     return n
@@ -1159,10 +1303,13 @@ def main() -> int:
                                      settings.binance_fapi_base_url, not live),
                                 )
             if args.watch:
-                # 保护单自愈（补挂缺失/失败硬止损，部署后即给存量裸奔仓补挂）+ 浮盈保本止损
+                # 保护单自愈（补挂缺失/失败硬止损；部署后即给存量裸奔仓补挂）
                 with get_connection(settings.database_url) as conn:
                     _ensure_protective(client, conn, settings)
-                # 软件跟踪止盈（对齐回测 1h bar 峰值回撤：峰值=入场后已收盘 bar max high）
+                # 主出场逻辑：每小时滞后止损 + 浮盈保本上移（2026-11-06 替代原生 TRAILING）
+                with get_connection(settings.database_url) as conn:
+                    _hourly_trail_check(client, conn, settings)
+                # 软件跟踪止盈（仅处理存量 mode='software' 的裸奔仓，已被 hourly_lag 过滤）
                 with get_connection(settings.database_url) as conn:
                     _trail_check(client, conn)
                 # 到期平仓（对齐回测：持有 N 小时未触发保护单 → 市价了结）

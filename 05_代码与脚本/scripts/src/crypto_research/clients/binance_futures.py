@@ -476,6 +476,7 @@ class BinanceFuturesClient:
         entry_price: float | None = None,
         leverage: int = 5,
         stop_loss_pct: float = 0.0,
+        stop_price: float | None = None,
         take_profit_pct: float = 0.0,
         trailing_stop_pct: float = 0.0,
         trailing_activation_pct: float = 0.0,
@@ -486,6 +487,9 @@ class BinanceFuturesClient:
         - direction=short -> SELL（position_side=SHORT）
         - entry_price 为空时用市价单，否则用限价单挂在进场价
         - 自动设置杠杆；可选附带固定止损/止盈/跟踪止盈
+        - stop_price：初始止损直传触发价（如 EMA 初始止损线）——与 stop_loss_pct
+          推导值取**更紧者**（多单 max / 空单 min），保证 pct 风险帽不被突破；
+          只传 pct 不传线时行为不变
         - 传入的止损、跟踪止盈、止盈**全部挂出**（互不排斥）：固定止损走
           STOP_MARKET(closePosition)，跟踪止盈走 TRAILING_STOP_MARKET
           （quantity + 可选 activation_price，TR 不支持 closePosition）
@@ -551,8 +555,22 @@ class BinanceFuturesClient:
         p_errs: list[str] = []
         if stop_loss_pct and stop_loss_pct > 0:
             try:
+                # stop_price 与 pct 推导取更紧者（多单 max / 空单 min）：
+                # EMA 初始线比硬止损更紧才生效，硬止损作为风险帽始终兜底
+                trig = None
+                if stop_price is not None:
+                    cap = (entry_for_protect * (1 - stop_loss_pct / 100)
+                           if direction == "long"
+                           else entry_for_protect * (1 + stop_loss_pct / 100))
+                    trig = (max(float(stop_price), cap) if direction == "long"
+                            else min(float(stop_price), cap))
+                    # 价格瞬移防护（get_price 守卫与成交之间跳空）：触发价落到入场价
+                    # 错误一侧会成交即触发市价卖出 → 回退 pct 推导
+                    if ((direction == "long" and trig >= entry_for_protect)
+                            or (direction == "short" and trig <= entry_for_protect)):
+                        trig = None
                 sl = self.place_sltp(symbol, direction, entry_for_protect, stop_loss_pct,
-                                     is_stop=True)
+                                     is_stop=True, stop_price=trig)
                 result["_stop_loss"] = sl
             except BinanceFuturesError as e:
                 result["_stop_loss"] = {"error": str(e)}

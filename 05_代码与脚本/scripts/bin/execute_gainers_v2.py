@@ -375,6 +375,16 @@ EMA_INIT_MIN_GAP = 0.03    # 线须低于现价 ≥3%，否则回退固定 SL（
                            # 3% = 原生 TR 被甩车的回踩幅度）
 EMA_INIT_MIN_BARS = 60     # 1h 收盘样本不足 → 回退固定 SL
 
+# ── EMA7 线破出场（2026-11-09 用户拍板：「线破即市价出场」用 EMA7 均线）────────
+# 取代 2026-11-06 的「每小时 1h peak×(1-TR%) 重挂止损」：重挂是「撤旧→挂新」非原子
+# 操作，线常已被现价击穿 → 挂新被币安以「触发价立即触发」拒绝 → 撤了旧没挂上新，
+# 且失败不落库导致下一轮重复撤已撤的单永久卡死（实盘 IDOL #67 裸奔 5.5h 扛 -21%，
+# 全库 0 笔重挂落库）。改为：第 2 小时起每轮算 EMA7，现价破线 → 直接市价出场。
+# 交易所侧初始止损（EMA20 线 / 15% 风险帽）不再被 trail 撤走，常驻兜底跳空与
+# EMA 计算失败（fail-safe：线算不出就不出手，只靠兜底止损）。
+EMA_TRAIL_PERIOD = 7
+EMA_TRAIL_MIN_BARS = 30    # 已收盘 1h 样本不足 → 本轮跳过（交易所止损兜底）
+
 
 def ema_init_stop_line(settings, symbol: str, event_bar_ts: str | None) -> float | None:
     """首小时初始止损线（EMA20×(1-2%)），守卫不满足返回 None（调用方回退固定 SL）。
@@ -414,6 +424,38 @@ def ema_init_stop_line(settings, symbol: str, event_bar_ts: str | None) -> float
         return ema * (1 - EMA_INIT_BUF)
     except Exception as e:  # noqa: BLE001 — EMA 线故障不应阻断下单（回退固定 SL）
         print(f"  [ema-init] {symbol} 计算 EMA 止损线失败(fail-open→固定SL): "
+              f"{type(e).__name__}: {e}")
+        return None
+
+
+def ema_trail_line(settings, symbol: str) -> float | None:
+    """每轮跟踪出场线：已收盘 1h close 的 EMA7（裸线，无 buffer）。
+
+    与 ema_init_stop_line 的分工：
+      - init（EMA20×(1-2%)）：入场那刻写死的首小时初始止损
+      - trail（EMA7 裸线）：逐轮跟随，现价破线 → 市价出场（exit_reason='trail'）
+    样本不足或查询失败返回 None → 调用方本轮不出手（交易所侧风险帽止损兜底）。
+    """
+    try:
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT close_px FROM ("
+                    "  SELECT close_px, ROW_NUMBER() OVER (ORDER BY open_time DESC) rn"
+                    "    FROM biz.asset_klines"
+                    "   WHERE symbol=%s AND interval='1h' AND close_px > 0"
+                    "     AND open_time + interval '1 hour' <= NOW()"
+                    ") x WHERE rn <= 60", (symbol,))
+                closes = [float(r[0]) for r in cur.fetchall()][::-1]
+        if len(closes) < EMA_TRAIL_MIN_BARS:
+            return None
+        ema = sum(closes[:EMA_TRAIL_PERIOD]) / EMA_TRAIL_PERIOD
+        alpha = 2.0 / (EMA_TRAIL_PERIOD + 1)
+        for c in closes[EMA_TRAIL_PERIOD:]:
+            ema = ema + alpha * (c - ema)
+        return ema
+    except Exception as e:  # noqa: BLE001 — 线故障不出手，兜底止损仍在交易所
+        print(f"  [ema-trail] {symbol} 计算 EMA7 出场线失败(本轮跳过): "
               f"{type(e).__name__}: {e}")
         return None
 
@@ -781,25 +823,26 @@ def _trail_check(client, conn) -> int:
 
 
 def _hourly_trail_check(client, conn, settings) -> int:
-    """每小时滞后止损 + 浮盈保本止损（主出场逻辑，--watch 每轮调用）。
+    """EMA7 线破市价出场 + 浮盈保本止损（主出场逻辑，--watch 每轮调用）。
 
-    出场规则（对齐 _hourly_lag.py 5m 回测，trail3%/SL10% +3.18%，现状 +0.85% 的 3.7 倍）：
-      - 入场后首小时**只保留入场时的初始止损**（EMA20 线 / 回退 -SL%，2026-11-06 起），
-        免疫 3% 回踩甩车
-      - 首小时起，每轮按「入场后已收盘 1h bar 的 MAX(high) × (1-TR%)」算跟踪线
+    出场规则（2026-11-09 用户拍板「线破即市价出场，线用 1h EMA7」）：
+      - 入场后首小时**只保留入场时的初始止损**（EMA20 线 / 风险帽 -SL%，免疫回踩甩车）
+      - 第 2 小时起每轮算「已收盘 1h close 的 EMA7 裸线」（ema_trail_line），
+        现价破线（多 ≤ 线 / 空 ≥ 线）→ 撤保护单 + 市价全平，exit_reason='trail' 落库
       - 浮盈 ≥5% 时止损上移到成本覆盖线（entry ± 0.4%），跳空也不亏
-      - 同一张 STOP_MARKET 只往上移不回撤（幂等；0.5% 容差防 tick 抖动）
+      - 交易所侧初始止损（EMA20 线 / 15% 风险帽）**不再被 trail 撤走**，常驻兜底；
+        fail-safe：EMA 样本不足/查询失败 → 本轮不出手，只靠兜底止损
 
-    与旧逻辑的差异与根因：
-      - 旧：Binance TRAILING_STOP_MARKET callbackRate=3% act=0 → 3,131 笔 100% 被入场几分钟内
-        的正常 3% 回踩甩下车（原生 TR 从入场价激活，回测峰值从入场后 bar high 累积，两者
-        触发价差了整整"入场到首根 bar"的涨幅）
-      - 新：回测结论明确「等 1h K 线跑完再决定止损位」是唯一能让期望提升的路径——
-        每小时看一次峰值，入场即回调 3% 不会被打掉，趋势币能吃到突破
+    弃用「1h peak×(1-TR%) 每小时重挂」的根因（2026-11-08 IDOL #67 事故）：
+      重挂是非原子的撤旧→挂新——线常已被现价击穿 → 挂新被币安以「触发价立即触发」
+      拒绝（-4021）→ 撤了旧没挂上新且失败不落库 → 下轮重复撤已撤的单（-2011）永久
+      卡死、裸奔 5.5h 扛 -21%；_ensure_protective 只看 DB algoId 存在，对「交易所
+      已撤」全盲。改为市价出场后不存在「挂新失败」这一环；仅保本上移仍需撤旧挂新，
+      已加 -2011/-2013 容忍 + 挂新失败写 error 标记触发 _ensure_protective 自愈。
       - 仅管 protective_orders.trailing_stop.mode='hourly_lag' 的单；存量 mode='software'
         由 _trail_check 处理，互不干扰
 
-    返回本轮实际重挂止损的笔数。
+    返回本轮线破出场 + 实际重挂止损的笔数合计。
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -833,16 +876,42 @@ def _hourly_trail_check(client, conn, settings) -> int:
             if entry <= 0:
                 continue
             sl_pct = float(t.get("sl_pct") or 0.15)
-            tr_pct = float(t.get("tr_pct") or 0.03)
 
             prot = t.get("protective_orders") or {}
             sl = prot.get("stop_loss") or {}
             cur_stop = float(sl.get("triggerPrice") or sl.get("stopPrice") or 0)
 
-            # ── 目标触发价计算 ──
+            # ── 当前价与持仓时长 ──
+            cur_px = client.get_price(t["symbol"])
             elapsed = datetime.now(timezone.utc) - t["open_ts"]
             elapsed_h = elapsed.total_seconds() / 3600.0
 
+            # ── EMA7 线破 → 撤保护单 + 市价全平（第 2 小时起，2026-11-09 拍板）──
+            if elapsed_h >= 1.0:
+                line = ema_trail_line(settings, t["symbol"])
+                if line is not None and line > 0:
+                    broken = (cur_px <= line) if direction == "long" else (cur_px >= line)
+                    if broken:
+                        _cancel_protective_orders(client, t["symbol"], prot)
+                        pos_side = "LONG" if direction == "long" else "SHORT"
+                        close_side = "SELL" if direction == "long" else "BUY"
+                        r = client.place_order(symbol=t["symbol"], side=close_side,
+                                               order_type="MARKET", close_position=True,
+                                               position_side=pos_side)
+                        oid = r.get("orderId")
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "UPDATE biz.v2_trade_log SET exit_order_id=%s, "
+                                "exit_reason='trail', close_resp=%s::jsonb, "
+                                "updated_at=NOW() WHERE id=%s",
+                                (oid, json.dumps(r), t["id"]))
+                        print(f"  [hourly-trail] {t['symbol']} EMA7 线破出场 "
+                              f"cur={cur_px:.6g} line={line:.6g} "
+                              f"elapsed={elapsed_h:.1f}h orderId={oid}")
+                        n += 1
+                        continue
+
+            # ── 目标止损（仅浮盈保本上移；交易所侧初始止损常驻不撤）──
             # 基础：硬止损兜底线
             if direction == "long":
                 base_stop = entry * (1 - sl_pct)
@@ -850,27 +919,10 @@ def _hourly_trail_check(client, conn, settings) -> int:
                 base_stop = entry * (1 + sl_pct)
             target_stop = base_stop
 
-            # 首小时免疫：防线 = 入场时挂的 EMA 初始线（或回退硬止损，见
-            # ema_init_stop_line）。target 下限保持硬止损不变、只上移——
-            # EMA 线比 target 高时幂等检查自然不重挂，EMA 线得以保留
-            if elapsed_h >= 1.0:
-                peak_1h = float(t.get("peak_1h") or 0)
-                if peak_1h > 0:
-                    # 每小时滞后线：入场后已收盘 1h peak × (1 - TR%)
-                    if direction == "long":
-                        trail_stop = peak_1h * (1 - tr_pct)
-                        if trail_stop > target_stop:
-                            target_stop = trail_stop
-                    else:
-                        trail_stop = peak_1h * (1 + tr_pct)
-                        if trail_stop < target_stop:
-                            target_stop = trail_stop
-
             # 浮盈保本：峰值浮盈 ≥5% 时止损上移到成本覆盖线（entry ± 0.4%）
-            # 峰值口径 = 已收盘 1h peak（与 trail 同源，避免额外查询）；
+            # 峰值口径 = 已收盘 1h peak（SQL 子查询，避免额外查询）；
             # 要求价格已走到 peak_1h 才能触发保本（否则 peak 只是假顶）
             peak_for_be = float(t.get("peak_1h") or 0) if elapsed_h >= 1.0 else 0
-            cur_px = client.get_price(t["symbol"])
             if direction == "long" and peak_for_be > 0 and cur_px >= peak_for_be * 0.995:
                 pnl_pct = peak_for_be / entry - 1
                 if pnl_pct >= BREAKEVEN_TRIGGER_PCT / 100:
@@ -901,16 +953,29 @@ def _hourly_trail_check(client, conn, settings) -> int:
                 elif sl.get("orderId"):
                     client.cancel_order(t["symbol"], sl["orderId"])
             except Exception as e:  # noqa: BLE001
-                print(f"  [hourly-trail] 撤旧止损失败 {t['symbol']}，跳过本轮: "
-                      f"{type(e).__name__}: {e}")
-                continue
+                msg = f"{type(e).__name__}: {e}"
+                # 旧单已死（-2011 重复撤 / -2013 不存在 / Unknown order）→ 继续挂新；
+                # 其他错误旧单生死未知 → 跳过本轮，防双止损
+                if not any(k in msg for k in ("-2011", "-2013", "Unknown order",
+                                              "does not exist")):
+                    print(f"  [hourly-trail] 撤旧止损失败 {t['symbol']}，跳过本轮: {msg}")
+                    continue
+                print(f"  [hourly-trail] 旧止损已不存在 {t['symbol']}，继续挂新 "
+                      f"({msg[:60]})")
 
             try:
                 new_sl = client.place_sltp(t["symbol"], direction, entry, 0.0,
                                            is_stop=True, stop_price=target_stop)
             except Exception as e:  # noqa: BLE001
-                print(f"  [hourly-trail] 挂新止损失败 {t['symbol']} id={t['id']}: "
-                      f"{type(e).__name__}: {e}")
+                # 挂新失败（旧单已撤）→ 写 error 标记落库：_prot_ok 见 error 键即 False，
+                # 下一轮 _ensure_protective 按 sl_pct 兜底补挂（自愈，不再裸奔卡死）
+                print(f"  [hourly-trail] 挂新止损失败 {t['symbol']} id={t['id']}，"
+                      f"写 error 标记待下轮自愈: {type(e).__name__}: {e}")
+                prot["stop_loss"] = {
+                    "error": f"hourly_trail_place_failed: {type(e).__name__}: {e}",
+                    "target_stop": target_stop,
+                }
+                _save_prot(conn, t["id"], prot)
                 continue
 
             new_sl["mode"] = "hourly_lag"
@@ -921,9 +986,12 @@ def _hourly_trail_check(client, conn, settings) -> int:
             _save_prot(conn, t["id"], prot)
 
             if elapsed_h < 1.0:
-                why = "首小时免疫（仅硬止损）"
+                why = "首小时免疫（仅初始止损）"
+            elif (direction == "long" and target_stop > base_stop) or (
+                    direction == "short" and target_stop < base_stop):
+                why = f"浮盈保本上移（peak={float(t.get('peak_1h') or 0):.6g}）"
             else:
-                why = f"trail线={float(t.get('peak_1h') or 0):.6g}×(1-{tr_pct:.0%})"
+                why = "止损补挂（原单缺失/error 自愈）"
             print(f"  [hourly-trail] {t['symbol']} 止损 {cur_stop:.6g}→{target_stop:.6g} "
                   f"elapsed={elapsed_h:.1f}h {why}")
             n += 1
@@ -1306,7 +1374,7 @@ def main() -> int:
                 # 保护单自愈（补挂缺失/失败硬止损；部署后即给存量裸奔仓补挂）
                 with get_connection(settings.database_url) as conn:
                     _ensure_protective(client, conn, settings)
-                # 主出场逻辑：每小时滞后止损 + 浮盈保本上移（2026-11-06 替代原生 TRAILING）
+                # 主出场逻辑：1h EMA7 线破市价出场 + 浮盈保本上移（2026-11-09 拍板）
                 with get_connection(settings.database_url) as conn:
                     _hourly_trail_check(client, conn, settings)
                 # 软件跟踪止盈（仅处理存量 mode='software' 的裸奔仓，已被 hourly_lag 过滤）

@@ -150,15 +150,6 @@ class BinanceFuturesClient:
         data = self._public_request("/fapi/v1/ticker/price", {"symbol": symbol})
         return float(data["price"])
 
-    def get_klines(self, symbol: str, interval: str = "5m", limit: int = 21) -> list[list]:
-        """公开 K 线（GET /fapi/v1/klines），返回 Binance 原始数组列表。
-
-        每根：[open_time, open, high, low, close, volume, close_time,
-               quote_vol, trades, ...]，**最后一根为进行中 bar**（实时更新）。
-        """
-        return self._public_request("/fapi/v1/klines", {
-            "symbol": symbol, "interval": interval, "limit": limit})
-
     def get_exchange_info(self, symbol: str) -> dict:
         """返回 symbol 的过滤规则（缓存）。
 

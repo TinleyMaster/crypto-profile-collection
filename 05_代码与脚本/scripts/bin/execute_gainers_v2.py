@@ -96,13 +96,6 @@ MAX_SIGNAL_AGE_H = 2
 BREAKEVEN_TRIGGER_PCT = 5.0        # 浮盈 ≥5% 触发止损上移
 BREAKEVEN_COST_COVER_PCT = 0.4      # 保本线：入场价 +0.4%（多单）/ −0.4%（空单），覆盖手续费+滑点
 
-# 5m 放量闪崩熔断（2026-11-10 用户拍板：**等 5m 收盘确认** + 成交量大幅放大，入场即生效）
-# 最后一根**已收盘** 5m bar 相对开盘价跌（多单反向）≥8% 且成交量 ≥ 前 20 根 5m 均量 ×5
-# → 市价按数量平仓（exit_reason='crash_5m'）。收盘才判，缩量插针/盘中噪声不触发，
-# 由交易所侧止损与 EMA 线破兜底。60s 轮询，收盘后最晚 ~1 分钟内触发。
-CRASH_5M_DROP_PCT = 0.08       # 跌幅阈值（单根 5m 已收盘 bar 相对开盘价）
-CRASH_5M_VOL_RATIO = 5.0       # 量比阈值（信号 bar 成交量 / 其前 20 根 5m 均量）
-
 
 def _fmt(t: datetime) -> str:
     return t.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
@@ -851,65 +844,6 @@ def _trail_check(client, conn) -> int:
     return n
 
 
-def _crash_5m_check(client, conn) -> int:
-    """5m 放量闪崩熔断（入场即生效，2026-11-10 用户拍板，收盘确认口径）。
-
-    规则：最后一根**已收盘** 5m bar 相对开盘价跌（多单）≥ CRASH_5M_DROP_PCT(8%)
-    **且** 成交量 ≥ 其前 20 根 5m 均量 × CRASH_5M_VOL_RATIO(5) → 市价按数量平仓，
-    exit_reason='crash_5m'。等收盘才判（非盘中）：插针回升不触发，整根确认后最晚
-    ~1 分钟内（60s 轮询）执行；放量确认是用户明确要求，缩量阴跌不触发。
-    - 时序与其余出场一致：先平仓成功 → 再撤保护单 → 写库，失败下轮重试；
-    - 已收盘 bar 不足 21 根（新上市）/ 量比数据异常 → 跳过（交易所侧止损与 EMA 线破兜底）；
-    - 信号 bar 收盘后整根 bar 期间每轮都会命中（持仓已平或 exit_order_id 已写则不再入列）。
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT id, symbol, direction, protective_orders FROM biz.v2_trade_log "
-            "WHERE close_ts IS NULL AND exit_order_id IS NULL AND origin = 'bot'")
-        rows = [dict(zip([d.name for d in cur.description], r)) for r in cur.fetchall()]
-    n = 0
-    for t in rows:
-        try:
-            # limit=22：最后 1 根是进行中 bar（不用），信号取倒数第 2 根（刚收盘），
-            # 其前 20 根已收盘 bar 作均量窗
-            kl = client.get_klines(t["symbol"], "5m", limit=22)
-            if not isinstance(kl, list) or len(kl) < 22:
-                continue  # 已收盘 5m 历史不足（新上市），交易所侧止损兜底
-            sig_bar, base_bars = kl[-2], kl[-22:-2]
-            o = float(sig_bar[1])
-            c = float(sig_bar[4])
-            qv = float(sig_bar[7])
-            avg_qv = sum(float(x[7]) for x in base_bars) / len(base_bars)
-            if o <= 0 or avg_qv <= 0:
-                continue
-            drop = c / o - 1  # 多单为负
-            is_long = str(t["direction"]).upper() == "LONG"
-            hit = (drop <= -CRASH_5M_DROP_PCT) if is_long else (drop >= CRASH_5M_DROP_PCT)
-            vol_ratio = qv / avg_qv
-            if not (hit and vol_ratio >= CRASH_5M_VOL_RATIO):
-                continue
-            amt = client.get_position_amt(t["symbol"])
-            if abs(amt) <= 0:
-                continue  # 已平仓，交给 _reconcile_closed 回填
-            pos_side = "LONG" if amt > 0 else "SHORT"
-            close_side = "SELL" if amt > 0 else "BUY"
-            r = client.place_order(symbol=t["symbol"], side=close_side, order_type="MARKET",
-                                   quantity=abs(amt), position_side=pos_side)
-            _cancel_protective_orders(client, t["symbol"], t.get("protective_orders"))
-            oid = r.get("orderId")
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE biz.v2_trade_log SET exit_order_id=%s, exit_reason='crash_5m', "
-                    "close_resp=%s::jsonb, updated_at=NOW() WHERE id=%s",
-                    (oid, json.dumps(r), t["id"]))
-            print(f"  [crash-5m] {t['symbol']} 放量闪崩熔断: 已收盘5m bar {o:.6g}→{c:.6g} "
-                  f"({drop:+.1%}) 量比{vol_ratio:.1f}x → 市价平仓 orderId={oid}")
-            n += 1
-        except Exception as e:  # noqa: BLE001
-            print(f"  [crash-5m] {t['symbol']} 异常: {type(e).__name__}: {e}")
-    return n
-
-
 def _hourly_trail_check(client, conn, settings) -> int:
     """EMA7 线破市价出场 + 浮盈保本止损（主出场逻辑，--watch 每轮调用）。
 
@@ -917,7 +851,10 @@ def _hourly_trail_check(client, conn, settings) -> int:
       - 入场后首小时**只保留入场时的初始止损**（EMA20 线 / 风险帽 -SL%，免疫回踩甩车）
       - 第 2 小时起每轮算「已收盘 1h close 的 EMA7 裸线」（ema_trail_line），
         现价破线（多 ≤ 线 / 空 ≥ 线）→ 市价全平（quantity）→ 撤保护单 → exit_reason='trail' 落库
-      - 浮盈 ≥5% 时止损上移到成本覆盖线（entry ± 0.4%），跳空也不亏
+      - 浮盈 ≥5% 时止损上移到成本覆盖线（entry ± 0.4%），跳空也不亏；
+        **保本上移后**（本轮触发或此前已上移），每小时收盘的 EMA7 线值并入止损
+        目标（多单取更高/空单取更低，与保本线取更紧者；2026-11-10 用户拍板）——
+        交易所侧触线即出，进程挂了也生效；与上方软件线破出场互为兜底
       - 交易所侧初始止损（EMA20 线 / 15% 风险帽）**不再被 trail 撤走**，常驻兜底；
         fail-safe：EMA 样本不足/查询失败 → 本轮不出手，只靠兜底止损
 
@@ -925,8 +862,9 @@ def _hourly_trail_check(client, conn, settings) -> int:
       重挂是非原子的撤旧→挂新——线常已被现价击穿 → 挂新被币安以「触发价立即触发」
       拒绝（-4021）→ 撤了旧没挂上新且失败不落库 → 下轮重复撤已撤的单（-2011）永久
       卡死、裸奔 5.5h 扛 -21%；_ensure_protective 只看 DB algoId 存在，对「交易所
-      已撤」全盲。改为市价出场后不存在「挂新失败」这一环；仅保本上移仍需撤旧挂新，
-      已加 -2011/-2013 容忍 + 挂新失败写 error 标记触发 _ensure_protective 自愈。
+      已撤」全盲。改为市价出场后不存在「挂新失败」这一环；保本上移与保本后 EMA7
+      线止损上移仍需撤旧挂新，已加 -2011/-2013 容忍 + 挂新失败写 error 标记触发
+      _ensure_protective 自愈。
       - 仅管 protective_orders.trailing_stop.mode='hourly_lag' 的单；存量 mode='software'
         由 _trail_check 处理，互不干扰
 
@@ -975,6 +913,8 @@ def _hourly_trail_check(client, conn, settings) -> int:
             elapsed_h = elapsed.total_seconds() / 3600.0
 
             # ── EMA7 线破 → 市价全平（quantity）+ 撤保护单（第 2 小时起，2026-11-09 拍板）──
+            # 线每轮只算一次：既做线破判定，也供下方「保本后并入止损」复用
+            line = None
             if elapsed_h >= 1.0:
                 line = ema_trail_line(settings, t["symbol"])
                 if line is not None and line > 0:
@@ -1028,6 +968,28 @@ def _hourly_trail_check(client, conn, settings) -> int:
                     if be_stop < target_stop:
                         target_stop = be_stop
 
+            # ── 保本是否已生效：本轮峰值条件触发，或此前轮次已把止损移到保本线内侧 ──
+            if direction == "long":
+                be_line = entry * (1 + BREAKEVEN_COST_COVER_PCT / 100)
+                be_active = (target_stop >= be_line
+                             or (cur_stop > 0 and cur_stop >= be_line * 0.995))
+            else:
+                be_line = entry * (1 - BREAKEVEN_COST_COVER_PCT / 100)
+                be_active = (target_stop <= be_line
+                             or (0 < cur_stop <= be_line * 1.005))
+
+            # ── 保本后：每小时收盘 EMA7 线值并入止损，取更紧者（2026-11-10 用户拍板）──
+            # 交易所侧触线即出（进程挂了也生效），与上方软件线破出场互为兜底。
+            # 线破已在上方出场 → 走到此处必然是「价格在线盈利侧」，触发价方向合法
+            #（多单线 < 现价 / 空单线 > 现价），不会 -2021「立即触发」拒单。
+            # 线回落时取更紧者 + 幂等检查（下）→ 止损只上移不回撤。
+            target_before_line = target_stop
+            if be_active and line is not None and line > 0:
+                if direction == "long" and line > target_stop:
+                    target_stop = line
+                elif direction == "short" and line < target_stop:
+                    target_stop = line
+
             # ── 幂等检查 ──
             if cur_stop > 0:
                 # 0.5% 容差防 tick 抖动重复撤挂（每次撤挂会消耗 API 额度）
@@ -1079,6 +1041,8 @@ def _hourly_trail_check(client, conn, settings) -> int:
 
             if elapsed_h < 1.0:
                 why = "首小时免疫（仅初始止损）"
+            elif target_stop != target_before_line:
+                why = f"保本后并入 EMA7 线止损（line={line:.6g}）"
             elif (direction == "long" and target_stop > base_stop) or (
                     direction == "short" and target_stop < base_stop):
                 why = f"浮盈保本上移（peak={float(t.get('peak_1h') or 0):.6g}）"
@@ -1468,9 +1432,6 @@ def main() -> int:
                 # 保护单自愈（补挂缺失/失败硬止损；部署后即给存量裸奔仓补挂）
                 with get_connection(settings.database_url) as conn:
                     _ensure_protective(client, conn, settings)
-                # 5m 放量闪崩熔断（入场即生效，优先于其余出场判定；2026-11-10）
-                with get_connection(settings.database_url) as conn:
-                    _crash_5m_check(client, conn)
                 # 主出场逻辑：1h EMA7 线破市价出场 + 浮盈保本上移（2026-11-09 拍板）
                 with get_connection(settings.database_url) as conn:
                     _hourly_trail_check(client, conn, settings)

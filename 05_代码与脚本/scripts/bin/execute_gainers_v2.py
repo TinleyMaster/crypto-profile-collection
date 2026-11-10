@@ -229,7 +229,12 @@ def _cancel_protective_orders(client, symbol: str, prot: dict | None) -> None:
 
 
 def _close_all_market(client, symbol: str, reason: str) -> tuple[bool, str]:
-    """按当前持仓方向市价 closePosition 全平（回滚用）。"""
+    """按当前持仓方向市价按数量全平（回滚用）。
+
+    ⚠️ 2026-11-10 实盘事故（EDGEUSDT #72）：MARKET 单不支持 closePosition=true，
+    币安拒绝 -4136 "Target strategy invalid for orderType MARKET,closePosition true"。
+    双向持仓模式下平仓 = side + positionSide + quantity（不传 reduceOnly，hedge 禁用）。
+    """
     try:
         amt = client.get_position_amt(symbol)
     except Exception as e:  # noqa: BLE001
@@ -240,7 +245,7 @@ def _close_all_market(client, symbol: str, reason: str) -> tuple[bool, str]:
     close_side = "SELL" if amt > 0 else "BUY"
     try:
         r = client.place_order(symbol=symbol, side=close_side, order_type="MARKET",
-                               close_position=True, position_side=pos_side)
+                               quantity=abs(amt), position_side=pos_side)
         return True, f"市价全平成功（orderId={r.get('orderId')}，{reason}）"
     except Exception as e:  # noqa: BLE001
         return False, f"市价全平失败: {type(e).__name__}: {e}（{reason}）"
@@ -250,7 +255,7 @@ def _rollback_entry(client, symbol: str, order_id) -> tuple[bool, str]:
     """保护单失败后的开仓回滚：未成交撤单，已成交市价全平。
 
     返回 (是否成功, 说明)。MARKET 单 POST ACK 时多为 NEW，但实际几乎瞬间成交，
-    故先查单状态：NEW → 撤单；FILLED/其他 → 市价 closePosition 全平。
+    故先查单状态：NEW → 撤单；FILLED/其他 → 按数量市价全平（见 _close_all_market）。
     """
     if not order_id:
         return False, "无开仓单 orderId 可回滚"
@@ -671,7 +676,17 @@ def _attribution_from_trades(client, t: dict, prot: dict) -> tuple[dict | None, 
     tr_mode = tr.get("mode") if isinstance(tr, dict) else None
     # 新逻辑（2026-11-06 起）：hourly_lag 模式下 trail 与 sl 共用一张 STOP_MARKET
     # triggerPrice 即当前止损线，须区分是硬止损兜底还是滞后止损上移
-    if sl_trig > 0 and avg > 0 and abs(avg - sl_trig) / sl_trig <= 0.10:
+    #
+    # 单向判定（2026-11-10）：STOP_MARKET 只在价格向不利方向穿过触发价时成交，因此
+    # 成交均价必须落在触发价的不利侧——多单 ≤ 触发价×1.005、空单 ≥ 触发价×0.995
+    # （0.5% 容差覆盖 tick/round 精度），深于触发价任意多（闪崩滑点，DOSUSDT -65% 级）
+    # 都算。⚠ 旧口径 ±10%/15% **双向**容差会把「触发价盈利侧 6~15% 成交的手动平仓」
+    # 误判为 sl（2026-11-10 实锤：#72 EDGEUSDT 手动平在 0.4014，触发价 0.3708，
+    # 差 8.25% 落在 ±10% 内 → 被标 'sl'，污染出场统计）。
+    hit_sl = False
+    if sl_trig > 0 and avg > 0:
+        hit_sl = (avg <= sl_trig * 1.005) if is_long else (avg >= sl_trig * 0.995)
+    if hit_sl:
         if tr_mode == "hourly_lag":
             # 硬止损兜底 vs 滞后止损上移的区分：
             # sl_pct 落库即小数（0.15 = 15%），触发价与 entry×(1-sl_pct) 接近则是硬止损
@@ -694,10 +709,15 @@ def _attribution_from_trades(client, t: dict, prot: dict) -> tuple[dict | None, 
                     reason = "trail"  # 每小时滞后止损线打掉（主出场路径）
         else:
             reason = "sl"  # 原生逻辑：硬止损触发
-    elif sl_trig > 0 and avg > 0 and abs(avg - sl_trig) / sl_trig <= 0.15:
-        # 闪崩 15% 以上滑点（DOSUSDT -65% 级）仍归为 sl
-        reason = "sl"
     else:
+        if sl_trig > 0 and avg > 0 and abs(avg - sl_trig) / sl_trig <= 0.15:
+            # 旧双向容差本会判 sl，但成交价在触发价盈利侧 → 止损不可能被触发过。
+            # 打告警日志留痕：大概率是手动平仓或未知路径，人工复核时可检索。
+            side_txt = "高于" if is_long else "低于"
+            print(f"  [attribution] ⚠ {t['symbol']}#{t['id']} 疑似手动/未知出场: "
+                  f"成交均价 {avg:.6g} 在止损触发价 {sl_trig:.6g} 的盈利侧"
+                  f"（{side_txt}触发价 {abs(avg - sl_trig) / sl_trig:.1%}），"
+                  f"旧口径会误判为 sl → 已按 manual_or_unknown 归因")
         tp_trig = float(tp.get("triggerPrice") or 0) if isinstance(tp, dict) else 0
         if tp_trig > 0 and avg > 0 and abs(avg - tp_trig) / tp_trig <= 0.02:
             reason = "tp"
@@ -805,9 +825,11 @@ def _trail_check(client, conn) -> int:
                 continue
             pos_side = "LONG" if amt > 0 else "SHORT"
             close_side = "SELL" if amt > 0 else "BUY"
-            _cancel_protective_orders(client, t["symbol"], t.get("protective_orders"))
+            # 2026-11-10 修复：quantity 平仓（MARKET+closePosition 被 -4136 拒）；
+            # 先平仓成功再撤保护单——失败时保护单保留，下轮重试，杜绝裸奔
             r = client.place_order(symbol=t["symbol"], side=close_side, order_type="MARKET",
-                                   close_position=True, position_side=pos_side)
+                                   quantity=abs(amt), position_side=pos_side)
+            _cancel_protective_orders(client, t["symbol"], t.get("protective_orders"))
             oid = r.get("orderId")
             with conn.cursor() as cur:
                 cur.execute(
@@ -828,7 +850,7 @@ def _hourly_trail_check(client, conn, settings) -> int:
     出场规则（2026-11-09 用户拍板「线破即市价出场，线用 1h EMA7」）：
       - 入场后首小时**只保留入场时的初始止损**（EMA20 线 / 风险帽 -SL%，免疫回踩甩车）
       - 第 2 小时起每轮算「已收盘 1h close 的 EMA7 裸线」（ema_trail_line），
-        现价破线（多 ≤ 线 / 空 ≥ 线）→ 撤保护单 + 市价全平，exit_reason='trail' 落库
+        现价破线（多 ≤ 线 / 空 ≥ 线）→ 市价全平（quantity）→ 撤保护单 → exit_reason='trail' 落库
       - 浮盈 ≥5% 时止损上移到成本覆盖线（entry ± 0.4%），跳空也不亏
       - 交易所侧初始止损（EMA20 线 / 15% 风险帽）**不再被 trail 撤走**，常驻兜底；
         fail-safe：EMA 样本不足/查询失败 → 本轮不出手，只靠兜底止损
@@ -886,18 +908,22 @@ def _hourly_trail_check(client, conn, settings) -> int:
             elapsed = datetime.now(timezone.utc) - t["open_ts"]
             elapsed_h = elapsed.total_seconds() / 3600.0
 
-            # ── EMA7 线破 → 撤保护单 + 市价全平（第 2 小时起，2026-11-09 拍板）──
+            # ── EMA7 线破 → 市价全平（quantity）+ 撤保护单（第 2 小时起，2026-11-09 拍板）──
             if elapsed_h >= 1.0:
                 line = ema_trail_line(settings, t["symbol"])
                 if line is not None and line > 0:
                     broken = (cur_px <= line) if direction == "long" else (cur_px >= line)
                     if broken:
-                        _cancel_protective_orders(client, t["symbol"], prot)
                         pos_side = "LONG" if direction == "long" else "SHORT"
                         close_side = "SELL" if direction == "long" else "BUY"
+                        # 2026-11-10 修复（EDGEUSDT #72 事故根因）：MARKET 单不支持
+                        # closePosition=true，币安拒 -4136 → 线破出场上线以来 0 次成功，
+                        # 且旧时序先撤保护单再下必失败单 → 裸奔 5h41m。改为 quantity 平仓
+                        # + 先平仓成功再撤保护单（失败时保护单保留，下轮重试）。
                         r = client.place_order(symbol=t["symbol"], side=close_side,
-                                               order_type="MARKET", close_position=True,
+                                               order_type="MARKET", quantity=abs(amt),
                                                position_side=pos_side)
+                        _cancel_protective_orders(client, t["symbol"], prot)
                         oid = r.get("orderId")
                         with conn.cursor() as cur:
                             cur.execute(
@@ -1006,7 +1032,7 @@ def close_expired(client, conn) -> int:
     回测出场规则：持有 N 小时未触发 TRAIL/SL/TP → 按第 N 根收盘平仓（见
     backtest_trade_params.py）。实盘此前只挂 TRAIL3/SL10%，不会到期了结，导致
     未触发保护单的持仓无限期持有 —— 出场分布与回测不一致。本函数补齐该支：
-    撤保护单 → 市价全平 → 写 exit_order_id/exit_reason='expiry'，盈亏由
+    市价全平（quantity）→ 撤保护单 → 写 exit_order_id/exit_reason='expiry'，盈亏由
     _reconcile_closed 下一轮按该 orderId 精确回填（close_ts 待成交明细齐备后置）。
 
     仅处理 origin='bot'（手动单不入本表、不受影响）。返回本轮平仓笔数。
@@ -1027,10 +1053,11 @@ def close_expired(client, conn) -> int:
                 continue  # 已被 TRAIL/SL 平掉，交给 _reconcile_closed 回填
             pos_side = "LONG" if amt > 0 else "SHORT"
             close_side = "SELL" if amt > 0 else "BUY"
-            # 撤保护单（closePosition 单与全平市价单冲突 -4045；Algo 条件单一并撤）
-            _cancel_protective_orders(client, t["symbol"], t.get("protective_orders"))
+            # 2026-11-10 修复：quantity 平仓（MARKET+closePosition 被 -4136 拒，到期平仓
+            # 上线以来 0 次成功）；先平仓成功再撤保护单，失败时保护单保留、下轮重试
             r = client.place_order(symbol=t["symbol"], side=close_side, order_type="MARKET",
-                                   close_position=True, position_side=pos_side)
+                                   quantity=abs(amt), position_side=pos_side)
+            _cancel_protective_orders(client, t["symbol"], t.get("protective_orders"))
             oid = r.get("orderId")
             with conn.cursor() as cur:
                 cur.execute(
@@ -1243,9 +1270,10 @@ def _ensure_protective(client, conn, settings) -> int:
 def close_symbol(client, symbol: str) -> int:
     """运维：市价平掉某 symbol 的全部持仓。
 
-    先撤该 symbol 的挂单（含 closePosition 的 TRAIL/SL/TP —— 币安同一持仓侧只允许
-    一张 closePosition 单，不撤会 -4045 冲突），再对该侧下 closePosition 全平单。
-    双向持仓模式下用 positionSide 表达方向，不传 reduceOnly（hedge 模式禁用）。
+    2026-11-10 修复：旧实现先撤挂单再下 closePosition 全平单，但 MARKET 单不支持
+    closePosition=true（币安拒 -4136）→ 手动全平从上线起就平不掉，且挂单已先被撤掉。
+    改为 quantity 平仓（side + positionSide，不传 reduceOnly，hedge 模式禁用）：
+    先平仓，成功后再清理残留挂单；平仓失败则保留挂单（保护单不丢）。
     """
     amt = client.get_position_amt(symbol)
     if amt == 0:
@@ -1253,20 +1281,20 @@ def close_symbol(client, symbol: str) -> int:
         return 0
     pos_side = "LONG" if amt > 0 else "SHORT"
     close_side = "SELL" if amt > 0 else "BUY"
+    try:
+        r = client.place_order(symbol=symbol, side=close_side, order_type="MARKET",
+                               quantity=abs(amt), position_side=pos_side)
+        print(f"  平仓 {symbol} {pos_side} amt={amt} → orderId={r.get('orderId')}")
+    except Exception as e:  # noqa: BLE001
+        print(f"  平仓失败 {symbol}: {type(e).__name__}: {e}（挂单保留）")
+        return 0
     for o in client.get_open_orders(symbol):
         try:
             client.cancel_order(symbol, o["orderId"])
-            print(f"  撤单 {symbol} {o.get('type')} id={o.get('orderId')}")
+            print(f"  撤残留挂单 {symbol} {o.get('type')} id={o.get('orderId')}")
         except Exception as e:  # noqa: BLE001
             print(f"  撤单失败 id={o.get('orderId')}: {type(e).__name__}: {e}")
-    try:
-        r = client.place_order(symbol=symbol, side=close_side, order_type="MARKET",
-                               close_position=True, position_side=pos_side)
-        print(f"  平仓 {symbol} {pos_side} amt={amt} → orderId={r.get('orderId')}")
-        return 1
-    except Exception as e:  # noqa: BLE001
-        print(f"  平仓失败 {symbol}: {type(e).__name__}: {e}")
-        return 0
+    return 1
 
 
 def main() -> int:

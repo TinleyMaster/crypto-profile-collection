@@ -90,11 +90,14 @@ SIGNAL_DEFS = [
 # 事件 SQL（严格镜像 backtest_trade_params.py 的 evt/dchg）：最后一根【已收盘】1h bar。
 EVENT_SQL = """
 WITH kl AS (
-    SELECT symbol, open_time, open_px, close_px, quote_vol,
+    SELECT symbol, open_time, open_px, high_px, close_px, quote_vol,
            AVG(quote_vol) OVER (PARTITION BY symbol ORDER BY open_time
                ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING) AS avg20,
            SUM(quote_vol) OVER (PARTITION BY symbol ORDER BY open_time
-               ROWS BETWEEN 23 PRECEDING AND CURRENT ROW) AS vol24
+               ROWS BETWEEN 23 PRECEDING AND CURRENT ROW) AS vol24,
+           -- 24h 阶段高点：事件 bar 及其前 23 根 1h 的 high 最大值（含事件 bar 自身）
+           MAX(high_px) OVER (PARTITION BY symbol ORDER BY open_time
+               ROWS BETWEEN 23 PRECEDING AND CURRENT ROW) AS hi24
     FROM biz.asset_klines
     WHERE interval = '1h' AND open_px > 0 AND close_px > 0
       AND open_time >= date_trunc('hour', NOW()) - (%(lookback_days)s * INTERVAL '1 day')
@@ -110,7 +113,8 @@ evt AS (
     SELECT k.symbol, k.open_time AS eo, k.close_px AS entry,
            k.close_px / k.open_px - 1 AS chg1h,
            k.quote_vol / NULLIF(k.avg20, 0) AS vr,
-           k.vol24 AS vol_24h
+           k.vol24 AS vol_24h,
+           1 - k.close_px / NULLIF(k.hi24, 0) AS dd24
     FROM kl k
     JOIN lastc l ON l.symbol = k.symbol AND l.eo = k.open_time
     WHERE k.avg20 > 0
@@ -128,7 +132,7 @@ dchg AS (
      AND p.open_time >  e.eo - INTERVAL '36 hours'
     ORDER BY e.symbol, e.eo, p.open_time DESC
 )
-SELECT e.symbol, e.eo, e.entry, e.chg1h, e.vr, e.vol_24h, d.chg24
+SELECT e.symbol, e.eo, e.entry, e.chg1h, e.vr, e.vol_24h, e.dd24, d.chg24
 FROM evt e
 JOIN dchg d ON d.symbol = e.symbol AND d.eo = e.eo
 """
@@ -370,6 +374,8 @@ def scan(conn, min_vol: float, cooldown_h: float) -> list[dict]:
                 "ts": now, "event_bar_ts": eo_iso,
                 # 影子指标（不参与任何闸门，仅落库观察）
                 "wick_r": mk.get("wick_r"), "vol24_pct": mk.get("vol24_pct"),
+                # 位置特征：距 24h 阶段高点回撤（百分数），执行器据此做弱动能档过滤
+                "dd24": None if e["dd24"] is None else float(e["dd24"]) * 100.0,
             })
     return hits
 
@@ -393,10 +399,11 @@ def main() -> int:
         fund_s = "n/a" if h["fund"] is None else f"{h['fund']:.4%}"
         wick_s = "n/a" if h["wick_r"] is None else f"{h['wick_r']:.2f}"
         v24_s = "n/a" if h["vol24_pct"] is None else f"{h['vol24_pct']:.1f}%"
+        dd_s = "n/a" if h["dd24"] is None else f"{h['dd24']:.2f}%"
         print(f"  {_fmt(h['ts'])} {h['symbol']:<12} {h['sig_type']:<12} {h['window']:<5} "
               f"{h['direction']:<6} chg24={h['chg']:+.1f}% chg1h={h['chg1h']:+.1f}% "
               f"vr1h={vr_s} fund={fund_s} vol=${h['vol']/1e6:.0f}M "
-              f"wick={wick_s} v24={v24_s} "
+              f"wick={wick_s} v24={v24_s} dd24={dd_s} "
               f"@${h['price']:,.4f} bar={h['event_bar_ts']}")
         if args.apply:
             with get_connection(settings.database_url) as conn:
@@ -415,7 +422,11 @@ def main() -> int:
                                      # 影子指标（2026-11-06）：不参与闸门，仅供
                                      # 「剔插针/剔波动Q4」开闸前的实盘样本验证
                                      "wick_r": h["wick_r"],
-                                     "vol24_pct": h["vol24_pct"]})),
+                                     "vol24_pct": h["vol24_pct"],
+                                     # 位置特征（2026-11-11）：距 24h 阶段高点回撤（%），
+                                     # 执行器对 A 档弱动能档（chg24∈[50%,75%)）做 dd≥5% 过滤
+                                     "dd_24h_pct": None if h["dd24"] is None
+                                     else round(h["dd24"], 4)})),
                     )
 
     # 邮件告警（实盘白名单 A=SHORT_LONG + B=MID_LONG 右上角；C 不实盘、不告警）

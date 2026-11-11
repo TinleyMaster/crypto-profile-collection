@@ -36,17 +36,23 @@ from crypto_research.db.conn import get_connection  # noqa: E402
 
 # ── 交易参数（2026-10-06 细分档回测定稿，含 0.2% 成本）──────────────
 # SHORT_LONG = 短线做多（涨幅≥50%，TRAIL 3%，持仓 24h）
-# MID_LONG   = 中线做多（涨幅 20~50%，TRAIL 3%，持仓 168h）
+# MID_LONG   = 次档做多（涨幅 30~50% + vr≥5.6，TRAIL 3%，持仓 24h）
 # TRAP_SHORT = 诱多做空（涨幅<5%，FIX 止盈 50% / 止损 15%，持仓 12h）
-# 实盘硬止损 -15%（2026-10-19 从 10% 上调：回测 act=0+SL=15% PF=2~24 vs SL=10% PF=1.12，
-#   82k 样本中 SL=15% 出场占比<0.1%，与 SL=0 等价；DOSUSDT 级闪崩-65% 属极端长尾，
-#   168h 窗口内未出现过）
-# ⚠️ 2026-11-06：做多+带 TR 的单，首小时初始止损改用 EMA20×(1-2%) 线（与 SL15%
-#   取更紧者，15% 为风险帽）——统一口径回测 ema_init -0.88%/PF0.80 vs
+# 实盘硬止损 -10%（2026-11-11 回调：本地 1h 全历史 3,352 笔回测，见 bin/backtest_exit_variants.py）
+#   15% → 10%：A档 均 -0.40%→-0.23%、PF 0.93→0.96、累计 -661→-403pp、回撤 -1152→-942pp；
+#   近90天 A档 均 +0.71%→+0.86%、PF 1.11→1.15、回撤 -233→-154pp；B档 均值持平但回撤收窄。
+#   8% 与 10% 基本等价（右尾被削更多），取 10%。15% 只保留为 TRAP_SHORT 等非 live 档。
+#   注：2026-10-19 上调到 15% 的旧回测口径是「TRAIL 3% + act=0」，已被 EMA7 线破出场取代。
+# ⚠️ 2026-11-06：做多+带 TR 的单，首小时初始止损改用 EMA20×(1-2%) 线（与 SL
+#   取更紧者，SL 为风险帽）——统一口径回测 ema_init -0.88%/PF0.80 vs
 #   固定-15% -1.60%/0.65；详见 EMA_INIT_* 常量处注释
+# ⚠️ 2026-11-11：MID_LONG 持仓上限 N 168h → 24h（零成本规则简化，bin/backtest_b_attribution.py ⑤）
+#   B 档全历史（n=1,644）实际持仓：中位 3.9h / 均值 4.8h / p90 9.6h / 最长 27.9h，
+#   仅 1 笔超过 24h、到期出场 0 笔 ⇒ 168h 是从未生效的死参数，B 档实为日内动量、与 A 档同构。
+#   改为 24h 只对齐「实际行为」并保留极端行情兜底，不依赖它作为主要出场方式。
 PARAMS: dict[str, dict] = {
-    "SHORT_LONG": {"N": 24,  "TP": None, "TR": 0.03, "SL": 0.15},
-    "MID_LONG":   {"N": 168, "TP": None, "TR": 0.03, "SL": 0.15},
+    "SHORT_LONG": {"N": 24,  "TP": None, "TR": 0.03, "SL": 0.10},
+    "MID_LONG":   {"N": 24,  "TP": None, "TR": 0.03, "SL": 0.10},
     "TRAP_SHORT": {"N": 12,  "TP": 0.50, "TR": None, "SL": 0.15},
 }
 
@@ -59,15 +65,57 @@ MAX_LOSS_EQUITY_PCT = 15.0  # 单笔最大亏损占总权益 %（硬顶，回测
 
 # 分层杠杆/名义（2026-10-07 决策：纯 A 高胜率高赔率 → 加杠杆重仓；其他信号 1x 不加杠杆）
 # - SHORT_LONG（A）：胜率 71.1% / 期望 +5.6% / PF 14.2 → 3x、60U（SL10%×3x=本金 -30%/笔 兜底）
-# - MID_LONG（B）/TRAP_SHORT（C）：待扩容验证，1x、20U 小仓试错（不加杠杆）
+# - MID_LONG（B）/TRAP_SHORT（C）：1x、20U 小仓试错（不加杠杆）；
+#   B 档自 2026-11-11 起经 position_scale=0.5 实到 10U（见 B_POSITION_SCALE 注释）
 # 未列出的信号类型回退到 env 兜底值。
 LEVERAGE_BY_SIGNAL: dict[str, int] = {"SHORT_LONG": 3, "MID_LONG": 1, "TRAP_SHORT": 1}
 NOTIONAL_BY_SIGNAL: dict[str, float] = {"SHORT_LONG": 60.0, "MID_LONG": 20.0, "TRAP_SHORT": 20.0}
 
+# A 档按 chg24 分档调仓（2026-11-11 回测拍板，bin/backtest_momentum_gate.py ④）
+# 依据（本地 1h/5m 全历史、实盘口径 −0.5% 限价 + 同币不叠仓、SL10 + EMA7 出场）：
+#   - A 档 chg24 ∈ [50%, 75%) 占 A 档 76.6%（1,314/1,715 笔），均净 −0.40%、累计 −532pp
+#     → 纯亏损池；该档 t≈1.6（SE≈0.25pp），不显著为负 ⇒ 属风险预算决策，不是 alpha 提取。
+#   - 该档半仓（60U→30U，杠杆 3x 不变，只降名义本金）后 A 档：
+#     累计 −319pp → −53pp，最大回撤 −933pp → −517pp，均净 −0.19% → −0.05%。
+#   - chg24 ≥ 75% 的右尾档位完全保留（不改出场规则，不削右尾利润）。
+# 边界：恰好 75% 归满仓档（避免临界值随价格抖动反复跳变）。
+# 单位：chg_24h_pct 落库为百分数（scan_gainers_v2.py 写入 chg24×100），故用 50/75 而非 0.5/0.75。
+A_HALF_CHG24_RANGE = (50.0, 75.0)   # [50%, 75%) → 半仓
+A_HALF_POSITION_SCALE = 0.5
+
+# B 档整体名义减半（2026-11-11 回测拍板，bin/backtest_b_attribution.py）
+# 依据（本地 1h/5m 全历史、实盘口径 −0.5% 限价 + 同币不叠仓、SL10 + EMA7 出场，B 档 n=1,644）：
+#   - 全周期全档位负期望：PF 0.84、均净 −0.87%、累计 −2,660pp；chg24 四档
+#     （30~35/35~40/40~45/45~50%）全为负，收益不单调（随机型），唯一单调的是止损率 17.7%→34.1%。
+#   - 短板在**右尾**而非左尾：MFE≥20% 占 18.3% / +5,823pp，薄于 A 档 21.3% / +8,103pp；
+#     左尾（MFE<20%）−7,065pp 反而比 A 档 −8,422pp 更薄 ⇒ 收紧止损只会削右尾，不动。
+#   - 40~45% 档虽亏最多（均净 −1.68% / PF 0.68），但时间切片全翻转（前半 +0.53% / 后半 −3.80%、
+#     2026 −3.70%）⇒ 判定样本内巧合，不做精准切档（同理 vr 分档非单调，不做过滤）。
+#   - 名义 20U→10U（1x 不变，只降名义本金）后全账户（A半+B满 → A半+B半）：
+#     PF 0.9447→0.9636、累计 −468→−261pp、最大回撤 −863→−610pp（累计 −44% / 回撤 −29%）。
+# 实现：与 A 档同源，经 position_scale() 只作用于名义本金，落库 position_scale 字段留痕（0.5）。
+B_POSITION_SCALE = 0.5
+
+# A 档弱动能档回撤闸门（2026-11-11 回测拍板，bin/backtest_a_position.py ⑧）
+# 特征口径：dd = 1 − 信号价 / 24h 阶段高点；高点 = 事件 bar 及其前 23 根 1h 的 high 最大值
+#   （用 1h 而非 5m：小币 5m 插针极多，单根 5m 高点无趋势意义；1h 高点=资金共识的阶段顶）。
+#   信号价 = 事件 1h bar 收盘 ≡ 该时刻 5m 收盘，与限价入场基准同源。
+# 依据（本地 1h/5m 全历史、实盘口径 −0.5% 限价 + 同币不叠仓、SL10 + EMA7 出场，A 档 n=1,715）：
+#   - dd 全局分档不单调（[0,1%) +1.68% 但 OOS 完全翻转；[3,5%) 反而 +0.50%）⇒ 不做全局选币。
+#   - chg24 ∈ [50%,75%) 档内 dd≥5% 是稳定亏损池：n=405、均 −1.91%、PF 0.64、累计 −774pp；
+#     2023~2026 各年全负（−0.57 / −1.38 / −2.34 / −2.09），t≈−2.5（SE 0.64pp）。
+#   - chg24 ≥75% 档内 dd≥5% 反而 均 +0.97% / PF 1.16（+207pp）——强动能档的 5% 回撤是
+#     洗盘换手而非见顶 ⇒ **该档严禁过滤**，否则误杀右尾（全局剔除 dd≥5% 会把它一起切掉）。
+#   - 仅剔弱动能档 dd≥5% 后账户口径（A 半仓）：PF 1.05→1.13、累计 +264→+590pp、
+#     最大回撤 −432→−285pp；阈值 3%~10% 平滑（PF 1.08~1.14），非 5% 单点突变。
+# 定性：第三次左尾收缩（前两次 SL15%→10%、A 档 50~75% 半仓），只减亏、不提 alpha。
+# 阈值单位：dd_24h_pct 落库为百分数（scan_gainers_v2.py 已 ×100），故用 5.0 而非 0.05。
+DD_SKIP_MIN_PCT = 5.0
+
 # 实盘信号白名单（2026-10-07 扩容决策 C3：A + B右上角并行）
 # - SHORT_LONG（≥50% 做多）：胜率 71.1% / 期望 +5.6% / PF 14.2（含 0.3% 成本）→ 3x / 60U
 # - MID_LONG 仅 B 右上角子集（chg30~50% + vr≥5.6，扫描器已过滤）：
-#   胜率 66.2% / 期望 +4.3% / PF 8.4 → 1x / 20U 不加杠杆
+#   1x / 名义 10U（20U × position_scale 0.5，不加杠杆）
 # - TRAP_SHORT（<5% 做空）：滚动 24h 口径全周期负期望，不实盘
 LIVE_SIGNALS = ("SHORT_LONG", "MID_LONG")
 
@@ -486,19 +534,50 @@ def ema_trail_line(settings, symbol: str) -> float | None:
         return None
 
 
+def _as_float(v) -> float | None:
+    """数值化（None / 空串 / 非数值 → None）。"""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def position_scale(sig: dict) -> float:
+    """仓位系数（0.5 / 1.0）：A 档按 chg24 分档，B 档恒半仓，其他信号恒 1.0。
+
+    仅下调名义本金，杠杆不变（A 档恒 3x、B 档恒 1x）；依据见常量区
+    A_HALF_CHG24_RANGE / B_POSITION_SCALE 注释。
+    chg24 缺失/非数值 → A 档按满仓处理（不因数据缺失意外缩仓）。
+    """
+    st = sig.get("signal_type")
+    if st == "MID_LONG":
+        return B_POSITION_SCALE
+    if st != "SHORT_LONG":
+        return 1.0
+    try:
+        chg24 = float(sig.get("chg_24h_pct"))
+    except (TypeError, ValueError):
+        return 1.0
+    lo, hi = A_HALF_CHG24_RANGE
+    return A_HALF_POSITION_SCALE if lo <= chg24 < hi else 1.0
+
+
 def place_order(client, settings, sig: dict, live: bool) -> dict:
     """单信号风控 + 下单。返回决策记录。"""
     p = PARAMS.get(sig["signal_type"])
     if p is None:
         return {"decision": "skipped", "reason": "no_params"}
     # 分层杠杆/名义：按信号类型取配置，未列出的回退 env 兜底值
-    notional = NOTIONAL_BY_SIGNAL.get(sig["signal_type"], settings.signal_max_notional_usdt)
+    scale = position_scale(sig)
+    notional = NOTIONAL_BY_SIGNAL.get(sig["signal_type"], settings.signal_max_notional_usdt) * scale
     lev = LEVERAGE_BY_SIGNAL.get(sig["signal_type"], settings.signal_leverage)
     margin = notional / lev
     rec = {
         "signal_id": sig["id"], "symbol": sig["symbol"], "signal_type": sig["signal_type"],
         "direction": sig["direction"], "params": p,
         "notional": notional, "leverage": lev,
+        # 仓位系数（0.5/1.0）：实盘归因与对账用，随 params/limit 元数据一并落库
+        "position_scale": scale,
     }
     if not live or not settings.v2_trade_enabled:
         rec.update(decision="dry_run",
@@ -531,6 +610,20 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
         print(f"  [gate] {sig['symbol']} 动量衰减拦截: "
               f"r30={mom_info.get('r30')} spke={mom_info.get('spke')}")
         return rec
+    # 弱动能档回撤闸门（2026-11-11）：A 档 chg24∈[50%,75%) 且 dd≥5% → 跳过
+    # 只作用于弱动能档；chg24 ≥75% 不做任何 dd 过滤（该档 dd≥5% 是右尾来源）。
+    if sig.get("signal_type") == "SHORT_LONG":
+        dd = _as_float((sig.get("params") or {}).get("dd_24h_pct"))
+        chg24 = _as_float(sig.get("chg_24h_pct"))
+        if dd is not None:
+            rec["dd_24h"] = dd  # 审计快照：随 params JSONB 落库（含放行单，供事后归因）
+        lo, hi = A_HALF_CHG24_RANGE
+        if dd is not None and chg24 is not None and lo <= chg24 < hi and dd >= DD_SKIP_MIN_PCT:
+            rec.update(decision="skipped",
+                       reason=f"dd_exceed_low_chg dd24={dd:.2f}% chg24={chg24:.1f}%")
+            print(f"  [gate] {sig['symbol']} 弱动能档回撤拦截: "
+                  f"dd24={dd:.2f}% chg24={chg24:.1f}%")
+            return rec
     # ── 5m 回撤限价入场：挂 信号价×0.995 等回撤（2026-11-11，常量区有回测依据）──
     sig_px = float(sig.get("price_usd") or 0)
     if sig_px <= 0:
@@ -670,6 +763,7 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
                           "placed_at": datetime.now(timezone.utc).isoformat(),
                           "wait_min": LIMIT_ENTRY_WAIT_MIN,
                           "open_qty": qty, "notional": notional, "leverage": lev,
+                          "position_scale": scale,
                           "margin": (notional / lev) if lev else None,
                           "client_order_id": r.get("clientOrderId"),
                           "entry_resp": entry_resp, "protective": protective})
@@ -1407,19 +1501,20 @@ def _insert_trade_log(conn, sig: dict, rec: dict, settings, live: bool) -> None:
         cur.execute(
             "INSERT INTO biz.v2_trade_log ("
             " signal_id, symbol, signal_type, direction, open_ts,"
-            " open_price, open_qty, notional_usdt, leverage, order_id,"
+            " open_price, open_qty, notional_usdt, leverage, position_scale, order_id,"
             " origin, signal_window, scan_ts, event_bar_ts, ref_price_usd,"
             " chg_24h_pct, chg1h_pct, vr_1h, funding_rate, vol_24h_usd,"
             " margin_usdt, planned_hold_h, sl_pct, tr_pct, tp_pct,"
             " entry_client_order_id, entry_resp, protective_orders,"
             " close_ts, exit_reason, base_url, dry_run, updated_at"
-            ") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+            ") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
             " %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,"
             " %s,%s,%s,%s,NOW()) "
             "ON CONFLICT (signal_id) DO NOTHING",
             (sig["id"], sig["symbol"], sig["signal_type"], sig["direction"],
              datetime.now(timezone.utc), v2_open_price,
              v2_open_qty, rec.get("notional"), rec.get("leverage"),
+             rec.get("position_scale"),
              rec.get("order_id"), "bot", sig.get("signal_window"),
              sig.get("scan_ts"), eo_dt, sig.get("price_usd"),
              sig.get("chg_24h_pct"), sp.get("chg1h_pct"), sp.get("vr_1h"),
@@ -1451,6 +1546,7 @@ def _complete_limit_fill(conn, settings, sig: dict, meta: dict, order: dict) -> 
         "client_order_id": meta.get("client_order_id"),
         "open_price": avg, "open_qty": qty,
         "notional": meta.get("notional"), "leverage": meta.get("leverage"),
+        "position_scale": meta.get("position_scale"),
         "margin": meta.get("margin"),
         "entry_resp": entry_resp, "protective": meta.get("protective"),
     }
@@ -1603,6 +1699,9 @@ def main() -> int:
                             if rec.get("momentum") is not None:
                                 # 动量闸门快照（r30/spke/gate）：事后归因「为何拦/为何放」
                                 _audit_patch["momentum"] = rec["momentum"]
+                            if rec.get("dd_24h") is not None:
+                                # 位置特征快照（距 24h 阶段高点回撤 %）：与拦截原因一起留痕
+                                _audit_patch["dd_24h"] = rec["dd_24h"]
                             if rec.get("limit") is not None:
                                 # 5m 限价挂单元数据（order_id/挂单价/挂单时刻）：
                                 # 成交/超时的状态机（_process_limit_entries）靠它续跑，重启不丢

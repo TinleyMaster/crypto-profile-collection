@@ -13,7 +13,12 @@
   5. **动量闸门验证**（④）：用执行器同一个 `momentum_gate` 对窗口内信号按信号时刻
      重算放行/拦截，滚动对比两组收益并自动判断方向是否仍与样本外验证一致（✓/⚠），
      附实盘 momentum_decayed 拦截数——回答「闸门放的对不对」；
-  6. 顶部一句话结论（信号结算 A 档近 7 天 vs 回测基准 + 同期真实成交）。
+  6. **本轮改动生效看板**（⑤）：2026-11-11 三项改动（A 档弱动能档 dd 闸门 / B 档名义
+     减半 / B 档 N 168h→24h）的「期望 vs 实测」核对表 + dd 闸门放行/拦截对照 + B 档
+     改动前后成交校验——回答「改对了没有」；
+  7. 顶部一句话结论（信号结算 A 档近 7 天 vs 回测基准 + 同期真实成交）；
+  8. **实盘策略运行逻辑**（⑥）：流程 + 闸门 + 限价入场 + 止损/出场全链路，数字实时
+     取自 execute_gainers_v2 模块常量（单一事实来源），执行器改动次日自动同步进日报。
 
 口径（重要）
 ------------
@@ -83,6 +88,13 @@ try:
 except Exception:                     # noqa: BLE001
     _momentum_gate = None
 
+# ⑤ 策略运行逻辑节：引用整个执行器模块，常量（PARAMS/杠杆/名义/时效/限价/止损/保本）
+# 实时读取——执行器改动后次日日报自动同步，避免日报文案与代码漂移。
+try:
+    import execute_gainers_v2 as _v2
+except Exception:                     # noqa: BLE001
+    _v2 = None
+
 # 实盘 = A + B（B 为 MID_LONG 右上角子集）；C（TRAP_SHORT）不实盘。
 # 告警邮件仅推 A（scan_gainers_v2.py 259-262），B 虽实盘但不发告警。
 ALERT_SIGNALS = ("SHORT_LONG",)
@@ -108,6 +120,45 @@ SELECT s.scan_ts
  WHERE s.signal_type = ANY(%s::text[])
    AND s.params->>'exec_reason' = 'momentum_decayed'
 """
+
+# 本轮改动（2026-11-11）生效看板 · dd 闸门对照：
+#   dd_pct 优先取扫描器落库的 dd_24h_pct（闸门部署后才有）；历史信号则用 biz.asset_klines
+#   1h 按 params.event_bar_ts 重算，口径与 bin/backtest_a_position.py 一致：
+#   dd = 1 − 事件 bar 收盘 / max(事件 bar 及其前 23 根 1h 的 high)。
+DD_AUDIT_SQL = """
+SELECT s.id AS signal_id, s.scan_ts, s.signal_type, s.chg_24h_pct,
+       s.params->>'exec_reason' AS exec_reason,
+       COALESCE((s.params->>'dd_24h_pct')::numeric, dd.dd * 100) AS dd_pct,
+       o.matured, o.exit_type, o.ret_net
+  FROM biz.scan_gainer_signal s
+  LEFT JOIN biz.scan_gainer_outcome o ON o.signal_id = s.id
+  LEFT JOIN LATERAL (
+      SELECT 1 - c.close_px / NULLIF(m.hi, 0) AS dd
+        FROM biz.asset_klines c
+        JOIN LATERAL (
+            SELECT MAX(high_px) AS hi
+              FROM biz.asset_klines x
+             WHERE x.symbol = c.symbol AND x.interval = '1h'
+               AND x.open_time BETWEEN c.open_time - INTERVAL '23 hours' AND c.open_time
+        ) m ON true
+       WHERE c.symbol = s.symbol AND c.interval = '1h'
+         AND c.open_time = (s.params->>'event_bar_ts')::timestamptz
+  ) dd ON true
+ WHERE s.signal_type = ANY(%s::text[])
+ ORDER BY s.scan_ts
+"""
+
+# 本轮改动生效看板 · B 档成交校验：名义是否落到 10U、计划持仓是否 24h、有无 168h 到期出场
+MID_CHECK_SQL = """
+SELECT t.open_ts, t.close_ts, t.notional_usdt, t.planned_hold_h, t.exit_reason
+  FROM biz.v2_trade_log t
+ WHERE t.origin = 'bot' AND t.signal_type = 'MID_LONG'
+ ORDER BY t.open_ts
+"""
+
+# 本轮改动上线日（北京时间）：早于该日的成交属于「改动前」，用于前后对比。
+# ⚠ 与 execute_gainers_v2.py 的改动日期保持一致；仅作展示分组，不参与任何交易决策。
+ROLLOUT_DAY = date(2026, 11, 11)
 
 
 # ──────────────────────────── 统计与格式化 ────────────────────────────
@@ -247,6 +298,28 @@ def load_gate_skips(conn, live_types: tuple[str, ...]) -> list[dict]:
     for r in rows:
         r["day"] = r["scan_ts"].astimezone(SH).date()
     return rows
+
+
+def load_change_audit(conn, live_types: tuple[str, ...]) -> tuple[list[dict], list[dict], bool]:
+    """⑤ 本轮改动生效看板取数 → (dd 对照行, B 档成交行, position_scale 列是否存在)。
+
+    dd 对照行：A 档信号 + 24h 回撤 dd_pct + 实盘拦截原因 + 理想化结算收益。
+    B 档成交行：origin='bot' 的 MID_LONG 实际下单（名义 / 计划持仓 / 出场原因）。
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(DD_AUDIT_SQL, [list(live_types)])
+        dd_rows = cur.fetchall()
+        cur.execute(MID_CHECK_SQL)
+        mid_rows = cur.fetchall()
+        cur.execute("SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema = 'biz' AND table_name = 'v2_trade_log' "
+                    "AND column_name = 'position_scale'")
+        has_scale = cur.fetchone() is not None
+    for r in dd_rows:
+        r["day"] = r["scan_ts"].astimezone(SH).date()
+    for r in mid_rows:
+        r["day"] = r["open_ts"].astimezone(SH).date()
+    return dd_rows, mid_rows, has_scale
 
 
 def window_rows(rows: list[dict], anchor: date, days: int | None) -> list[dict]:
@@ -442,6 +515,215 @@ def _gate_table(gate_rows: list[dict], skips: list[dict], anchor: date, days: in
     {verdict}{warns}"""
 
 
+def _change_board(dd_rows: list[dict], mid_rows: list[dict], has_scale: bool,
+                  anchor: date, days: int) -> str:
+    """⑤ 本轮改动生效看板（2026-11-11 三项改动）：期望 vs 实测，回答「改对了没有」。
+
+    dd_rows：A/B 信号 + dd_pct（落库值优先，缺失则按 event_bar_ts 重算）+ 结算收益。
+    mid_rows：origin='bot' 的 B 档实际下单（名义 / 计划持仓 / 出场原因）。
+    全部为**只读展示**：被闸门拦掉的信号没有真实成交，只能用理想化结算（ret_net）对照。
+    """
+    a_lo, a_hi = (getattr(_v2, "A_HALF_CHG24_RANGE", (50.0, 75.0)) if _v2 else (50.0, 75.0))
+    dd_min = float(getattr(_v2, "DD_SKIP_MIN_PCT", 5.0)) if _v2 else 5.0
+
+    def _f(v) -> float | None:
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    def low_chg(r: dict) -> bool:
+        c = _f(r.get("chg_24h_pct"))
+        return c is not None and a_lo <= c < a_hi
+
+    def dd_of(r: dict) -> float | None:
+        return _f(r.get("dd_pct"))
+
+    def chip(kind: str, text: str) -> str:
+        bg, bd, fg = {"ok": ("#ecfdf5", "#059669", "#065f46"),
+                      "warn": ("#fff7ed", "#e67e22", "#7c2d12"),
+                      "na": ("#f3f4f6", "#d1d5db", "#4b5563")}[kind]
+        return (f'<span style="display:inline-block;padding:2px 8px;border-radius:10px;'
+                f'background:{bg};border:1px solid {bd};color:{fg};font-size:12px">{text}</span>')
+
+    # ── 表 A：dd 闸门（规则重算）放行 vs 拦截 ───────────────────────────
+    def dd_cell(sub: list[dict]) -> str:
+        st = _stats(sub)
+        mark = " ⚠" if 0 < st["matured"] < 15 else ""
+        return (f"<td>{st['matured']}{mark}</td><td>{_pct(st['win_rate'])}</td>"
+                f"<td>{_sgn(st['mean'])}</td><td>{_num(st['pf'])}</td>")
+
+    wins = [("近 7 天", 7), (f"近 {days} 天", days), ("全部", None)]
+    dd_trs, blk_all, kept_all = [], None, None
+    act_all = act_7 = 0
+    for label, w in wins:
+        sub = window_rows(dd_rows, anchor, w)
+        blk = [r for r in sub if dd_of(r) is not None and low_chg(r) and dd_of(r) >= dd_min]
+        kept = [r for r in sub if dd_of(r) is not None and low_chg(r) and dd_of(r) < dd_min]
+        act = sum(1 for r in sub
+                  if str(r.get("exec_reason") or "").startswith("dd_exceed_low_chg"))
+        if w is None:
+            blk_all, kept_all, act_all = blk, kept, act
+        if w == 7:
+            act_7 = act
+        dd_trs.append(f"<tr><td>{label}</td>{dd_cell(blk)}{dd_cell(kept)}<td>{act}</td></tr>")
+
+    # 强动能档（chg24≥75%）必须一条都不拦 —— 回归检查，防规则写错档位
+    strong_blk = 0
+    for r in dd_rows:
+        c, d = _f(r.get("chg_24h_pct")), dd_of(r)
+        if c is not None and c >= a_hi and d is not None and d >= dd_min:
+            strong_blk += 1
+    strong_act = sum(1 for r in dd_rows
+                     if str(r.get("exec_reason") or "").startswith("dd_exceed_low_chg")
+                     and (_f(r.get("chg_24h_pct")) or 0) >= a_hi)
+    b_act = sum(1 for r in dd_rows
+                if str(r.get("exec_reason") or "").startswith("dd_exceed_low_chg")
+                and r["signal_type"] == "MID_LONG")
+
+    sb, sk = _stats(blk_all or []), _stats(kept_all or [])
+    if sb["matured"] == 0 or sk["matured"] == 0:
+        dd_verdict = ('<div style="margin:8px 0 0;padding:8px 10px;background:#f3f4f6;'
+                      'border-left:4px solid #9ca3af;font-size:12px;color:#4b5563">'
+                      '— 规则重算的拦截组/放行组暂无已结算样本（dd 需信号带 event_bar_ts），'
+                      '暂无法验证方向；样本出现后本节自动给出结论。</div>')
+    else:
+        diff = (sb["mean"] - sk["mean"]) * 100
+        if diff < 0:
+            dd_verdict = (f'<div style="margin:8px 0 0;padding:8px 10px;background:#ecfdf5;'
+                          f'border-left:4px solid #059669;font-size:12px;color:#065f46">'
+                          f'✓ 全部窗口：被 dd 闸门拦掉的信号均收益 {_sgn(sb["mean"])} &lt; '
+                          f'放行 {_sgn(sk["mean"])}（差 {diff:+.2f}pp，n={sb["matured"]} vs '
+                          f'{sk["matured"]}）——拦掉的确实更差，方向与回测一致。</div>')
+        else:
+            dd_verdict = (f'<div style="margin:8px 0 0;padding:8px 10px;background:#fff7ed;'
+                          f'border-left:4px solid #e67e22;font-size:12px;color:#7c2d12">'
+                          f'⚠ 全部窗口：被拦组均收益 {_sgn(sb["mean"])} ≥ 放行 '
+                          f'{_sgn(sk["mean"])}（差 {diff:+.2f}pp，n={sb["matured"]} vs '
+                          f'{sk["matured"]}）——<b>与回测方向相反</b>，需复核规则或市场状态。</div>')
+
+    # ── 表 B：B 档成交校验（改动前 vs 改动后）──────────────────────────
+    def mid_grp(rows: list[dict]) -> dict:
+        ns = [_f(r.get("notional_usdt")) for r in rows if _f(r.get("notional_usdt"))]
+        holds = sorted({int(r["planned_hold_h"]) for r in rows
+                        if r.get("planned_hold_h") is not None})
+        closed = [r for r in rows if r.get("close_ts") is not None]
+        dur = [(r["close_ts"] - r["open_ts"]).total_seconds() / 3600 for r in closed]
+        return {"n": len(rows), "notional_mean": (statistics.mean(ns) if ns else None),
+                "notional_min": (min(ns) if ns else None),
+                "notional_max": (max(ns) if ns else None),
+                "holds": holds,
+                "hold_med": (statistics.median(dur) if dur else None),
+                "expiry": sum(1 for r in closed if (r.get("exit_reason") or "") == "expiry")}
+
+    mid_before = [r for r in mid_rows if r["day"] < ROLLOUT_DAY]
+    mid_after = [r for r in mid_rows if r["day"] >= ROLLOUT_DAY]
+    mb, ma = mid_grp(mid_before), mid_grp(mid_after)
+
+    def _u1(v, unit: str) -> str:
+        return "-" if v is None else f"{float(v):.1f}{unit}"
+
+    def mid_row(label: str, g: dict) -> str:
+        rng = (f"{g['notional_min']:.0f}~{g['notional_max']:.0f}U"
+               if g["notional_min"] is not None else "-")
+        holds = ("/".join(str(h) for h in g["holds"]) + "h") if g["holds"] else "-"
+        return (f"<tr><td>{label}</td><td>{g['n']}</td><td>{_u1(g['notional_mean'], 'U')}</td>"
+                f"<td>{rng}</td><td>{holds}</td><td>{_u1(g['hold_med'], 'h')}</td>"
+                f"<td>{g['expiry']}</td></tr>")
+
+    # ── 表 C：改动核对（期望 vs 实测 vs 判定）──────────────────────────
+    if act_all > 0:
+        dd_status = ("ok", f"✓ 已生效 {act_all} 条")
+    elif blk_all:
+        dd_status = ("na", "— 尚无实盘拦截")
+    else:
+        dd_status = ("na", "— 无样本")
+
+    if ma["n"] == 0:
+        notional_status = ("na", "— 改动后无成交")
+    elif ma["notional_mean"] is not None and ma["notional_mean"] <= 15:
+        notional_status = ("ok", f"✓ 已减半 {_num(ma['notional_mean'], 1)}U")
+    else:
+        notional_status = ("warn", f"⚠ 仍为 {_num(ma['notional_mean'], 1)}U")
+
+    if ma["n"] == 0:
+        hold_status = ("na", "— 改动后无成交")
+    elif ma["holds"] and all(h == 24 for h in ma["holds"]):
+        hold_status = ("ok", "✓ 全部 24h")
+    else:
+        hold_status = ("warn", "⚠ 仍见非 24h")
+
+    scale_s = ""
+    if not has_scale:
+        scale_s = ('<div style="margin:8px 0 0;color:#b45309;font-size:12px">'
+                   '⚠ biz.v2_trade_log 缺 position_scale 列 —— 迁移 '
+                   '<b>fix_100_v2_trade_log_position_scale.sql</b> 尚未执行，'
+                   '仓位系数未落库（名义仍可从 notional_usdt 校验）。</div>')
+
+    rows_audit = [
+        ("A 档弱动能档 dd 闸门",
+         f"chg24∈[{a_lo:g}%,{a_hi:g}%) 且 dd≥{dd_min:g}% → skip，"
+         f"exec_reason=dd_exceed_low_chg；chg24≥{a_hi:g}% 不过滤；B 档不受影响",
+         f"实盘拦截 <b>{act_all}</b> 条（近 7 天 {act_7}）；规则重算应拦 "
+         f"{len(blk_all or [])} 条（已结算 {sb['matured']}）；"
+         f"强动能档(chg24≥{a_hi:g}%)实盘被拦 <b>{strong_act}</b> 条（应为 0；"
+         f"该档 dd≥{dd_min:g}% 共 {strong_blk} 条，应全部放行）；"
+         f"B 档被拦 {b_act} 条（应为 0）",
+         chip(*dd_status)),
+        ("B 档名义减半",
+         "MID_LONG 名义 20U → 10U（position_scale=0.5，杠杆 1x 不变）",
+         f"改动后 {ma['n']} 笔，名义均值 {_u1(ma['notional_mean'], 'U')}"
+         f"（改动前 {mb['n']} 笔 / {_u1(mb['notional_mean'], 'U')}）",
+         chip(*notional_status)),
+        ("B 档持仓上限 168h → 24h",
+         "新单 planned_hold_h=24，不再出现 168；到期出场应仍为 0 笔",
+         f"改动后 planned_hold_h = {'/'.join(str(h) for h in ma['holds']) or '-'}；"
+         f"到期出场 {ma['expiry']} 笔；实际持仓中位 {_u1(ma['hold_med'], 'h')}",
+         chip(*hold_status)),
+    ]
+    audit_trs = "".join(
+        f'<tr><td style="white-space:nowrap"><b>{k}</b></td>'
+        f'<td style="color:#4b5563">{e}</td><td>{m}</td><td>{c}</td></tr>'
+        for k, e, m, c in rows_audit)
+
+    return f"""
+    <p style="margin:14px 0 4px"><b>⑤ 本轮改动生效看板</b>
+      <span style="color:#777;font-weight:normal">— 2026-11-11 三项改动「期望 vs 实测」，
+      回答「改对了没有」；改动前 = open_ts 早于 {ROLLOUT_DAY}（北京时间）</span></p>
+    <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;font-size:12px">
+      <tr style="background:#f5f5f5"><th>改动</th><th>期望</th><th>实测</th><th>判定</th></tr>
+      {audit_trs}
+    </table>
+    {scale_s}
+    <p style="margin:12px 0 4px;font-size:13px"><b>5.1 dd 闸门 · 放行 vs 拦截</b>
+      <span style="color:#777;font-size:12px">（规则重算：A 档 chg24∈[{a_lo:g}%,{a_hi:g}%)
+      按 dd≥{dd_min:g}% 分两组，结算口径同 ①；被拦信号无真实成交，仅理想化结算）</span></p>
+    <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;font-size:12px">
+      <tr style="background:#f5f5f5"><th rowspan="2">窗口</th>
+          <th colspan="4" style="background:#fef2f2">dd≥{dd_min:g}%（闸门会跳过）</th>
+          <th colspan="4" style="background:#ecfdf5">dd&lt;{dd_min:g}%（闸门会买入）</th>
+          <th rowspan="2">实盘拦截数</th></tr>
+      <tr style="background:#f5f5f5"><th>已结算</th><th>胜率</th><th>均收益</th><th>PF</th>
+          <th>已结算</th><th>胜率</th><th>均收益</th><th>PF</th></tr>
+      {''.join(dd_trs)}
+    </table>
+    <p style="margin:6px 0 0;color:#777;font-size:12px">
+      dd = 1 − 信号价 / 24h 阶段高点（1h 高点，口径同 bin/backtest_a_position.py）；
+      落库值 dd_24h_pct 优先，缺失则按 event_bar_ts 重算。⚠ = 已结算 n&lt;15 小样本。</p>
+    {dd_verdict}
+    <p style="margin:12px 0 4px;font-size:13px"><b>5.2 B 档成交校验</b>
+      <span style="color:#777;font-size:12px">（名义应 10U / 计划持仓应 24h；改动前后并排）</span></p>
+    <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;font-size:12px">
+      <tr style="background:#f5f5f5"><th>分组</th><th>n</th><th>名义均值</th><th>名义区间</th>
+          <th>计划持仓</th><th>实际持仓中位</th><th>到期出场</th></tr>
+      {mid_row(f"改动前（&lt; {ROLLOUT_DAY}）", mb)}
+      {mid_row(f"改动后（≥ {ROLLOUT_DAY}）", ma)}
+    </table>
+    <p style="margin:6px 0 0;color:#777;font-size:12px">
+      到期出场 = exit_reason='expiry'；B 档实际持仓中位约 4h（回测口径），
+      因此「到期出场 0 笔」也是正常，重点看 planned_hold_h 是否已写 24。</p>"""
+
+
 def _conclusion(rows: list[dict], trades: list[dict], anchor: date, profiles: dict) -> str:
     """顶部一句话结论：信号结算 A 档（SHORT_LONG）近 7 天 vs 回测基准 + 同期真实成交。
 
@@ -470,6 +752,105 @@ def _conclusion(rows: list[dict], trades: list[dict], anchor: date, profiles: di
             + real_part)
 
 
+def _strategy_logic() -> str:
+    """⑥ 实盘策略运行逻辑：流程骨架 + 全链路参数（常量实时取自 execute_gainers_v2）。
+
+    所有数字（白名单/杠杆/名义/时效/限价/初始止损/保本/硬顶）一律引用执行器模块常量，
+    单一事实来源——执行器改动次日日报自动同步，供日后核对优化；不一致时以代码为准。
+    """
+    head = ('<p style="margin:14px 0 4px"><b>⑥ 实盘策略运行逻辑</b>'
+            '<span style="color:#777;font-weight:normal">— 数字实时取自 '
+            'bin/execute_gainers_v2.py 常量（单一事实来源），执行器改动次日自动同步</span></p>')
+    if _v2 is None:
+        return head + ('<p style="color:#b91c1c;font-size:12px">'
+                       '执行器模块导入失败，本节不可用</p>')
+    p, lev, notn = _v2.PARAMS, _v2.LEVERAGE_BY_SIGNAL, _v2.NOTIONAL_BY_SIGNAL
+
+    # 仓位系数（2026-11-11）：A 档弱动能档半仓、B 档整体减半 —— 展示实际到手名义
+    a_scale = float(getattr(_v2, "A_HALF_POSITION_SCALE", 0.5))
+    b_scale = float(getattr(_v2, "B_POSITION_SCALE", 0.5))
+
+    def _notional_s(code: str) -> str:
+        nt = notn.get(code)
+        if not isinstance(nt, (int, float)):
+            return "-"
+        if code == "SHORT_LONG":
+            return f"{nt:g}U（chg24 50~75% 半仓 {nt * a_scale:g}U）"
+        if code == "MID_LONG":
+            return f"{nt:g}U×{b_scale:g}={nt * b_scale:g}U"
+        return f"{nt:g}U"
+
+    def _sig(code: str, cond: str, note: str = "") -> str:
+        d = p.get(code, {})
+        tp = f"TP {float(d['TP']) * 100:g}% / " if d.get("TP") else ""
+        return (f'<li><b>{TYPE_LABEL.get(code, code)}</b>（{cond}）：'
+                f'{lev.get(code, "-")}x / {_notional_s(code)} 名义，'
+                f'持有 {d.get("N", "-")}h，{tp}TR {float(d.get("TR") or 0) * 100:g}% / '
+                f'SL {float(d.get("SL") or 0) * 100:g}%{note}</li>')
+
+    sig_list = ('<ul style="margin:2px 0;padding-left:18px">'
+                + _sig("SHORT_LONG", "chg24 ≥ 50%")
+                + _sig("MID_LONG", "chg24 30~50% 且 vr≥5.6（扫描器过滤）")
+                + _sig("TRAP_SHORT", "chg24 &lt; 5%", " — <b>仅研究观察，不实盘</b>")
+                + "</ul>")
+    items = [
+        ("流程",
+         "扫描器 scan_gainers_v2（30min/轮，涨幅榜定位×强度确认，<b>告警邮件仅推 A</b>）"
+         " → 执行器 execute_gainers_v2（--apply --watch 常驻，10min 轮询）"
+         " → 入场闸门 → 限价挂单 + 保护单同步布防 → <b>limit_pending 状态机</b>"
+         "（每轮先补录成交 / 超时撤单放弃，元数据落库、重启续跑）"
+         " → 持仓管理（首小时初始止损 / EMA7 线破出场 / 保本上移）→ 到期强平"
+         " → collect_gainer_outcome 结算 → 本日报"),
+        ("信号白名单", sig_list),
+        ("信号时效",
+         f"scan_ts 距今 ≤ {_v2.MAX_SIGNAL_AGE_H}h，超时信号不执行"
+         "（防停机重启后把陈旧信号当真单打下）"),
+        ("入场闸门（按序）",
+         "① 余额闸门：可用余额 &lt; 保证金×1.2 → skip(balance_low)；"
+         "② 同币不叠仓：账户持仓按 symbol 去重（dust&lt;5U 过滤），含跨信号互斥、"
+         "同币 limit_pending 期间不开第二张；"
+         "③ 5m 动量闸门：最近 30min 收益 ≥0 或 上根 5m 涨幅 &gt;2%"
+         "（K线不足 fail-open），否则 skip(momentum_decayed)；"
+         "④ A 档弱动能档回撤闸门（2026-11-11）：A 档 chg24∈"
+         f"[{float(getattr(_v2, 'A_HALF_CHG24_RANGE', (50.0, 75.0))[0]):g}%,"
+         f"{float(getattr(_v2, 'A_HALF_CHG24_RANGE', (50.0, 75.0))[1]):g}%) 且 "
+         f"dd(距 24h 阶段高点回撤)≥{float(getattr(_v2, 'DD_SKIP_MIN_PCT', 5.0)):g}% → "
+         "skip(dd_exceed_low_chg)；<b>chg24 ≥75% 不过滤</b>（该档回撤是洗盘，右尾来源）；"
+         "dd 缺失 fail-open；"
+         "⑤ 价格守卫：现价 ≤ 限价×(1−SL)（信号后已崩）→ skip(price_below_sl_zone)"),
+        ("入场方式（时间线 #10，2026-11-11）",
+         f"5m 回撤限价：挂 <b>信号价×(1−{_v2.LIMIT_ENTRY_DISCOUNT_PCT:g}%)</b> GTC 限价单等回撤，"
+         f"<b>{_v2.LIMIT_ENTRY_WAIT_MIN}min</b> 未成交 → 撤限价单+清保护单 → 放弃"
+         "（回测 V1s 口径 <b>不追</b>，全历史配对 +49~57bp、t≈9~12）；SL 在挂单同一调用内布防"
+         "（限价买单价必高于止损触发价，成交必然先于触发，<b>无裸奔窗口</b>）"),
+        ("首小时初始止损",
+         f"max(EMA{_v2.EMA_INIT_PERIOD}×(1−{_v2.EMA_INIT_BUF:.0%}), entry×(1−SL))，"
+         f"线与现价须差 ≥{_v2.EMA_INIT_MIN_GAP:.0%} 否则回退固定 SL；常驻不撤；"
+         "首小时不做出场逻辑，只靠该止损"),
+        ("出场（第 2h 起）",
+         f"已收盘 1h close 的 <b>EMA{_v2.EMA_TRAIL_PERIOD} 裸线</b>：现价破线 → 撤保护单 + "
+         "市价按数量全平(exit_reason=trail)；与交易所侧止损互为兜底"
+         "（软件防挂单链路坏，交易所单防进程挂）"),
+        ("保本上移",
+         f"浮盈 ≥{_v2.BREAKEVEN_TRIGGER_PCT:g}% → 止损重挂为 "
+         f"max(entry±{_v2.BREAKEVEN_COST_COVER_PCT:g}%, EMA7 线) 取更紧者，"
+         "只上移不回撤（0.4% 覆盖手续费+滑点）"),
+        ("兜底与风控",
+         f"SL {float(p.get('SHORT_LONG', {}).get('SL') or 0) * 100:g}% STOP_MARKET"
+         "（algo closePosition）静默兜底 + 持有 N 小时到期市价强平；"
+         f"单笔亏损硬顶 = 权益 {_v2.MAX_LOSS_EQUITY_PCT:g}%"),
+        ("核对提示",
+         "本节数字与 <b>bin/execute_gainers_v2.py</b> 同步渲染；改动史见"
+         "《实盘策略改进链路与回测差距》分析材料（时间线 #0~#10）。"
+         "若本节与执行器代码不一致，<b>以代码为准</b>。"),
+    ]
+    trs = "".join(
+        f'<tr><td style="background:#f5f5f5;vertical-align:top;white-space:nowrap">'
+        f'<b>{k}</b></td><td style="min-width:480px">{v}</td></tr>' for k, v in items)
+    return (head + '<table border="1" cellspacing="0" cellpadding="6" '
+            f'style="border-collapse:collapse;font-size:12px">{trs}</table>')
+
+
 def _research_table(rows: list[dict], anchor: date, days: int) -> str:
     """研究观察（非实盘，如 C/TRAP_SHORT）：单列一张表，⚠ 绝不并入累积追踪线。"""
     if not rows:
@@ -481,7 +862,7 @@ def _research_table(rows: list[dict], anchor: date, days: int) -> str:
                    f"<td>{st['matured']}</td><td>{st['censored']}</td><td>{_pct(st['win_rate'])}</td>"
                    f"<td>{_num(st['pf'])}</td><td>{_sgn(st['mean'])}</td></tr>")
     return f"""
-    <p style="margin:14px 0 4px"><b>⑤ 研究观察（非实盘）</b>
+    <p style="margin:14px 0 4px"><b>⑦ 研究观察（非实盘）</b>
       <span style="color:#b91c1c">⚠ 不交易、不计入累积追踪线</span>（近 {days} 天）</p>
     <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;font-size:12px">
       <tr style="background:#f5f5f5"><th>信号</th><th>n</th><th>已结算</th><th>剔除(OPEN)</th>
@@ -494,10 +875,12 @@ def render_html(rows: list[dict], trades: list[dict], anchor: date, days: int, p
                 live_types: tuple[str, ...] = LIVE_SIGNALS,
                 include_research: bool = False,
                 gate_rows: list[dict] | None = None,
-                gate_skips: list[dict] | None = None) -> tuple[str, str]:
+                gate_skips: list[dict] | None = None,
+                audit: tuple[list[dict], list[dict], bool] | None = None) -> tuple[str, str]:
     """渲染日报 HTML。rows=全部结算行、trades=全部真实成交行；内部按 live_types 拆分实盘/研究。
 
     gate_rows/gate_skips：动量闸门重算结果与实盘拦截记录（None → ④节显示不可用）。
+    audit：(dd 对照行, B 档成交行, position_scale 列是否存在)，None → ⑤节显示不可用。
     """
     live_rows = [r for r in rows if r["signal_type"] in live_types]
     research_rows = [r for r in rows if r["signal_type"] not in live_types]
@@ -506,6 +889,10 @@ def render_html(rows: list[dict], trades: list[dict], anchor: date, days: int, p
     bench, warns = _bench_table(live_rows, live_trades, anchor, days, profiles)
     research = _research_table(research_rows, anchor, days) if include_research else ""
     gate = _gate_table(gate_rows or [], gate_skips or [], anchor, days)
+    board = (_change_board(audit[0], audit[1], audit[2], anchor, days) if audit else
+             '<p style="margin:14px 0 4px"><b>⑤ 本轮改动生效看板</b> '
+             '<span style="color:#b91c1c;font-size:12px">取数失败，本节不可用</span></p>')
+    logic = _strategy_logic()
     now = datetime.now(SH).strftime("%Y-%m-%d %H:%M")
     html = f"""<html><body style="font-family:Arial,'Microsoft YaHei',sans-serif;color:#222">
       <h2 style="margin:0 0 4px">涨幅榜实盘策略日报 · {anchor}</h2>
@@ -517,6 +904,8 @@ def render_html(rows: list[dict], trades: list[dict], anchor: date, days: int, p
       {_track_table(live_rows, live_trades, anchor, days)}
       {bench}
       {gate}
+      {board}
+      {logic}
       {research}
       {warns}
       <p style="margin:14px 0 0;color:#999;font-size:12px">
@@ -577,11 +966,16 @@ def main() -> int:
             conn, settings,
             [r for r in rows if r["signal_type"] in live_types
              and r["matured"] and r["ret_net"] is not None])
+        try:
+            audit = load_change_audit(conn, live_types)
+        except Exception as e:  # noqa: BLE001 — 看板故障不拖垮日报其余部分
+            print(f"[warn] 改动看板取数失败: {type(e).__name__}: {e}")
+            audit = None
     live_n = sum(1 for r in rows if r["signal_type"] in live_types)
     profiles = load_exit_profile()
     html, conclusion = render_html(rows, trades, anchor, args.days, profiles,
                                    live_types, args.include_research,
-                                   gate_rows, gate_skips)
+                                   gate_rows, gate_skips, audit)
     subject = build_subject(_subject_line(
         [r for r in rows if r["signal_type"] in live_types],
         [t for t in trades if t["signal_type"] in live_types], anchor, profiles))
@@ -592,6 +986,13 @@ def main() -> int:
           f" · 真实成交 {closed_n} 笔已平仓"
           f" · 闸门重算 放行 {gp_n} / 拦截 {len(gate_rows) - gp_n}"
           f"（实盘 momentum_decayed 拦截 {len(gate_skips)}）· {conclusion}")
+    if audit:
+        dd_act = sum(1 for r in audit[0]
+                     if str(r.get("exec_reason") or "").startswith("dd_exceed_low_chg"))
+        after_n = sum(1 for r in audit[1] if r["day"] >= ROLLOUT_DAY)
+        print(f"[gainer-report] 改动看板 · dd 闸门实盘拦截 {dd_act} 条"
+              f" · B 档改动后成交 {after_n} 笔"
+              f" · position_scale 列 {'有' if audit[2] else '缺（迁移未执行）'}")
 
     if args.dry_run:
         print(subject)

@@ -93,8 +93,24 @@ MAX_SIGNAL_AGE_H = 2
 # 保本线不是 0%（纯保本）：STOP_MARKET 触发为市价单有滑点 + 双边 taker 手续费，
 # 停在入场价实际是亏损离场。0.4% = 0.1% 双边 taker（0.05%×2）+ 0.3% 滑点预算
 # （与项目回测 COST=0.003 口径一致；放量大阳币急跌时盘口瞬时薄，保守给足）。
-BREAKEVEN_TRIGGER_PCT = 5.0        # 浮盈 ≥5% 触发止损上移
+BREAKEVEN_TRIGGER_PCT = 5.0        # 浮盈 ≥5% 觻发止损上移
 BREAKEVEN_COST_COVER_PCT = 0.4      # 保本线：入场价 +0.4%（多单）/ −0.4%（空单），覆盖手续费+滑点
+
+
+# ── 5m 回撤限价入场（2026-11-11 回测拍板，bin/backtest_5m_entry.py）────────────
+# 信号后不再追市价：挂 信号价×(1−0.5%) GTC 限价单等待回撤成交，1h 未成交撤单放弃。
+# 依据（本地 1h/5m K 线全历史 5,272 事件、出场规则全变体一致）：
+#   - 信号后 1h 内 95~96% 的概率回撤 ≥0.5%，限价几乎总能成交；
+#   - 「限价+放弃」（V1s）配对提升 +49bp(A)/+57bp(B)，t≈9~12——近乎机械的入场价节省；
+#   - 未成交的 4~5% 是继续暴拉的强势币，窗口末追入会把收益全部吃掉（V1 补入版配对归零）
+#     → 宁可放弃也不追，这正是「放弃版 > 补入版」的原因；
+#   - 附带消灭实盘实测 +52.8bp 追单滑点（回测按理想成交未计入，实盘改善更大）；
+#   - 「30min 走强确认再追入」明确有害（配对 −420bp，t=−14），不做。
+# 防裸奔：保护单（SL）在挂限价单的同一调用里同步布防——限价买单价必然高于止损
+# 触发价，价格必须先穿过买价才能触及止损 → 成交必然先于触发，无「止损先于成交被
+# 消耗」风险，也无成交后补挂的裸奔窗口。
+LIMIT_ENTRY_DISCOUNT_PCT = 0.5   # 挂单价 = 信号价 ×(1−0.5%)（回测 V1s 口径）
+LIMIT_ENTRY_WAIT_MIN = 60        # 成交等待窗口（分钟），超时撤单（含 SL/TP）放弃
 
 
 def _fmt(t: datetime) -> str:
@@ -111,6 +127,11 @@ def load_pending(conn, max_rows: int = 20) -> list[dict]:
             "WHERE status = 'active' AND exec_state IS NULL "
             "  AND signal_type = ANY(%s::text[]) "
             "  AND scan_ts >= NOW() - (%s * INTERVAL '1 hour') "
+            # 同币存在未成交的限价挂单（limit_pending）时不再开第二张：
+            # 等待期内持仓尚未成形，already_holding 闸门拦不住同币第二信号
+            "  AND NOT EXISTS (SELECT 1 FROM biz.scan_gainer_signal lp "
+            "                  WHERE lp.exec_state = 'limit_pending' "
+            "                    AND lp.symbol = biz.scan_gainer_signal.symbol) "
             "ORDER BY scan_ts DESC LIMIT %s",
             (list(LIVE_SIGNALS), MAX_SIGNAL_AGE_H, max_rows),
         )
@@ -510,6 +531,22 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
         print(f"  [gate] {sig['symbol']} 动量衰减拦截: "
               f"r30={mom_info.get('r30')} spke={mom_info.get('spke')}")
         return rec
+    # ── 5m 回撤限价入场：挂 信号价×0.995 等回撤（2026-11-11，常量区有回测依据）──
+    sig_px = float(sig.get("price_usd") or 0)
+    if sig_px <= 0:
+        rec.update(decision="skipped", reason="no_signal_price")
+        return rec
+    limit_px = sig_px * (1 - LIMIT_ENTRY_DISCOUNT_PCT / 100)
+    # 现价已跌破 限价×(1−SL)（信号后已崩 ≥15%）：挂单会在止损区附近成交，
+    # SL 触发价与成交价无法保持合法间隙（多单挂出即触发）→ 入场条件已失效，放弃。
+    try:
+        cur_px = client.get_price(sig["symbol"])
+    except Exception:  # noqa: BLE001
+        cur_px = 0
+    if cur_px > 0 and p.get("SL") and cur_px <= limit_px * (1 - p["SL"]):
+        rec.update(decision="skipped",
+                   reason=f"price_below_sl_zone cur={cur_px:.6g} limit={limit_px:.6g}")
+        return rec
     # 下单
     client.set_leverage(sig["symbol"], lev)
     # ⚠️ open_position/place_trailing_stop 的 direction 契约是**小写** long/short；
@@ -540,7 +577,10 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
     try:
         r = client.open_position(
             sig["symbol"], direction, notional,
-            entry_price=None, leverage=lev,
+            # 5m 回撤限价（2026-11-11）：LIMIT 代替 MARKET，保护单在同一调用内随挂单
+            # 布防（成交先于 SL 触发，无裸奔窗口）；成交状态由 _process_limit_entries 轮询
+            entry_price=limit_px,
+            leverage=lev,
             stop_loss_pct=p["SL"] * 100 if p.get("SL") else 0,
             # EMA 初始止损线（None=固定 SL）：open_position 内与 fill×(1-SL) 取更紧者，
             # 15% 风险帽始终生效（防 EMA 落后大阳线时首小时亏损超限）
@@ -615,11 +655,26 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
         tp = protective.get("take_profit")
         if isinstance(tp, dict) and "error" in tp:
             print(f"  [verify] {sig['symbol']} TP 挂单失败（SL/TR 仍在，继续）: {tp['error']}")
-        rec.update(decision="ordered", order=order_id, reason="ok", order_id=order_id,
+        # 限价挂单（未立即成交）：exec_state='limit_pending'，由
+        # _process_limit_entries 轮询：成交 → 补录 ordered+trade_log；
+        # 超时（LIMIT_ENTRY_WAIT_MIN）→ 撤限价单+保护单，标 skipped=limit_unfilled。
+        rec.update(decision="limit_pending", order=order_id, order_id=order_id,
                    client_order_id=r.get("clientOrderId"),
+                   reason=f"limit_placed px={limit_px:.6g}",
                    open_price=avg, open_qty=qty,
                    margin=(notional / lev) if lev else None,
-                   entry_resp=entry_resp, protective=protective)
+                   entry_resp=entry_resp, protective=protective,
+                   # 成交补录（_complete_limit_fill）所需全量元数据随 params 落库：
+                   # 状态机靠它在重启后续跑（open_qty/notional/protective…一个都不能少）
+                   limit={"order_id": order_id, "px": limit_px,
+                          "placed_at": datetime.now(timezone.utc).isoformat(),
+                          "wait_min": LIMIT_ENTRY_WAIT_MIN,
+                          "open_qty": qty, "notional": notional, "leverage": lev,
+                          "margin": (notional / lev) if lev else None,
+                          "client_order_id": r.get("clientOrderId"),
+                          "entry_resp": entry_resp, "protective": protective})
+        print(f"  [limit-entry] {sig['symbol']} 挂 {limit_px:.6g} ×{qty} 等回撤成交"
+              f"（{LIMIT_ENTRY_WAIT_MIN}min 窗口，orderId={order_id}）")
     except Exception as e:  # noqa: BLE001
         rec.update(decision="error", reason=f"{type(e).__name__}: {e}")
     return rec
@@ -1327,6 +1382,178 @@ def close_symbol(client, symbol: str) -> int:
     return 1
 
 
+def _insert_trade_log(conn, sig: dict, rec: dict, settings, live: bool) -> None:
+    """开仓（含 aborted 回滚）后写 v2_trade_log：全量留痕，ON CONFLICT 幂等。
+
+    limit_pending 成交后的补录（_complete_limit_fill）与首次市价/限价入场共用本函数。
+    """
+    sp = sig.get("params") or {}
+    eo = sp.get("event_bar_ts")
+    eo_dt = None
+    if eo:
+        try:
+            eo_dt = datetime.fromisoformat(eo)
+        except (TypeError, ValueError):
+            eo_dt = None
+    p = rec.get("params") or {}
+    aborted = rec.get("decision") == "aborted"
+    # aborted（保护单失败已回滚）：不落成交价/量，close_ts=now，
+    # exit_reason='aborted_protective' 标记即时了结，留痕可追溯。
+    v2_open_price = None if aborted else rec.get("open_price")
+    v2_open_qty = None if aborted else rec.get("open_qty")
+    v2_close_ts = datetime.now(timezone.utc) if aborted else None
+    v2_exit_reason = "aborted_protective" if aborted else None
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO biz.v2_trade_log ("
+            " signal_id, symbol, signal_type, direction, open_ts,"
+            " open_price, open_qty, notional_usdt, leverage, order_id,"
+            " origin, signal_window, scan_ts, event_bar_ts, ref_price_usd,"
+            " chg_24h_pct, chg1h_pct, vr_1h, funding_rate, vol_24h_usd,"
+            " margin_usdt, planned_hold_h, sl_pct, tr_pct, tp_pct,"
+            " entry_client_order_id, entry_resp, protective_orders,"
+            " close_ts, exit_reason, base_url, dry_run, updated_at"
+            ") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+            " %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,"
+            " %s,%s,%s,%s,NOW()) "
+            "ON CONFLICT (signal_id) DO NOTHING",
+            (sig["id"], sig["symbol"], sig["signal_type"], sig["direction"],
+             datetime.now(timezone.utc), v2_open_price,
+             v2_open_qty, rec.get("notional"), rec.get("leverage"),
+             rec.get("order_id"), "bot", sig.get("signal_window"),
+             sig.get("scan_ts"), eo_dt, sig.get("price_usd"),
+             sig.get("chg_24h_pct"), sp.get("chg1h_pct"), sp.get("vr_1h"),
+             sig.get("funding_rate"), sig.get("vol_24h_usd"),
+             rec.get("margin"), p.get("N"), p.get("SL"), p.get("TR"),
+             p.get("TP"), rec.get("client_order_id"),
+             json.dumps(rec.get("entry_resp")) if rec.get("entry_resp") else None,
+             json.dumps(rec.get("protective")) if rec.get("protective") else None,
+             v2_close_ts, v2_exit_reason,
+             settings.binance_fapi_base_url, not live),
+        )
+
+
+def _complete_limit_fill(conn, settings, sig: dict, meta: dict, order: dict) -> None:
+    """限价入场单成交 → 补录 exec_state='ordered' + v2_trade_log。
+
+    保护单（SL）在挂单时已布防（成交必然先于 SL 触发，见常量区注释），这里只补数据。
+    open_ts = 成交确认时刻（到期平仓 N 小时从此起算，对齐真实持仓时长）。
+    """
+    avg = float(order.get("avgPrice") or 0) or float(meta.get("px") or 0)
+    qty = float(order.get("executedQty") or 0) or float(meta.get("open_qty") or 0)
+    p = PARAMS.get(sig["signal_type"]) or {}
+    entry_resp = dict(meta.get("entry_resp") or {})
+    entry_resp["_fetched_order"] = order
+    rec = {
+        "signal_id": sig["id"], "symbol": sig["symbol"], "signal_type": sig["signal_type"],
+        "direction": sig["direction"], "decision": "ordered", "reason": "limit_filled",
+        "params": p, "order_id": meta.get("order_id"),
+        "client_order_id": meta.get("client_order_id"),
+        "open_price": avg, "open_qty": qty,
+        "notional": meta.get("notional"), "leverage": meta.get("leverage"),
+        "margin": meta.get("margin"),
+        "entry_resp": entry_resp, "protective": meta.get("protective"),
+    }
+    audit = {"exec_reason": "limit_filled",
+             "exec_at": datetime.now(timezone.utc).isoformat(),
+             "limit_fill": {"avg": avg, "qty": qty,
+                            "status": order.get("status")}}
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE biz.scan_gainer_signal SET exec_state='ordered', executed_at=%s, "
+            "params = COALESCE(params, '{}'::jsonb) || %s::jsonb WHERE id=%s",
+            (datetime.now(timezone.utc), json.dumps(audit), sig["id"]),
+        )
+    _insert_trade_log(conn, sig, rec, settings, live=True)
+    print(f"  [limit-entry] {sig['symbol']} 成交补录 avg={avg:.6g} qty={qty}")
+
+
+def _process_limit_entries(client, settings, live: bool) -> None:
+    """5m 限价挂单状态机（exec_state='limit_pending'）：成交 → 补录；超时 → 撤单放弃。
+
+    - FILLED → _complete_limit_fill（写 ordered + trade_log）。
+    - ≥ LIMIT_ENTRY_WAIT_MIN 分钟未成交 → 撤余量单 + 清保护单（_cancel_protective_orders
+      会清掉该 symbol 的全部挂单）→ 标 skipped(limit_unfilled)——回测 V1s 口径：不追。
+    - 撤单后复核发现已成交（撤单竞态）→ 仍按成交补录，绝不丢真实持仓；
+      复核查询失败 → 本轮跳过下轮重试（宁可晚补录也不误判）。
+    - 仅 live（--apply 且 V2_TRADE_ENABLED=1）执行：本地 dry-run 不碰云端挂单状态。
+    """
+    if not live:
+        return
+    with get_connection(settings.database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, symbol, signal_type, direction, signal_window, scan_ts, "
+                "       price_usd, chg_24h_pct, funding_rate, vol_24h_usd, params "
+                "FROM biz.scan_gainer_signal WHERE exec_state='limit_pending' ORDER BY id")
+            cols = [d.name for d in cur.description]
+            rows = [dict(zip(cols, rr)) for rr in cur.fetchall()]
+        for sig in rows:
+            meta = (sig.get("params") or {}).get("limit_entry") or {}
+            oid = meta.get("order_id")
+            try:
+                placed_at = datetime.fromisoformat(meta["placed_at"])
+                age_min = (datetime.now(timezone.utc) - placed_at).total_seconds() / 60
+            except (KeyError, TypeError, ValueError):
+                age_min = -1.0
+            if not oid or age_min < 0:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE biz.scan_gainer_signal SET exec_state='error', executed_at=%s, "
+                        "params = COALESCE(params, '{}'::jsonb) || "
+                        "{\"exec_reason\":\"limit_meta_corrupt\"}::jsonb WHERE id=%s",
+                        (datetime.now(timezone.utc), sig["id"]))
+                print(f"  [limit-entry] {sig['symbol']} limit_entry 元数据缺失/损坏，标 error 待人工")
+                continue
+            try:
+                o = client.get_order(sig["symbol"], oid)
+            except Exception as e:  # noqa: BLE001
+                print(f"  [limit-entry] {sig['symbol']} 查单失败，下轮重试: "
+                      f"{type(e).__name__}: {e}")
+                continue
+            status = str(o.get("status") or "")
+            executed = float(o.get("executedQty") or 0)
+            if status == "FILLED":
+                _complete_limit_fill(conn, settings, sig, meta, o)
+                continue
+            expired = age_min >= LIMIT_ENTRY_WAIT_MIN
+            dead = status in ("CANCELED", "REJECTED", "EXPIRED")
+            if not expired and not dead:
+                print(f"  [limit-entry] {sig['symbol']} {status} 等待回撤 "
+                      f"{age_min:.0f}/{LIMIT_ENTRY_WAIT_MIN}min")
+                continue
+            # ── 到期/单已死：撤余量 → 复核真实成交 → 补录或放弃 ──
+            # 部分成交也必须撤：残单不清会继续成交，实际仓位超出补录 qty（对账错位）
+            if not dead:
+                try:
+                    client.cancel_order(sig["symbol"], oid)
+                except Exception as e:  # noqa: BLE001
+                    print(f"    撤限价单（容忍）{sig['symbol']}: {type(e).__name__}: {e}")
+            try:
+                o2 = client.get_order(sig["symbol"], oid)
+            except Exception as e:  # noqa: BLE001
+                print(f"    撤单后复核失败，下轮重试 {sig['symbol']}: {type(e).__name__}: {e}")
+                continue
+            ex2 = float(o2.get("executedQty") or 0)
+            st2 = str(o2.get("status") or "")
+            if ex2 > 0 or st2 == "FILLED":
+                _complete_limit_fill(conn, settings, sig, meta, o2)
+                continue
+            if st2 in ("NEW", "PARTIALLY_FILLED", "PENDING_CANCEL"):
+                print(f"    撤单未生效（{st2}），下轮再试 {sig['symbol']}")
+                continue
+            # 确认零成交 → 放弃：清掉限价残单 + 保护单，标 skipped
+            _cancel_protective_orders(client, sig["symbol"], meta.get("protective"))
+            audit = {"exec_reason": "limit_unfilled",
+                     "exec_at": datetime.now(timezone.utc).isoformat()}
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE biz.scan_gainer_signal SET exec_state='skipped', executed_at=%s, "
+                    "params = COALESCE(params, '{}'::jsonb) || %s::jsonb WHERE id=%s",
+                    (datetime.now(timezone.utc), json.dumps(audit), sig["id"]))
+            print(f"  [limit-entry] {sig['symbol']} {age_min:.0f}min 未回撤成交 → 撤单放弃")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true", help="真实下单（需 V2_TRADE_ENABLED=1）")
@@ -1353,6 +1580,8 @@ def main() -> int:
 
     while True:
         try:
+            # 5m 限价挂单状态机：先补录成交 / 超时撤单放弃，再处理新信号
+            _process_limit_entries(client, settings, live)
             with get_connection(settings.database_url) as conn:
                 pending = load_pending(conn, args.max_rows)
             if not pending:
@@ -1361,7 +1590,8 @@ def main() -> int:
                 rec = place_order(client, settings, sig, live)
                 print(f"  {sig['symbol']:<12} {sig['signal_type']:<12} {sig['direction']:<6} "
                       f"→ {rec['decision']} {rec.get('reason','')} {rec.get('order','')}")
-                if rec["decision"] in ("ordered", "aborted", "skipped", "error"):
+                if rec["decision"] in ("ordered", "aborted", "skipped", "error",
+                                       "limit_pending"):
                     with get_connection(settings.database_url) as conn:
                         with conn.cursor() as cur:
                             # 审计：把决策原因合并进 params JSONB，方便事后追溯 skipped/error
@@ -1373,6 +1603,10 @@ def main() -> int:
                             if rec.get("momentum") is not None:
                                 # 动量闸门快照（r30/spke/gate）：事后归因「为何拦/为何放」
                                 _audit_patch["momentum"] = rec["momentum"]
+                            if rec.get("limit") is not None:
+                                # 5m 限价挂单元数据（order_id/挂单价/挂单时刻）：
+                                # 成交/超时的状态机（_process_limit_entries）靠它续跑，重启不丢
+                                _audit_patch["limit_entry"] = rec["limit"]
                             cur.execute(
                                 "UPDATE biz.scan_gainer_signal SET exec_state=%s, executed_at=%s, "
                                 "params = COALESCE(params, '{}'::jsonb) || %s::jsonb "
@@ -1383,51 +1617,10 @@ def main() -> int:
                         # 实盘开仓 → 写 v2_trade_log（全量留痕，供追溯复验 + 完善策略）
                         # 只记机器人单（origin='bot'）；手动单不经过本脚本、不入本表。
                         # aborted = 保护单失败已回滚，同样留痕（exit_reason='aborted_protective'）。
+                        # limit_pending 不在此写库——挂单阶段还没成交，成交后由
+                        # _complete_limit_fill 补录（open_ts=真实成交确认时刻）。
                         if rec["decision"] in ("ordered", "aborted"):
-                            sp = sig.get("params") or {}
-                            eo = sp.get("event_bar_ts")
-                            eo_dt = None
-                            if eo:
-                                try:
-                                    eo_dt = datetime.fromisoformat(eo)
-                                except (TypeError, ValueError):
-                                    eo_dt = None
-                            p = rec.get("params") or {}
-                            aborted = rec["decision"] == "aborted"
-                            # aborted（保护单失败已回滚）：不落成交价/量，close_ts=now，
-                            # exit_reason='aborted_protective' 标记即时了结，留痕可追溯。
-                            v2_open_price = None if aborted else rec.get("open_price")
-                            v2_open_qty = None if aborted else rec.get("open_qty")
-                            v2_close_ts = datetime.now(timezone.utc) if aborted else None
-                            v2_exit_reason = "aborted_protective" if aborted else None
-                            with conn.cursor() as cur:
-                                cur.execute(
-                                    "INSERT INTO biz.v2_trade_log ("
-                                    " signal_id, symbol, signal_type, direction, open_ts,"
-                                    " open_price, open_qty, notional_usdt, leverage, order_id,"
-                                    " origin, signal_window, scan_ts, event_bar_ts, ref_price_usd,"
-                                    " chg_24h_pct, chg1h_pct, vr_1h, funding_rate, vol_24h_usd,"
-                                    " margin_usdt, planned_hold_h, sl_pct, tr_pct, tp_pct,"
-                                    " entry_client_order_id, entry_resp, protective_orders,"
-                                    " close_ts, exit_reason, base_url, dry_run, updated_at"
-                                    ") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-                                    " %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,"
-                                    " %s,%s,%s,%s,NOW()) "
-                                    "ON CONFLICT (signal_id) DO NOTHING",
-                                    (sig["id"], sig["symbol"], sig["signal_type"], sig["direction"],
-                                     datetime.now(timezone.utc), v2_open_price,
-                                     v2_open_qty, rec.get("notional"), rec.get("leverage"),
-                                     rec.get("order_id"), "bot", sig.get("signal_window"),
-                                     sig.get("scan_ts"), eo_dt, sig.get("price_usd"),
-                                     sig.get("chg_24h_pct"), sp.get("chg1h_pct"), sp.get("vr_1h"),
-                                     sig.get("funding_rate"), sig.get("vol_24h_usd"),
-                                     rec.get("margin"), p.get("N"), p.get("SL"), p.get("TR"),
-                                     p.get("TP"), rec.get("client_order_id"),
-                                     json.dumps(rec.get("entry_resp")) if rec.get("entry_resp") else None,
-                                     json.dumps(rec.get("protective")) if rec.get("protective") else None,
-                                     v2_close_ts, v2_exit_reason,
-                                     settings.binance_fapi_base_url, not live),
-                                )
+                            _insert_trade_log(conn, sig, rec, settings, live)
             if args.watch:
                 # 保护单自愈（补挂缺失/失败硬止损；部署后即给存量裸奔仓补挂）
                 with get_connection(settings.database_url) as conn:

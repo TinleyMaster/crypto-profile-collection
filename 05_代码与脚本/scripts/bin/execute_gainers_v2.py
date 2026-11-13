@@ -5,7 +5,7 @@
   - 信号来自 scan_gainers_v2.py（涨幅榜定位 × 强度确认）
   - 方向：SHORT_LONG 做多；MID_LONG 仅 B 右上角（chg30~50% + vr≥5.6）；TRAP_SHORT 不实盘
   - 交易参数：N 持仓时间 / TP 固定止盈 / TR 跟踪止盈 / SL 固定止损（回测最优，见 PARAMS）
-  - 100U 实验风控：V2_TRADE_ENABLED=1 才下单；分层杠杆/名义（A=3x/60U，其他 1x/20U）
+  - 100U 实验风控：V2_TRADE_ENABLED=1 才下单；分层杠杆/名义（A=3x/30U，其他 1x/20U）
 
 用法：
     python bin/execute_gainers_v2.py --dry-run        # 只打印决策（默认）
@@ -64,19 +64,23 @@ PARAMS: dict[str, dict] = {
 MAX_LOSS_EQUITY_PCT = 15.0  # 单笔最大亏损占总权益 %（硬顶，回测风险约束）
 
 # 分层杠杆/名义（2026-10-07 决策：纯 A 高胜率高赔率 → 加杠杆重仓；其他信号 1x 不加杠杆）
-# - SHORT_LONG（A）：胜率 71.1% / 期望 +5.6% / PF 14.2 → 3x、60U（SL10%×3x=本金 -30%/笔 兜底）
+# - SHORT_LONG（A）：3x 杠杆，名义 60U → **30U**（2026-11-13 用户决策，纯风险预算调整）：
+#   60U×3x 下单笔 SL10% 亏 18U ≈ 权益 18%，已高于 MAX_LOSS_EQUITY_PCT 15% 的硬顶；
+#   降到 30U 后同口径约 9%，给跳空/插针留出余量。仓位是线性缩放，PF/胜率/右尾占比
+#   等方向性结论与名义无关，回测结论按比例缩放后同样成立。
 # - MID_LONG（B）/TRAP_SHORT（C）：1x、20U 小仓试错（不加杠杆）；
 #   B 档自 2026-11-11 起经 position_scale=0.5 实到 10U（见 B_POSITION_SCALE 注释）
 # 未列出的信号类型回退到 env 兜底值。
 LEVERAGE_BY_SIGNAL: dict[str, int] = {"SHORT_LONG": 3, "MID_LONG": 1, "TRAP_SHORT": 1}
-NOTIONAL_BY_SIGNAL: dict[str, float] = {"SHORT_LONG": 60.0, "MID_LONG": 20.0, "TRAP_SHORT": 20.0}
+NOTIONAL_BY_SIGNAL: dict[str, float] = {"SHORT_LONG": 30.0, "MID_LONG": 20.0, "TRAP_SHORT": 20.0}
 
 # A 档按 chg24 分档调仓（2026-11-11 回测拍板，bin/backtest_momentum_gate.py ④）
 # 依据（本地 1h/5m 全历史、实盘口径 −0.5% 限价 + 同币不叠仓、SL10 + EMA7 出场）：
 #   - A 档 chg24 ∈ [50%, 75%) 占 A 档 76.6%（1,314/1,715 笔），均净 −0.40%、累计 −532pp
 #     → 纯亏损池；该档 t≈1.6（SE≈0.25pp），不显著为负 ⇒ 属风险预算决策，不是 alpha 提取。
-#   - 该档半仓（60U→30U，杠杆 3x 不变，只降名义本金）后 A 档：
+#   - 该档半仓（当时基准 60U→30U，杠杆 3x 不变，只降名义本金）后 A 档：
 #     累计 −319pp → −53pp，最大回撤 −933pp → −517pp，均净 −0.19% → −0.05%。
+#   - 2026-11-13 基准降到 30U 后该档实到 15U（两档仍保持 2:1），回测结论按比例缩放成立。
 #   - chg24 ≥ 75% 的右尾档位完全保留（不改出场规则，不削右尾利润）。
 # 边界：恰好 75% 归满仓档（避免临界值随价格抖动反复跳变）。
 # 单位：chg_24h_pct 落库为百分数（scan_gainers_v2.py 写入 chg24×100），故用 50/75 而非 0.5/0.75。
@@ -112,8 +116,82 @@ B_POSITION_SCALE = 0.5
 # 阈值单位：dd_24h_pct 落库为百分数（scan_gainers_v2.py 已 ×100），故用 5.0 而非 0.05。
 DD_SKIP_MIN_PCT = 5.0
 
+# A 档前置渐进形态闸门（2026-11-12 回测拍板，bin/backtest_pre_signal.py Q2b/Q2c）
+# 动机：原提案是「chg24≥15% 观察池 → 5U 试错单 → 涨到 30%/50% 补仓」，回测否决该形态
+#   （PRE 独立 n=14,406、均净 −0.51%、PF 0.83，27 组参数网格无一转正；加进账户后
+#   总盈亏 −8.6U → −309.9U，回撤 −204U → −425U，前置腿时间加权仓位 44.4% 超 30% 约束）。
+# 但同一特征改作 **A 档入场过滤器**（不新增任何仓位）效果稳定：
+#   - 5m 限价口径 A 档 n=2,893：有前置均 +1.30% / PF 1.25 / 右尾 25.2%
+#     vs 无前置 −1.36% / PF 0.77 / 右尾 21.4%；OOS 三段差 +0.71 / +1.98 / +3.56pp。
+#   - 与现行 5m 动量闸门**正交**：闸门放行 84.2% 中再砍 49.0%（非重复过滤）。
+#   - 两个 chg24 子档都有效，且强动能档右尾不受损（≥75%：28.1% vs 25.5%）
+#     ⇒ 与 DD_SKIP_MIN_PCT 不同，本闸门**作用于 A 档全档位**（含 ≥75%）。
+# 特征口径（与回测 pre_mask 逐项对齐，纯 1h bar，实时可算，无需额外状态表）：
+#   存在 k ∈ [事件bar−24h, 事件bar] 使 ①chg24 = close[k]/close[k−24]−1 ∈ [15%,30%)
+#   ②vr = quote_vol[k] ÷ 前 20 根均量 ≥ 3  ③close[k] > max(high[k−4:k])
+# 定性：区分「渐进式上涨」（已进过观察池，可持续）vs「单根垂直拉升」（追高即套）。
+# 单位：chg_24h_pct 落库为百分数，故用 15/30 而非 0.15/0.30。
+PRE_POOL_CHG24_RANGE = (15.0, 30.0)   # 前置观察池 chg24 区间
+PRE_POOL_VR_MIN = 3.0                  # 1h 量比门槛
+PRE_POOL_BREAK_W = 4                   # 突破近 4h 高点
+PRE_POOL_LOOKBACK_H = 24               # A 档信号前 24h 内
+
+# B 档 90d 结构位闸门（2026-11-12 回测拍板，bin/backtest_b_mid_optimize.py Q12/Q15/Q16/Q17）
+# 依据（本地 1h 全历史、实盘口径 −0.5% 限价 + 同币不叠仓、SL10 + EMA7 出场，B 档 n=1,672）：
+#   - 收盘价 ≥ 近 90 天最高价（不含事件 bar）→ 突破组 n=350：均净 +0.82%、PF 1.18、
+#     右尾 20.0%、止损率 21.7%；未破组 n=1,025：均净 −1.04%、PF 0.79、右尾 18.6%。
+#   - 窗口梯度 60/75/90/120/150d 突破组全为正（PF 1.08~1.42）⇒ 平台型因子非单点巧合；
+#     其中仅 90d 与 120d 的 OOS 三段全正。取 90d，不挑 120d 的样本内最大值。
+#   - 判定口径：收盘确认（+0.82%/PF1.18）优于「当根最高价破高」（+0.40%/1.09）；
+#     再加 1% 幅度过滤无增益（+0.63%/1.14）⇒ 用纯收盘口径，不加幅度门槛。
+#   - 上市不足 90 天（无 2160 根前置 1h）独立验证为稳定负期望：n=297、均 −1.71%、
+#     PF 0.67、止损率 28.3% ⇒ **fail-closed 拦截**。与 A 档 pre_pool_gate 的 fail-open
+#     刻意相反：那里是收益优化（管道故障不该停摆），这里数据缺失本身就是拦截理由。
+#   - 叠加 X1 条件阶梯止损后账户口径 +31.5U（base +28.5U），OOS 三段全正。
+# 落地：突破组维持 10U（20U × B_POSITION_SCALE），未破组与新股一律停开。
+B_STRUCT_DAYS = 90
+B_STRUCT_BARS = B_STRUCT_DAYS * 24     # 2160 根 1h（不含事件 bar）
+
+# X1 条件阶梯止损（2026-11-12 回测拍板，同上 Q17）：只对 MID_LONG 生效。
+#   - 初始硬止损 8%（未达 2% 浮盈前收紧左尾）；峰值浮盈 ≥2% 后放宽到 10%（让趋势有呼吸）；
+#   - 单向不可逆：armed 状态持久化在 protective_orders.x1.armed，重启/重挂都不回退；
+#   - 回测：突破组 base 均 +0.82%/PF1.18/回撤 −333pp → X1 均 +0.90%/PF1.21/回撤 −288pp，
+#     右尾 20.0%→19.4%（−0.6pp，未触 1pp 红线），OOS 第二段 −1.3U 翻正 +1.4U。
+#   - A/C 档不启用（A 档验证结论见 bin/backtest_a_struct_x1.py，未拍板前不动）。
+X1_ARM_PCT = 0.02                      # 峰值浮盈 ≥2% 触发放宽
+X1_TIGHT_SL = 0.08                     # 初始紧止损 8%
+X1_LOOSE_SL = 0.10                     # armed 后宽止损 10%
+
+# ── 影子市值分档（2026-11-13）：只记录、不下单、不改仓位 ─────────────────────
+# 目的：实盘并行记录「成交额档 / 流通市值 / 市值排名 / 换手率」，验证 Q13 回测里
+#   小市值组 +1.84% 的超额在扣除真实滑点后是否仍成立。零干预：不参与任何
+#   if / 仓位 / 价格计算，只写 params.shadow_mcap（随审计 JSONB 落库，不新增列）。
+# 为什么不能用成交额代替市值（两条正交轴）：
+#   - 成交额 → 盘口深度/滑点（成本维度）；市值 → 弹性/右尾（收益空间维度）；
+#   - B 档信号条件本身含 vr≥5.6，事件当天的 24h 成交额已被暴涨放大数倍，
+#     单看成交额会把「小币暴涨」误分进大市值档，系统性剔除最该验证的样本。
+# 口径：
+#   - vol_tier 用信号自带 vol_24h_usd，与 Q13 回测严格对齐（唯一有回测先验的分层）；
+#   - 市值 = src_cmc 快照的 circulating_supply × 信号价（流通盘才对应真实抛压）；
+#     不用快照里的静态 market_cap：快照每天仅 3 次，价格滞后于信号时刻。
+#   - turnover_pct = vol_24h_usd ÷ mcap_usd × 100（换手率百分数落库，免二次计算）。
+# 数据源：src_cmc.cmc_asset_map（symbol→cmc_id，同 ticker 多候选取最新市值最大者）
+#   + src_cmc.cmc_asset_quote_snapshot（2026-08-19 起，约 3 次/天，8,700+ 币）。
+# 失败策略：映射不上/快照缺失 → tier='unknown'，fail-open，绝不影响下单。
+SHADOW_VOL_SMALL_USD = 10_000_000.0     # 24h 成交额 <1000 万 → 小档（Q13 同口径）
+SHADOW_VOL_LARGE_USD = 50_000_000.0     #      ≥5000 万 → 大档
+# 市值阈值（2026-11-13 首轮回填后调整）：1 亿/5 亿 → 3000 万/1 亿。
+#   依据：B 档 82 条实盘信号流通市值中位 $36.9M（p10 $15.3M / p90 $187M），
+#   1 亿/5 亿 切法下分布 72%/24%/4%，large 仅 3 条 ⇒ 三档无法比较。
+#   围绕中位切后三档约 40/45/15，且 large 恰好 ≡「≥1 亿美元」，二分类口径
+#   （<1亿 vs ≥1亿）与 log(mcap) 连续回归可直接复用同一套字段，无需两套阈值。
+#   原始 mcap_usd 已落库，历史信号的档位随时可从原始值重算，改阈值不损失信息。
+SHADOW_MCAP_SMALL_USD = 30_000_000.0    # 流通市值 <3000 万美元 → 小市值
+SHADOW_MCAP_LARGE_USD = 100_000_000.0   #      ≥1 亿美元 → 大市值
+SHADOW_SNAP_MAX_AGE_H = 72.0            # 快照超过 3 天记 stale（仍记录，仅标注）
+
 # 实盘信号白名单（2026-10-07 扩容决策 C3：A + B右上角并行）
-# - SHORT_LONG（≥50% 做多）：胜率 71.1% / 期望 +5.6% / PF 14.2（含 0.3% 成本）→ 3x / 60U
+# - SHORT_LONG（≥50% 做多）：胜率 71.1% / 期望 +5.6% / PF 14.2（含 0.3% 成本）→ 3x / 30U
 # - MID_LONG 仅 B 右上角子集（chg30~50% + vr≥5.6，扫描器已过滤）：
 #   1x / 名义 10U（20U × position_scale 0.5，不加杠杆）
 # - TRAP_SHORT（<5% 做空）：滚动 24h 口径全周期负期望，不实盘
@@ -434,6 +512,133 @@ def momentum_gate(settings, sig: dict, conn=None) -> tuple[bool, dict]:
     return passed, info
 
 
+def _pre_pool_bars(conn, symbol: str, anchor: datetime, limit: int = 120) -> list:
+    """取锚点前 limit 根已收盘 1h K 线（升序）：(open_time, close, high, quote_vol)。
+
+    limit 默认 120 供 A 档前置形态闸门；B 档 90d 结构位闸门传 2161（2160 根前置 + 事件 bar）。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT open_time, close_px, high_px, quote_vol"
+            "  FROM biz.asset_klines"
+            " WHERE symbol = %s AND interval = '1h'"
+            "   AND close_px > 0 AND high_px > 0 AND quote_vol > 0"
+            "   AND open_time + interval '1 hour' <= %s"
+            " ORDER BY open_time DESC LIMIT %s",
+            (symbol, anchor, limit),
+        )
+        return cur.fetchall()[::-1]
+
+
+def pre_pool_gate(settings, sig: dict, conn=None) -> tuple[bool, dict]:
+    """A 档前置渐进形态闸门（2026-11-12，常量区有回测依据）。
+
+    放行 = 事件 bar 及其前 24h 内存在满足以下三条的 bar：
+        ① chg24 ∈ [15%, 30%)   ② 1h 量比 ≥ 3   ③ 收盘突破前 4h 高点
+    只对 SHORT_LONG 生效；B 档该特征只改善不改符号（−1.34%→−0.40%），不动。
+
+    fail-open：1h 历史不足（新币 <49 根）或查询异常 → 放行，保持旧行为。
+    本闸门是收益优化而非风控兜底，不因特征管道故障而停摆。
+
+    返回 (是否放行, 特征快照)；快照随审计写进 params JSON 便于事后归因。
+    """
+    if sig.get("signal_type") != "SHORT_LONG":
+        return True, {"gate": "skip_not_a"}
+    anchor = sig.get("scan_ts")
+    info: dict = {"anchor": anchor.isoformat() if anchor else None}
+    if anchor is None:
+        return True, {**info, "gate": "fail_open_no_anchor"}
+    try:
+        if conn is not None:
+            bars = _pre_pool_bars(conn, sig["symbol"], anchor)
+        else:
+            with get_connection(settings.database_url) as own:
+                bars = _pre_pool_bars(own, sig["symbol"], anchor)
+    except Exception as e:  # noqa: BLE001 — 闸门故障不应阻断交易主流程
+        print(f"  [gate] {sig['symbol']} 1h 查询失败(fail-open): "
+              f"{type(e).__name__}: {e}")
+        return True, {**info, "gate": "fail_open_error",
+                      "error": f"{type(e).__name__}: {e}"}
+    n = len(bars)
+    need = 24 + PRE_POOL_LOOKBACK_H + 1      # chg24 回看 24 + 观察窗 24 + 事件 bar
+    if n < need:
+        return True, {**info, "gate": "fail_open_insufficient_bars", "bars": n}
+    c = [float(b[1]) for b in bars]
+    h = [float(b[2]) for b in bars]
+    q = [float(b[3]) for b in bars]
+    lo, hi = PRE_POOL_CHG24_RANGE
+    k_eo = n - 1
+    hits: list[int] = []
+    for k in range(max(24, k_eo - PRE_POOL_LOOKBACK_H), k_eo + 1):
+        if c[k - 24] <= 0:
+            continue
+        chg24 = (c[k] / c[k - 24] - 1) * 100
+        if not (lo <= chg24 < hi):
+            continue
+        avg = sum(q[k - 20:k]) / 20
+        if avg <= 0 or q[k] / avg < PRE_POOL_VR_MIN:
+            continue
+        if c[k] <= max(h[k - PRE_POOL_BREAK_W:k]):
+            continue
+        hits.append(k)
+    passed = bool(hits)
+    info.update(gate="pass" if passed else "block", hits=len(hits), bars=n,
+                last_hit_h=None if not hits else k_eo - hits[-1])
+    return passed, info
+
+
+def b_struct_gate(settings, sig: dict, conn=None) -> tuple[bool, dict]:
+    """B 档 90d 结构位闸门（2026-11-12，常量区有回测依据）。
+
+    放行 = 事件 bar 收盘价 ≥ 近 90 天最高价
+           （近 2160 根已收盘 1h 的 high 最大值，不含事件 bar 本身）。
+    只对 MID_LONG 生效；其他信号类型直接放行。
+
+    **fail-closed**：1h 历史不足 2161 根（上市 <90 天的新股）或查询异常 → 拦截。
+    与 A 档 pre_pool_gate 的 fail-open 刻意相反——新股/未破组已被独立验证为稳定
+    负期望（−1.71% / PF 0.67、−1.04% / PF 0.79），数据缺失本身就是拦截理由，
+    不存在「误拦优质信号」的问题。
+
+    返回 (是否放行, 特征快照)；快照随审计写进 params JSONB，
+    break_90d / high_90d 全量留痕，便于复盘与同步监控 120d 口径。
+    """
+    if sig.get("signal_type") != "MID_LONG":
+        return True, {"gate": "skip_not_b"}
+    anchor = sig.get("scan_ts")
+    info: dict = {"gate": "block", "window_days": B_STRUCT_DAYS,
+                  "anchor": anchor.isoformat() if anchor else None}
+    if anchor is None:
+        return False, {**info, "gate": "block_no_anchor", "reason": "no_anchor"}
+    need = B_STRUCT_BARS + 1          # 2160 根前置 + 事件 bar
+    try:
+        if conn is not None:
+            bars = _pre_pool_bars(conn, sig["symbol"], anchor, limit=need)
+        else:
+            with get_connection(settings.database_url) as own:
+                bars = _pre_pool_bars(own, sig["symbol"], anchor, limit=need)
+    except Exception as e:  # noqa: BLE001 — 数据故障一律拦截（fail-closed）
+        print(f"  [gate] {sig['symbol']} 90d 结构位查询失败(fail-closed): "
+              f"{type(e).__name__}: {e}")
+        return False, {**info, "gate": "block_error", "reason": "struct_gate_error",
+                       "error": f"{type(e).__name__}: {e}"}
+    n = len(bars)
+    if n < need:
+        print(f"  [gate] {sig['symbol']} 1h 历史不足 {need} 根(fail-closed): bars={n}")
+        return False, {**info, "gate": "block_insufficient_90d_history",
+                       "reason": "insufficient_90d_history", "bars": n}
+    close_eo = float(bars[-1][1])
+    high_90d = max(float(b[2]) for b in bars[:-1])
+    passed = bool(high_90d > 0 and close_eo >= high_90d)
+    info.update(gate="pass" if passed else "block_not_break_90d",
+                reason="pass" if passed else "not_break_90d",
+                break_90d=passed,
+                high_90d=high_90d,
+                close_eo=close_eo,
+                d90=round(close_eo / high_90d - 1, 6) if high_90d > 0 else None,
+                bars=n)
+    return passed, info
+
+
 # ── 首小时初始止损 = EMA20 线（2026-11-06 统一口径回测拍板）──────────────────────
 # 回测（66 组统一 immune 口径 / 72 事件，results_unified.json）：
 #   ema_init(EMA20, ebuf2%) mean -0.88% / PF 0.80  vs  现行固定 -15% 的 -1.60% / 0.65
@@ -562,6 +767,69 @@ def position_scale(sig: dict) -> float:
     return A_HALF_POSITION_SCALE if lo <= chg24 < hi else 1.0
 
 
+def _tier3(v: float | None, small: float, large: float) -> str:
+    """三档分档（缺失/非正 → 'unknown'）。"""
+    if v is None or v <= 0:
+        return "unknown"
+    if v < small:
+        return "small"
+    if v < large:
+        return "mid"
+    return "large"
+
+
+def shadow_mcap_snapshot(settings, symbol: str, sig_px: float,
+                         vol_24h_usd) -> dict:
+    """影子市值快照（只读、fail-open）：市值档 / 排名 / 换手率，供事后分层验证。
+
+    同一 ticker 常有多个 cmc_id（假币/同名项目/已退市壳），取「最新市值最大」者：
+    实测 WIF 有 3 个候选（1.52 亿 / 118 万 / 4.3 万），按市值排序能稳定命中真币。
+    任何异常（DB 抖动 / 映射不上 / 快照缺失）都返回 unknown 结构，不给 place_order 抛错。
+    """
+    vol = _as_float(vol_24h_usd)
+    out = {"vol_tier": _tier3(vol, SHADOW_VOL_SMALL_USD, SHADOW_VOL_LARGE_USD),
+           "vol_24h_usd": vol, "mcap_tier": "unknown", "mcap_usd": None,
+           "mcap_rank": None, "circ_supply": None, "turnover_pct": None,
+           "cmc_id": None, "snap_age_h": None, "stale": None}
+    base = symbol[:-4] if symbol.endswith("USDT") else symbol
+    if not base or sig_px <= 0:
+        return out
+    try:
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT m.cmc_id, m.rank_num, q.quote_time, q.circulating_supply"
+                    "  FROM src_cmc.cmc_asset_map m"
+                    "  JOIN LATERAL (SELECT quote_time, circulating_supply, market_cap"
+                    "                  FROM src_cmc.cmc_asset_quote_snapshot s"
+                    "                 WHERE s.cmc_id = m.cmc_id"
+                    "                   AND s.quote_time >= NOW() - interval '7 days'"
+                    "                 ORDER BY quote_time DESC LIMIT 1) q ON TRUE"
+                    " WHERE m.is_active AND upper(m.symbol) = %s"
+                    " ORDER BY q.market_cap DESC NULLS LAST LIMIT 1", (base.upper(),))
+                row = cur.fetchone()
+    except Exception:  # noqa: BLE001 — 影子层故障不得拦截真实下单
+        return out
+    if not row:
+        return out
+    cmc_id, rank_num, qtime, circ = row
+    out["cmc_id"] = int(cmc_id)
+    out["mcap_rank"] = int(rank_num) if rank_num else None
+    if qtime is not None:
+        age = (datetime.now(timezone.utc) - qtime).total_seconds() / 3600.0
+        out["snap_age_h"] = round(age, 1)
+        out["stale"] = age > SHADOW_SNAP_MAX_AGE_H
+    circ = _as_float(circ)
+    if circ and circ > 0:
+        mcap = circ * sig_px
+        out["circ_supply"] = circ
+        out["mcap_usd"] = round(mcap, 2)
+        out["mcap_tier"] = _tier3(mcap, SHADOW_MCAP_SMALL_USD, SHADOW_MCAP_LARGE_USD)
+        if vol and vol > 0:
+            out["turnover_pct"] = round(vol / mcap * 100, 2)
+    return out
+
+
 def place_order(client, settings, sig: dict, live: bool) -> dict:
     """单信号风控 + 下单。返回决策记录。"""
     p = PARAMS.get(sig["signal_type"])
@@ -572,6 +840,9 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
     notional = NOTIONAL_BY_SIGNAL.get(sig["signal_type"], settings.signal_max_notional_usdt) * scale
     lev = LEVERAGE_BY_SIGNAL.get(sig["signal_type"], settings.signal_leverage)
     margin = notional / lev
+    # X1 条件阶梯止损（2026-11-12）：B 档入场硬止损取 8%（峰值浮盈 ≥2% 后由
+    # _hourly_trail_check 放宽到 10%，单向不可逆）；A/C 档维持 PARAMS 的 SL。
+    sl_eff = X1_TIGHT_SL if sig["signal_type"] == "MID_LONG" else p.get("SL")
     rec = {
         "signal_id": sig["id"], "symbol": sig["symbol"], "signal_type": sig["signal_type"],
         "direction": sig["direction"], "params": p,
@@ -624,11 +895,38 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
             print(f"  [gate] {sig['symbol']} 弱动能档回撤拦截: "
                   f"dd24={dd:.2f}% chg24={chg24:.1f}%")
             return rec
+    # 前置渐进形态闸门（2026-11-12）：A 档且前 24h 内无「chg24∈[15%,30%) + 1h vr≥3
+    # + 突破前 4h 高点」→ 跳过（垂直拉升追高：均净 −1.36% / PF 0.77 / 右尾 21.4%；
+    # 有前置 +1.30% / PF 1.25 / 右尾 25.2%，OOS 三段全正）。
+    if sig.get("signal_type") == "SHORT_LONG":
+        pre_ok, pre_info = pre_pool_gate(settings, sig)
+        rec["pre_pool"] = pre_info  # 审计快照：hits/last_hit_h 随 params JSON 落库
+        if not pre_ok:
+            rec.update(decision="skipped", reason="no_pre_pool_progressive")
+            print(f"  [gate] {sig['symbol']} 无前置渐进形态拦截: "
+                  f"bars={pre_info.get('bars')}")
+            return rec
+    # 90d 结构位闸门（2026-11-12）：B 档仅保留「收盘价突破近 90 天最高价」的信号；
+    # 未破组（PF 0.79）与上市不足 90 天的新股（PF 0.67）一律停开（fail-closed）。
+    if sig.get("signal_type") == "MID_LONG":
+        b_ok, b_info = b_struct_gate(settings, sig)
+        rec["b_struct"] = b_info  # 审计快照：break_90d/high_90d 随 params JSONB 落库
+        if not b_ok:
+            rec.update(decision="skipped",
+                       reason=b_info.get("reason", "not_break_90d"))
+            print(f"  [gate] {sig['symbol']} 90d 结构位拦截: "
+                  f"gate={b_info.get('gate')} bars={b_info.get('bars')} "
+                  f"d90={b_info.get('d90')}")
+            return rec
     # ── 5m 回撤限价入场：挂 信号价×0.995 等回撤（2026-11-11，常量区有回测依据）──
     sig_px = float(sig.get("price_usd") or 0)
     if sig_px <= 0:
         rec.update(decision="skipped", reason="no_signal_price")
         return rec
+    # 影子市值分档（2026-11-13）：闸门全部放行之后、下单之前，只算不拦（常量区有口径说明）。
+    # B 档（90d 突破放行）是分析主体，A 档同步记录作对照组；写 rec → 随审计 JSONB 落库。
+    rec["shadow_mcap"] = shadow_mcap_snapshot(
+        settings, sig["symbol"], sig_px, sig.get("vol_24h_usd"))
     limit_px = sig_px * (1 - LIMIT_ENTRY_DISCOUNT_PCT / 100)
     # 现价已跌破 限价×(1−SL)（信号后已崩 ≥15%）：挂单会在止损区附近成交，
     # SL 触发价与成交价无法保持合法间隙（多单挂出即触发）→ 入场条件已失效，放弃。
@@ -636,7 +934,7 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
         cur_px = client.get_price(sig["symbol"])
     except Exception:  # noqa: BLE001
         cur_px = 0
-    if cur_px > 0 and p.get("SL") and cur_px <= limit_px * (1 - p["SL"]):
+    if cur_px > 0 and sl_eff and cur_px <= limit_px * (1 - sl_eff):
         rec.update(decision="skipped",
                    reason=f"price_below_sl_zone cur={cur_px:.6g} limit={limit_px:.6g}")
         return rec
@@ -674,7 +972,7 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
             # 布防（成交先于 SL 触发，无裸奔窗口）；成交状态由 _process_limit_entries 轮询
             entry_price=limit_px,
             leverage=lev,
-            stop_loss_pct=p["SL"] * 100 if p.get("SL") else 0,
+            stop_loss_pct=sl_eff * 100 if sl_eff else 0,
             # EMA 初始止损线（None=固定 SL）：open_position 内与 fill×(1-SL) 取更紧者，
             # 15% 风险帽始终生效（防 EMA 落后大阳线时首小时亏损超限）
             stop_price=init_line,
@@ -698,6 +996,13 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
                               "note": "原生 TRAILING 已移除，由 _hourly_trail_check 接管"},
             "take_profit": r.get("_take_profit"),
         }
+        # X1 条件阶梯止损状态（2026-11-12）：入场硬止损 8%，峰值浮盈 ≥2% 后由
+        # _hourly_trail_check 放宽到 10% 并置 armed=True（单向不可逆，随 protective
+        # 落库；重启/_ensure_protective 自愈都按此状态决定用 8% 还是 10%）。
+        if sig["signal_type"] == "MID_LONG":
+            protective["x1"] = {"mode": "cond_sl", "armed": False,
+                                "arm_pct": X1_ARM_PCT, "tight_sl": X1_TIGHT_SL,
+                                "loose_sl": X1_LOOSE_SL}
         qty = float(r.get("_qty") or 0)
         avg = float(r.get("avgPrice") or 0) or float(r.get("_price") or 0)
         # MARKET 单 POST ACK 的 avgPrice 常为 0 → 回查真实成交均价/量（best-effort，失联不阻断）
@@ -715,7 +1020,13 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
         #   ③ 补挂仍失败 → 回滚：未成交撤单 / 已成交市价全平 + 邮件告警。
         #      **止损是必选保护**，绝不留下「开仓成功但无止损」的裸奔持仓。
         #   原生 TR / TP 是可选增强：失败仅降级/告警，不阻断（SL 仍在，软件 _trail_check 兜底）。
-        need_sl = bool(p.get("SL"))
+        # ⚠️ 2026-11-13（-4509 修复）：限价单未成交（_unfilled）时交易所没有持仓，
+        #   任何 GTE 条件的保护单都挂不上（-4509）。这不是失败，而是「等待回撤」的
+        #   正常状态——止损由 _process_limit_entries 在成交后立即补挂（_ensure_fill_stop），
+        #   因此此处跳过校验与回滚，直接落到下面的 limit_pending 分支。
+        need_sl = bool(sl_eff) and not r.get("_unfilled")
+        if r.get("_unfilled") and not _prot_ok(protective.get("stop_loss")):
+            protective["stop_loss"] = None  # 未成交阶段本就不该有止损，别留 error 假象
         if need_sl and not _prot_ok(protective.get("stop_loss")):
             print(f"  [verify] {sig['symbol']} 止损未挂上"
                   f"（{protective.get('stop_loss') or '响应缺失'}）→ 补挂一次")
@@ -723,9 +1034,9 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
                 # 补挂与首挂同口径：EMA 线与 fill×(1-SL) 取更紧者（风险帽不变）
                 trig = None
                 if init_line is not None:
-                    trig = max(init_line, avg * (1 - p["SL"]))
+                    trig = max(init_line, avg * (1 - sl_eff))
                 sl2 = client.place_sltp(sig["symbol"], direction, avg,
-                                        p["SL"] * 100, is_stop=True, stop_price=trig)
+                                        sl_eff * 100, is_stop=True, stop_price=trig)
                 protective["stop_loss"] = sl2
                 print(f"  [verify] {sig['symbol']} 补挂止损 "
                       f"{'成功 algoId=' + str(sl2.get('algoId')) if _prot_ok(sl2) else f'仍失败: {sl2}'}")
@@ -1092,6 +1403,71 @@ def _hourly_trail_check(client, conn, settings) -> int:
                         n += 1
                         continue
 
+            # ── X1 条件阶梯止损（B 档，2026-11-12，常量区有回测依据）──
+            # 初始硬止损 8%；峰值浮盈 ≥2% 后放宽到 10%，单向不可逆。
+            # 放宽 = 止损**向下移动**，与下方「只上移不回撤」的 ratchet 语义相反，
+            # 故必须在此处显式撤旧挂新一次；armed 状态落 protective_orders.x1，
+            # 重启/自愈都不回退。挂新失败沿用 error 标记 + _ensure_protective 自愈。
+            x1 = prot.get("x1") or {}
+            x1_on = (str(t.get("signal_type")) == "MID_LONG"
+                     and x1.get("mode") == "cond_sl")
+            x1_armed = bool(x1.get("armed"))
+            peak_1h = float(t.get("peak_1h") or 0)
+            if x1_on and not x1_armed and peak_1h > 0:
+                pnl_peak = ((peak_1h / entry - 1) if direction == "long"
+                            else (1 - peak_1h / entry))
+                if pnl_peak >= X1_ARM_PCT:
+                    loose = (entry * (1 - X1_LOOSE_SL) if direction == "long"
+                             else entry * (1 + X1_LOOSE_SL))
+                    # 现价必须仍在放宽线的盈利侧，否则挂上即触发（-2021 拒单）
+                    side_ok = ((cur_px > loose * 1.002) if direction == "long"
+                               else (cur_px < loose * 0.998))
+                    if not side_ok:
+                        print(f"  [x1] {t['symbol']} 峰值浮盈 {pnl_peak:.2%} 已达标，"
+                              f"但现价 {cur_px:.6g} 越过放宽线 {loose:.6g} → 本轮不挂"
+                              f"（紧止损仍在交易所兜底）")
+                    else:
+                        try:
+                            if sl.get("algoId"):
+                                client.cancel_algo_order(algo_id=sl["algoId"])
+                            elif sl.get("clientAlgoId"):
+                                client.cancel_algo_order(client_algo_id=sl["clientAlgoId"])
+                            elif sl.get("orderId"):
+                                client.cancel_order(t["symbol"], sl["orderId"])
+                        except Exception as e:  # noqa: BLE001
+                            msg = f"{type(e).__name__}: {e}"
+                            if not any(k in msg for k in ("-2011", "-2013", "Unknown order",
+                                                          "does not exist")):
+                                print(f"  [x1] 撤旧紧止损失败 {t['symbol']}，跳过本轮: {msg}")
+                                continue
+                        try:
+                            new_sl = client.place_sltp(t["symbol"], direction, entry, 0.0,
+                                                       is_stop=True, stop_price=loose)
+                        except Exception as e:  # noqa: BLE001
+                            print(f"  [x1] 挂宽止损失败 {t['symbol']} id={t['id']}，"
+                                  f"写 error 标记待下轮自愈: {type(e).__name__}: {e}")
+                            prot["stop_loss"] = {
+                                "error": f"x1_place_failed: {type(e).__name__}: {e}",
+                                "target_stop": loose}
+                            _save_prot(conn, t["id"], prot)
+                            continue
+                        new_sl["mode"] = "hourly_lag"
+                        new_sl["target_stop"] = loose
+                        new_sl["elapsed_hours"] = round(elapsed_h, 2)
+                        new_sl["peak_1h"] = peak_1h
+                        prot["stop_loss"] = new_sl
+                        prot["x1"] = {**x1, "armed": True,
+                                      "peak_pct": round(pnl_peak, 4),
+                                      "armed_at": datetime.now(timezone.utc).isoformat()}
+                        _save_prot(conn, t["id"], prot)
+                        print(f"  [x1] {t['symbol']} 峰值浮盈 {pnl_peak:.2%} ≥ "
+                              f"{X1_ARM_PCT:.0%} → 止损放宽 {X1_TIGHT_SL:.0%}→"
+                              f"{X1_LOOSE_SL:.0%}（{cur_stop:.6g}→{loose:.6g}）")
+                        n += 1
+                        continue
+            if x1_on:
+                sl_pct = X1_LOOSE_SL if x1_armed else X1_TIGHT_SL
+
             # ── 目标止损（仅浮盈保本上移；交易所侧初始止损常驻不撤）──
             # 基础：硬止损兜底线
             if direction == "long":
@@ -1103,7 +1479,7 @@ def _hourly_trail_check(client, conn, settings) -> int:
             # 浮盈保本：峰值浮盈 ≥5% 时止损上移到成本覆盖线（entry ± 0.4%）
             # 峰值口径 = 已收盘 1h peak（SQL 子查询，避免额外查询）；
             # 要求价格已走到 peak_1h 才能触发保本（否则 peak 只是假顶）
-            peak_for_be = float(t.get("peak_1h") or 0) if elapsed_h >= 1.0 else 0
+            peak_for_be = peak_1h if elapsed_h >= 1.0 else 0
             if direction == "long" and peak_for_be > 0 and cur_px >= peak_for_be * 0.995:
                 pnl_pct = peak_for_be / entry - 1
                 if pnl_pct >= BREAKEVEN_TRIGGER_PCT / 100:
@@ -1265,7 +1641,7 @@ def _reconcile_closed(client, settings, conn) -> int:
     返回本次回填笔数。"""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, symbol, direction, open_ts, open_price, protective_orders, "
+            "SELECT id, signal_id, symbol, direction, open_ts, open_price, protective_orders, "
             "       order_id, exit_order_id, exit_reason "
             "FROM biz.v2_trade_log WHERE close_ts IS NULL ORDER BY open_ts")
         rows = [dict(zip([d.name for d in cur.description], r)) for r in cur.fetchall()]
@@ -1353,10 +1729,51 @@ def _reconcile_closed(client, settings, conn) -> int:
                 )
             print(f"  [reconcile] {t['symbol']} 已平仓 exit={exit_reason} "
                   f"pnl={pnl:+.4f} comm={comm:+.4f} net={net_pnl:+.4f} win={net_pnl>0}")
+            # 影子层：出场滑点回填（仅写 params.shadow_mcap，失败不影响对账）
+            _shadow_exit_fill(conn, t, close_price, exit_reason)
             n += 1
         except Exception as e:  # noqa: BLE001
             print(f"  [reconcile] {t['symbol']} 对账失败: {type(e).__name__}: {e}")
     return n
+
+
+def _shadow_exit_fill(conn, t: dict, close_price, exit_reason: str) -> None:
+    """影子层：出场滑点回填（只写 params.shadow_mcap，不碰任何交易字段）。
+
+    参考价取「实际触发的那张保护单」的 triggerPrice（sl/trail/tp 都有）：
+      - sl   → stop_loss.triggerPrice（含 X1 阶梯/保本上移后的当前值）
+      - trail→ trailing_stop.triggerPrice
+      - 其它（EMA7 线破市价、人工平仓）没有可复现触发价 → 只记 exit_px，滑点留空
+    多单滑点 = 成交/触发 − 1（正数=更差）；空单取反，保证「正数=成本」口径统一。
+    """
+    sid = t.get("signal_id")
+    if not sid or not close_price:
+        return
+    prot = t.get("protective_orders") or {}
+    key = {"sl": "stop_loss", "trail": "trailing_stop",
+           "tp": "take_profit"}.get(exit_reason)
+    trig = 0.0
+    if key:
+        po = prot.get(key) or {}
+        trig = (_as_float(po.get("triggerPrice"))
+                or _as_float(po.get("stopPrice")) or 0.0)
+    sign = 1.0 if (t.get("direction") or "LONG") == "LONG" else -1.0
+    patch = {"exit_px": close_price, "exit_reason": exit_reason}
+    if trig > 0:
+        slip = sign * (close_price / trig - 1.0)
+        patch.update({"exit_trigger_px": trig,
+                      "exit_slippage_pct": round(slip * 100, 4),
+                      "exit_slippage_bp": round(slip * 10000, 1)})
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE biz.scan_gainer_signal SET params = "
+                "COALESCE(params, '{}'::jsonb) || jsonb_build_object('shadow_mcap', "
+                "  COALESCE(params->'shadow_mcap', '{}'::jsonb) || %s::jsonb) "
+                "WHERE id=%s", (json.dumps(patch), sid))
+    except Exception as e:  # noqa: BLE001 — 影子层写失败不得影响对账
+        print(f"  [shadow] {t.get('symbol')} 出场滑点回填失败: "
+              f"{type(e).__name__}: {e}")
 
 
 def _save_prot(conn, tid, prot: dict) -> None:
@@ -1424,9 +1841,15 @@ def _ensure_protective(client, conn, settings) -> int:
                 new_prot["trailing_stop"] = {"mode": "hourly_lag",
                                              "tr_pct": float(t.get("tr_pct") or 0)}
             if (t.get("sl_pct") or 0) > 0:
+                # X1（B 档，2026-11-12）：未 armed 时自愈也按 8% 紧止损补挂，
+                # 不能回落到 sl_pct 的 10%——否则一次补挂就把紧止损放宽了（fail-open）
+                sl_use = float(t["sl_pct"])
+                x1 = prot.get("x1") or {}
+                if x1.get("mode") == "cond_sl" and not x1.get("armed"):
+                    sl_use = float(x1.get("tight_sl") or sl_use)
                 try:
                     r = client.place_sltp(t["symbol"], direction, entry,
-                                          float(t["sl_pct"]) * 100, is_stop=True)
+                                          sl_use * 100, is_stop=True)
                 except Exception as e:  # noqa: BLE001
                     # 补挂失败：写 error 标记（下轮本分支重试），**绝不保留
                     # "看起来有止损"的旧记录**（否则下一轮会被判为有效而永不重挂）。
@@ -1528,10 +1951,107 @@ def _insert_trade_log(conn, sig: dict, rec: dict, settings, live: bool) -> None:
         )
 
 
+def _ensure_fill_stop(client, sig: dict, meta: dict, order: dict) -> tuple[bool, dict]:
+    """限价成交后补挂硬止损（2026-11-13 -4509 修复）。
+
+    成因：限价单挂出时尚未成交，交易所没有持仓，GTE 条件的 algo 保护单必被
+    -4509 拒绝（"TIF GTE can only be used with open positions"）。因此止损只能在
+    **成交之后**挂：本函数由 _process_limit_entries 在 executedQty>0 时调用。
+
+    口径与首挂一致：
+      - MID_LONG 走 X1 条件阶梯止损（未 armed → 8% 紧止损，armed → 10%）；
+        其余档用 PARAMS.SL；
+      - EMA 初始止损线（meta.protective.trailing_stop.init_stop_px）更紧时优先，SL 仍是风险帽；
+      - closePosition=true 自动跟随仓位数量，部分成交也安全。
+    已有有效止损（_prot_ok）则直接返回，不重复挂。
+
+    返回 (是否可用, 更新后的 protective)；失败时 protective.stop_loss 落 error 标记。
+    """
+    prot = dict(meta.get("protective") or {})
+    if _prot_ok(prot.get("stop_loss")):
+        return True, prot
+    p = PARAMS.get(sig["signal_type"]) or {}
+    x1 = prot.get("x1") or {}
+    if sig["signal_type"] == "MID_LONG":
+        sl_eff = float(x1.get("loose_sl") if x1.get("armed")
+                       else (x1.get("tight_sl") or X1_TIGHT_SL))
+    else:
+        sl_eff = float(p.get("SL") or 0)
+    if sl_eff <= 0:
+        return True, prot  # 该档无硬止损要求（当前策略不会出现）
+    avg = float(order.get("avgPrice") or 0) or float(meta.get("px") or 0)
+    if avg <= 0:
+        prot["stop_loss"] = {"error": "post_fill_place_failed: 无成交均价"}
+        return False, prot
+    direction = "long" if str(sig["direction"]).upper() == "LONG" else "short"
+    init_line = _as_float((prot.get("trailing_stop") or {}).get("init_stop_px"))
+    err = ""
+    for _ in range(2):  # 首挂 + 补挂一次
+        try:
+            trig = (max(init_line, avg * (1 - sl_eff))
+                    if (init_line and direction == "long") else None)
+            sl = client.place_sltp(sig["symbol"], direction, avg, sl_eff * 100,
+                                   is_stop=True, stop_price=trig)
+            if _prot_ok(sl):
+                prot["stop_loss"] = sl
+                print(f"  [limit-entry] {sig['symbol']} 成交后补挂止损 OK "
+                      f"sl={sl_eff:.0%} algoId={sl.get('algoId') or sl.get('clientAlgoId')}")
+                return True, prot
+            err = str(sl)
+        except Exception as e:  # noqa: BLE001
+            err = f"{type(e).__name__}: {e}"
+        print(f"  [limit-entry] {sig['symbol']} 成交后挂止损失败: {err}")
+    prot["stop_loss"] = {"error": f"post_fill_place_failed: {err}"}
+    return False, prot
+
+
+def _abort_limit_fill(client, conn, settings, sig: dict, meta: dict, order: dict,
+                      prot: dict, p_err: str) -> None:
+    """成交后止损挂不上 → 撤余量 + 市价全平 + 邮件告警 + 落 aborted（绝不裸奔）。"""
+    oid = meta.get("order_id")
+    # 先撤未成交余量：否则市价平仓后残单继续成交 = 又变成无保护持仓
+    if oid and str(order.get("status")) != "FILLED":
+        try:
+            client.cancel_order(sig["symbol"], oid)
+        except Exception as e:  # noqa: BLE001
+            print(f"    撤限价残单（容忍）{sig['symbol']}: {type(e).__name__}: {e}")
+    rb_ok, rb_msg = _close_all_market(client, sig["symbol"], f"成交后止损挂不上: {p_err}")
+    if not rb_ok:
+        print(f"  [ROLLBACK] ⚠️ {sig['symbol']} 市价全平失败，请立即人工处理: {rb_msg}")
+    _cancel_protective_orders(client, sig["symbol"], prot)
+    avg = float(order.get("avgPrice") or 0) or float(meta.get("px") or 0)
+    qty = float(order.get("executedQty") or 0) or float(meta.get("open_qty") or 0)
+    p = PARAMS.get(sig["signal_type"]) or {}
+    entry_resp = dict(meta.get("entry_resp") or {})
+    entry_resp["_fetched_order"] = order
+    rec = {
+        "signal_id": sig["id"], "symbol": sig["symbol"], "signal_type": sig["signal_type"],
+        "direction": sig["direction"], "decision": "aborted",
+        "reason": f"protective_failed_after_fill: {p_err} | rollback={rb_msg}",
+        "params": p, "order_id": oid, "client_order_id": meta.get("client_order_id"),
+        "open_price": avg, "open_qty": qty,
+        "notional": meta.get("notional"), "leverage": meta.get("leverage"),
+        "position_scale": meta.get("position_scale"), "margin": meta.get("margin"),
+        "entry_resp": entry_resp, "protective": prot,
+    }
+    audit = {"exec_reason": rec["reason"],
+             "exec_at": datetime.now(timezone.utc).isoformat(),
+             "limit_fill": {"avg": avg, "qty": qty, "status": order.get("status")}}
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE biz.scan_gainer_signal SET exec_state='aborted', executed_at=%s, "
+            "params = COALESCE(params, '{}'::jsonb) || %s::jsonb WHERE id=%s",
+            (datetime.now(timezone.utc), json.dumps(audit), sig["id"]))
+    _insert_trade_log(conn, sig, rec, settings, live=True)
+    print(f"  [ROLLBACK] {sig['symbol']} 成交后止损挂不上→市价全平: {p_err} | {rb_msg}")
+    _alert_protective_failed(settings, sig, p_err, rb_msg)
+
+
 def _complete_limit_fill(conn, settings, sig: dict, meta: dict, order: dict) -> None:
     """限价入场单成交 → 补录 exec_state='ordered' + v2_trade_log。
 
-    保护单（SL）在挂单时已布防（成交必然先于 SL 触发，见常量区注释），这里只补数据。
+    调用前必须先经 _ensure_fill_stop 布防止损（-4509：保护单只能在成交后挂），
+    本函数只补数据；meta["protective"] 已含补挂成功的 stop_loss。
     open_ts = 成交确认时刻（到期平仓 N 小时从此起算，对齐真实持仓时长）。
     """
     avg = float(order.get("avgPrice") or 0) or float(meta.get("px") or 0)
@@ -1553,7 +2073,20 @@ def _complete_limit_fill(conn, settings, sig: dict, meta: dict, order: dict) -> 
     audit = {"exec_reason": "limit_filled",
              "exec_at": datetime.now(timezone.utc).isoformat(),
              "limit_fill": {"avg": avg, "qty": qty,
-                            "status": order.get("status")}}
+                            "status": order.get("status")},
+             # 成交后的止损回写进 limit_entry：万一在「挂上 SL」与「写 ordered」之间
+             # 重启，重启后读到的 protective 已含有效止损，_ensure_fill_stop 不会重复挂。
+             "limit_entry": dict(meta, protective=meta.get("protective"), status="FILLED")}
+    # 影子层：入场滑点回填（实盘成交均价 vs 信号价），与信号时刻的市值快照合并落库。
+    # 只改 params.shadow_mcap，不动 exec_state 之外任何交易字段；无快照（老信号）则跳过。
+    shadow = dict((sig.get("params") or {}).get("shadow_mcap") or {})
+    sig_px = _as_float(sig.get("price_usd"))
+    if shadow and sig_px and sig_px > 0 and avg > 0:
+        slip = avg / sig_px - 1.0
+        shadow.update({"entry_px": avg, "sig_px": sig_px,
+                       "entry_slippage_pct": round(slip * 100, 4),
+                       "entry_slippage_bp": round(slip * 10000, 1)})
+        audit["shadow_mcap"] = shadow
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE biz.scan_gainer_signal SET exec_state='ordered', executed_at=%s, "
@@ -1567,10 +2100,13 @@ def _complete_limit_fill(conn, settings, sig: dict, meta: dict, order: dict) -> 
 def _process_limit_entries(client, settings, live: bool) -> None:
     """5m 限价挂单状态机（exec_state='limit_pending'）：成交 → 补录；超时 → 撤单放弃。
 
-    - FILLED → _complete_limit_fill（写 ordered + trade_log）。
+    - FILLED → 先 _ensure_fill_stop 布防止损（-4509：保护单只能在成交后挂），
+      成功后 _complete_limit_fill（写 ordered + trade_log）；止损挂不上 → _abort_limit_fill
+      （撤余量 + 市价全平 + 告警 + aborted，绝不裸奔）。
+    - PARTIALLY_FILLED 且有成交 → 立即为已成交部分布防，再继续等余量。
     - ≥ LIMIT_ENTRY_WAIT_MIN 分钟未成交 → 撤余量单 + 清保护单（_cancel_protective_orders
       会清掉该 symbol 的全部挂单）→ 标 skipped(limit_unfilled)——回测 V1s 口径：不追。
-    - 撤单后复核发现已成交（撤单竞态）→ 仍按成交补录，绝不丢真实持仓；
+    - 撤单后复核发现已成交（撤单竞态）→ 同样先布防再补录，绝不丢真实持仓；
       复核查询失败 → 本轮跳过下轮重试（宁可晚补录也不误判）。
     - 仅 live（--apply 且 V2_TRADE_ENABLED=1）执行：本地 dry-run 不碰云端挂单状态。
     """
@@ -1610,8 +2146,25 @@ def _process_limit_entries(client, settings, live: bool) -> None:
             status = str(o.get("status") or "")
             executed = float(o.get("executedQty") or 0)
             if status == "FILLED":
+                ok, prot = _ensure_fill_stop(client, sig, meta, o)
+                if not ok:
+                    _abort_limit_fill(client, conn, settings, sig, meta, o, prot,
+                                      str((prot.get("stop_loss") or {}).get("error")
+                                          or "止损未挂上"))
+                    continue
+                meta["protective"] = prot
                 _complete_limit_fill(conn, settings, sig, meta, o)
                 continue
+            if executed > 0:
+                # 部分成交（限价单仍在挂）：先把已成交部分布防，再继续等余量。
+                # closePosition=true 的止损自动跟随仓位数量，后续成交无需重挂。
+                ok, prot = _ensure_fill_stop(client, sig, meta, o)
+                if not ok:
+                    _abort_limit_fill(client, conn, settings, sig, meta, o, prot,
+                                      str((prot.get("stop_loss") or {}).get("error")
+                                          or "止损未挂上"))
+                    continue
+                meta["protective"] = prot
             expired = age_min >= LIMIT_ENTRY_WAIT_MIN
             dead = status in ("CANCELED", "REJECTED", "EXPIRED")
             if not expired and not dead:
@@ -1633,6 +2186,13 @@ def _process_limit_entries(client, settings, live: bool) -> None:
             ex2 = float(o2.get("executedQty") or 0)
             st2 = str(o2.get("status") or "")
             if ex2 > 0 or st2 == "FILLED":
+                ok, prot = _ensure_fill_stop(client, sig, meta, o2)
+                if not ok:
+                    _abort_limit_fill(client, conn, settings, sig, meta, o2, prot,
+                                      str((prot.get("stop_loss") or {}).get("error")
+                                          or "止损未挂上"))
+                    continue
+                meta["protective"] = prot
                 _complete_limit_fill(conn, settings, sig, meta, o2)
                 continue
             if st2 in ("NEW", "PARTIALLY_FILLED", "PENDING_CANCEL"):
@@ -1702,6 +2262,17 @@ def main() -> int:
                             if rec.get("dd_24h") is not None:
                                 # 位置特征快照（距 24h 阶段高点回撤 %）：与拦截原因一起留痕
                                 _audit_patch["dd_24h"] = rec["dd_24h"]
+                            if rec.get("pre_pool") is not None:
+                                # 前置渐进形态快照（hits/last_hit_h/gate）：事后归因「为何拦/为何放」
+                                _audit_patch["pre_pool"] = rec["pre_pool"]
+                            if rec.get("b_struct") is not None:
+                                # B 档 90d 结构位快照（break_90d/high_90d/d90/bars）：
+                                # 全量留痕，便于复盘与同步监控 120d 口径的实盘表现
+                                _audit_patch["b_struct"] = rec["b_struct"]
+                            if rec.get("shadow_mcap") is not None:
+                                # 影子市值快照（成交额档/市值/排名/换手率）：零干预观测层，
+                                # 成交/平仓路径再回填 entry_slippage / exit_slippage
+                                _audit_patch["shadow_mcap"] = rec["shadow_mcap"]
                             if rec.get("limit") is not None:
                                 # 5m 限价挂单元数据（order_id/挂单价/挂单时刻）：
                                 # 成交/超时的状态机（_process_limit_entries）靠它续跑，重启不丢

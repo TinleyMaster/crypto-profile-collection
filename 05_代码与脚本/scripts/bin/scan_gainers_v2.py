@@ -407,6 +407,14 @@ def main() -> int:
               f"@${h['price']:,.4f} bar={h['event_bar_ts']}")
         if args.apply:
             with get_connection(settings.database_url) as conn:
+                # OI 影子闸门（2026-11-16）：只附加特征字段，不影响任何检测/拦截逻辑。
+                # OI 查询失败 → 字段留空 → 信号照常落库（附属指标不阻塞主流程）。
+                try:
+                    from gainer_oi_shadow import attach_oi_shadow
+                    oi_feats = attach_oi_shadow(conn, h["symbol"], int(h["ts"].timestamp()))
+                except Exception as e:  # noqa: BLE001
+                    print(f"[scan] oi-shadow 异常（忽略）：{type(e).__name__}: {str(e)[:60]}")
+                    oi_feats = {}
                 with conn.cursor() as cur:
                     cur.execute(
                         "INSERT INTO biz.scan_gainer_signal "
@@ -426,7 +434,11 @@ def main() -> int:
                                      # 位置特征（2026-11-11）：距 24h 阶段高点回撤（%），
                                      # 执行器对 A 档弱动能档（chg24∈[50%,75%)）做 dd≥5% 过滤
                                      "dd_24h_pct": None if h["dd24"] is None
-                                     else round(h["dd24"], 4)})),
+                                     else round(h["dd24"], 4),
+                                     # OI 影子闸门（2026-11-16）：只记录不拦截。
+                                     # oi_chg_12h = Binance 单所 OI 12h 变化率；
+                                     # 回测证据见 04_研究与分析/预选池维度回测_OI_CVD区分力_20261116.md
+                                     **oi_feats})),
                     )
 
     # 邮件告警（实盘白名单 A=SHORT_LONG + B=MID_LONG 右上角；C 不实盘、不告警）

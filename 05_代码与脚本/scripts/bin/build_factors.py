@@ -137,11 +137,21 @@ def build_unlock_factors(conn, asset_id: int, today: date | None = None):
     total_usd = sum(r[1] for r in rows if r[1] is not None and r[1] > 0)
     _upsert(conn, asset_id, today, "unlock_90d_usd", total_usd, "asset_unlock_event",
             {"窗口": f"{today}~{horizon}", "事件数": len(rows)})
+    # ⚠️ 2026-11-18 修复：原实现在此处把「解锁事件日期 d」当作 factor_date 写入
+    #   unlock_event_usd 因子 → 未来 90 天内的解锁事件被写进日频因子表，产生未来
+    #   日期行（实测 207 行，最远 2027-01-12）。因本表索引为
+    #   (asset_id, factor_date DESC) / (factor_code, factor_date DESC)，
+    #   「取最新因子」类查询会优先命中未来行 → 污染下游面板与因子面板。
+    #
+    #   修正：事件级明细不进日频因子表。
+    #     · 日频聚合视角 → unlock_90d_usd（上一行，factor_date=today，正确）
+    #     · 事件级明细   → biz.asset_unlock_event（权威源，4126 行，含 unlock_date）
+    #   事件明细不需要在此处冗余复制一份。
     for (d, val, ratio) in rows:
         if val is None or val <= 0:
             continue
-        _upsert(conn, asset_id, d, "unlock_event_usd", val, "asset_unlock_event",
-                {"ratio_circulating": ratio})
+        print(f"[unlock] asset={asset_id} event_date={d} usd={val} "
+              f"（明细见 biz.asset_unlock_event，不写日频因子表）")
 
 
 # ════════════════════════════════════════════════════════════════

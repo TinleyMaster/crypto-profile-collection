@@ -16,6 +16,7 @@ import decimal
 import hashlib
 import hmac
 import time
+import urllib.parse
 from typing import Any
 
 import requests
@@ -27,6 +28,36 @@ RECV_WINDOW = 5000
 
 class BinanceFuturesError(Exception):
     """Binance API 错误（含业务码）。"""
+
+
+# ── 错误分类（供调用方决定「重试」还是「熔断」）────────────────────
+# 永久性错误：重试一万次也不会成功 → 调用方应立即熔断，停止死循环
+PERMANENT_ERR_CODES = (
+    "-1022",   # Signature not valid（签名不匹配）
+    "-1121",   # Invalid symbol（合约不存在）
+    "-1102",   # Mandatory parameter was not sent
+    "-1104",   # Unknown param sent
+    "-2011",   # Unknown order
+    "-2013",   # Order does not exist
+    "-2014",   # Unknown order format
+    "-4046",   # No such order
+)
+PERMANENT_ERR_KEYWORDS = (
+    "signature not valid", "invalid symbol", "unknown param",
+    "mandatory parameter", "unknown order", "order does not exist",
+    "no such order", "unsupported",
+)
+
+
+def is_permanent_binance_error(err: BaseException) -> bool:
+    """判断 Binance 错误是否为【永久性】（重试无意义 → 应熔断）。
+
+    临时性（网络抖动 / 418 / 429 / 5xx）不在此列 → 调用方继续重试。
+    """
+    msg = str(err).lower()
+    if any(code in msg for code in PERMANENT_ERR_CODES):
+        return True
+    return any(k in msg for k in PERMANENT_ERR_KEYWORDS)
 
 
 def _round_down_to_step(value: float, step: float) -> float:
@@ -70,9 +101,24 @@ class BinanceFuturesClient:
 
     # ───────────────────────── 基础设施 ─────────────────────────
     def _query_string(self, params: dict) -> str:
-        return "&".join(
-            f"{k}={v}" for k, v in sorted(params.items()) if v is not None
-        )
+        """构造待签名的查询串（**必须与实际传输的串完全一致**）。
+
+        ⚠ 2026-11-18 修复 P0：非 ASCII symbol 全部 -1022 Signature not valid。
+        根因：本函数此前直接拼 `f"{k}={v}"`（原始中文），签名基于原始串；
+        而 requests 构造 URL 时会把中文 percent-encode（龙虾 → %E9%BE%99%E8%99%BE），
+        服务端拿 %XX 串验签 → 与原始串签名不一致 → -1022。
+        连带后果：POST 下单的 body 不经 URL 重编码（能下单成功），但 GET 查单走 URL
+        （必炸）→ 限价单状态机永久卡在 limit_pending，每 60s 重试烧 API 配额，
+        且真实成交/亏损不入库（对账失真）。
+
+        修复：统一走 urllib.parse.urlencode，签名串与传输串同为 %XX 编码。
+        · quote_via=quote：空格编成 %20（而非 +），与 Binance 文档一致，
+          避免 form-urlencoded 语境下 +/空格 的歧义。
+        · 纯 ASCII 数字/字母路径输出逐字节不变 → 现有行为零影响。
+        · sorted() 保留：Binance 要求参数按【键名字母序】签名，不可改。
+        """
+        items = [(k, v) for k, v in sorted(params.items()) if v is not None]
+        return urllib.parse.urlencode(items, quote_via=urllib.parse.quote)
 
     def _sign(self, qs: str) -> str:
         return hmac.new(
@@ -533,13 +579,23 @@ class BinanceFuturesClient:
         # 必须按 quantity 平仓；用下单前估算 qty 会导致平仓后残留 dust 持仓，
         # 2026-10-27 实盘复现：4 笔平仓后残留 dust → account_positions 算满仓 →
         # max_positions 跳过 16 个 LIVE 信号持续 31 小时）。
+        # ⚠️ 2026-11-13（-4509 修复）：限价单也必须回查成交——LIMIT 挂出后通常**尚未成交**，
+        #    executedQty=0 时交易所没有持仓，GTE 条件的 algo 保护单必被
+        #    -4509「TIF GTE can only be used with open positions」拒绝。此时不能当成
+        #    保护单失败去回滚（敞口为 0，回滚毫无意义且会让策略长期停摆），而是标记
+        #    _unfilled 直接返回，止损由成交后的状态机补挂
+        #    （execute_gainers_v2._process_limit_entries → _ensure_fill_stop）。
         entry_for_protect = entry_used
-        qty_for_protect = qty  # 默认下单前估算量，市价单回查后用真实量覆盖
-        if order_type == "MARKET" and result.get("orderId"):
+        qty_for_protect = qty  # 默认下单前估算量，回查成交后用真实量覆盖
+        if result.get("orderId"):
             try:
                 fo = self.get_order(symbol, result["orderId"])
                 avg_fill = float(fo.get("avgPrice") or 0)
                 exec_qty = float(fo.get("executedQty") or 0)
+                result["_status"] = str(fo.get("status") or "")
+                if order_type == "LIMIT" and exec_qty <= 0:
+                    result["_unfilled"] = True  # 未成交：无持仓，不挂保护单
+                    return result
                 if avg_fill > 0:
                     entry_for_protect = avg_fill
                 if exec_qty > 0:
@@ -598,6 +654,12 @@ class BinanceFuturesClient:
                 p_errs.append(f"take_profit: {e}")
         if p_errs:
             result["_protective_error"] = "; ".join(p_errs)
+        # 限价单未成交兜底：若上面回查失败仍走到这里，-4509 就是「交易所无持仓」的
+        # 等价信号（未成交 → 没有仓位可挂 GTE 条件单），同样交给成交后补挂。
+        if order_type == "LIMIT" and "-4509" in (result.get("_protective_error") or ""):
+            result["_unfilled"] = True
+            result.pop("_protective_error", None)
+            result.pop("_stop_loss", None)
 
         return result
 

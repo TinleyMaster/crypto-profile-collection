@@ -30,9 +30,22 @@ if str(PROJECT_SRC) not in sys.path:
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
-from crypto_research.clients.binance_futures import BinanceFuturesClient  # noqa: E402
+from crypto_research.clients.binance_futures import (  # noqa: E402
+    BinanceFuturesClient, is_permanent_binance_error,
+)
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
+
+# ── 限价单查单熔断（2026-11-18）────────────────────────────────
+# 背景：_process_limit_entries 查单失败时原本只 print + continue → 无限重试。
+#   触发场景：非 ASCII symbol 触发 -1022（签名不匹配）→ 每轮必炸 → 永久死循环，
+#   持续消耗 Binance API 配额，且真实成交/亏损永不补录（对账失真）。
+# 策略（分级）：
+#   ① 永久性错误（-1022/-1121/签名无效/合约不存在…）→ 【立即熔断】
+#      重试无意义，直接标 error 停止重试 + 告警人工介入。
+#   ② 临时性错误（网络抖动/418/429/5xx）→ 连续 LIMIT_QUERY_FAIL_MAX 次才熔断
+#      （避免 Binance 限流抖动误杀正常信号）。
+LIMIT_QUERY_FAIL_MAX = 10
 
 # ── 交易参数（2026-10-06 细分档回测定稿，含 0.2% 成本）──────────────
 # SHORT_LONG = 短线做多（涨幅≥50%，TRAIL 3%，持仓 24h）
@@ -2097,6 +2110,112 @@ def _complete_limit_fill(conn, settings, sig: dict, meta: dict, order: dict) -> 
     print(f"  [limit-entry] {sig['symbol']} 成交补录 avg={avg:.6g} qty={qty}")
 
 
+def _alert_limit_query_failed(settings, sig: dict, reason: str, fail_n: int,
+                              permanent: bool) -> None:
+    """限价单查单持续失败 → 熔断告警（人工介入：可能有真实敞口）。"""
+    try:
+        from crypto_research.clients.notifier import EmailNotifier
+        nf = EmailNotifier(settings)
+        meta = (sig.get("params") or {}).get("limit_entry") or {}
+        tag = "永久性错误（立即熔断）" if permanent else f"连续 {fail_n} 次失败（达上限熔断）"
+        if not nf.configured:
+            print(f"  [ALERT] SMTP 未配置，无法邮件告警: {sig['symbol']} {reason}")
+            return
+        subject = (f"🚨 限价单查单失败已熔断 {sig['symbol']} "
+                   f"{sig.get('signal_type')}（{tag}）")
+        rows = "".join(
+            f"<tr><td style='padding:6px;border:1px solid #ddd'>{k}</td>"
+            f"<td style='padding:6px;border:1px solid #ddd'>{v}</td></tr>"
+            for k, v in [("币种", sig["symbol"]), ("信号类型", sig.get("signal_type")),
+                         ("方向", sig.get("direction")), ("order_id", meta.get("order_id")),
+                         ("限价价", meta.get("px")), ("名义", meta.get("notional")),
+                         ("失败原因", reason), ("失败类型", tag),
+                         ("扫描时刻", str(sig.get("scan_ts")))]
+        )
+        body = (
+            "<div style='font-family:sans-serif;font-size:14px;color:#171717'>"
+            "<h3 style='margin:0 0 8px'>🚨 限价单查单持续失败，状态机已熔断</h3>"
+            "<p>该限价单的状态机已连续查单失败并熔断，<b>系统不再自动重试</b>。"
+            "请人工到币安账户核对该订单是否成交、是否仍有持仓或残留挂单："
+            "若已成交，数据库缺失了这笔成交与盈亏（对账失真）；"
+            "若仍有挂单，请手动撤销。</p>"
+            f"<table style='border-collapse:collapse'>{rows}</div>"
+        )
+        ok, msg = nf.send(subject=subject, body_html=body, from_name="实盘限价单熔断告警",
+                          to=settings.admin_email or settings.smtp_to)
+        print(f"  [ALERT] 限价单熔断告警邮件 {'OK' if ok else 'FAIL'}: {msg}")
+    except Exception as e:  # noqa: BLE001
+        print(f"  [ALERT] 告警邮件发送异常: {type(e).__name__}: {e}")
+
+
+def _bump_limit_query_fail(conn, sig: dict, reason: str, permanent: bool) -> tuple[int, bool]:
+    """累加查单失败计数，返回 (累计次数, 是否应熔断)。
+
+    熔断条件：
+      - 永久性错误 → 立即熔断
+      - 临时性错误 → 连续 LIMIT_QUERY_FAIL_MAX 次
+    计数落 params.limit_query_fail（不污染其他字段）。
+
+    ⚠ 计数必须从【DB 当前值】读，不能用 sig["params"] 快照：
+      sig 是本轮开始时的行快照，params 不会自动刷新 → 用快照会永远从 0+1，
+      临时性错误永远达不到熔断阈值（单元测试已抓到该缺陷）。
+    """
+    fail_n = 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE((params->>'limit_query_fail')::int, 0) "
+                "FROM biz.scan_gainer_signal WHERE id=%s", (sig["id"],))
+            row = cur.fetchone()
+        if row and row[0] is not None:
+            fail_n = int(row[0])
+    except Exception as e:  # noqa: BLE001
+        print(f"  [limit-entry] 读失败计数异常（按 0 起算）: {type(e).__name__}: {str(e)[:60]}")
+        fail_n = 0
+    fail_n += 1
+    should_break = permanent or fail_n >= LIMIT_QUERY_FAIL_MAX
+    audit = {"limit_query_fail": fail_n,
+             "limit_query_fail_reason": reason[:200],
+             "limit_query_fail_at": datetime.now(timezone.utc).isoformat()}
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE biz.scan_gainer_signal SET "
+            "  params = COALESCE(params, '{}'::jsonb) || %s::jsonb WHERE id=%s",
+            (json.dumps(audit), sig["id"]))
+    return fail_n, should_break
+
+
+def _abort_limit_query_loop(client, conn, settings, sig: dict, reason: str,
+                            permanent: bool) -> None:
+    """查单死循环熔断：标 error + 撤残单（尽力）+ 告警。
+
+    不做自动平仓：此时交易所侧是否真有持仓未知（-1022 时查单本身就失败，
+    撤单/查仓同样可能失败）→ 交人工判断，避免误平正常仓位。
+    """
+    fail_n, _ = _bump_limit_query_fail(conn, sig, reason, permanent)
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE biz.scan_gainer_signal SET exec_state='error', executed_at=%s, "
+            "params = COALESCE(params, '{}'::jsonb) || %s::jsonb WHERE id=%s",
+            (datetime.now(timezone.utc),
+             json.dumps({"exec_reason": "limit_query_failed_permanent" if permanent
+                         else "limit_query_failed_max"}),
+             sig["id"]))
+    # 尽力撤残单（失败不阻塞：状态机已熔断，不会再重试）
+    meta = (sig.get("params") or {}).get("limit_entry") or {}
+    oid = meta.get("order_id")
+    if oid:
+        try:
+            client.cancel_order(sig["symbol"], oid)
+            print(f"  [limit-entry] {sig['symbol']} 熔断后撤残单成功 order_id={oid}")
+        except Exception as e:  # noqa: BLE001
+            print(f"  [limit-entry] {sig['symbol']} 熔断后撤残单失败（需人工）: "
+                  f"{type(e).__name__}: {str(e)[:80]}")
+    print(f"  [limit-entry] {sig['symbol']} 查单失败 {fail_n} 次 → 熔断标 error，"
+          f"停止重试（{'永久性' if permanent else '达次数上限'}）: {reason[:80]}")
+    _alert_limit_query_failed(settings, sig, reason, fail_n, permanent)
+
+
 def _process_limit_entries(client, settings, live: bool) -> None:
     """5m 限价挂单状态机（exec_state='limit_pending'）：成交 → 补录；超时 → 撤单放弃。
 
@@ -2140,8 +2259,15 @@ def _process_limit_entries(client, settings, live: bool) -> None:
             try:
                 o = client.get_order(sig["symbol"], oid)
             except Exception as e:  # noqa: BLE001
-                print(f"  [limit-entry] {sig['symbol']} 查单失败，下轮重试: "
-                      f"{type(e).__name__}: {e}")
+                # 熔断（2026-11-18）：原本无限重试 → 永久死循环烧 API 配额 + 成交不入库。
+                # 永久性错误（如非 ASCII symbol 的 -1022）立即熔断；临时性错误达次数上限才熔断。
+                permanent = is_permanent_binance_error(e)
+                fail_n, should_break = _bump_limit_query_fail(conn, sig, str(e), permanent)
+                if should_break:
+                    _abort_limit_query_loop(client, conn, settings, sig, str(e), permanent)
+                    continue
+                print(f"  [limit-entry] {sig['symbol']} 查单失败({fail_n}/"
+                      f"{LIMIT_QUERY_FAIL_MAX})，下轮重试: {type(e).__name__}: {str(e)[:80]}")
                 continue
             status = str(o.get("status") or "")
             executed = float(o.get("executedQty") or 0)
@@ -2181,7 +2307,15 @@ def _process_limit_entries(client, settings, live: bool) -> None:
             try:
                 o2 = client.get_order(sig["symbol"], oid)
             except Exception as e:  # noqa: BLE001
-                print(f"    撤单后复核失败，下轮重试 {sig['symbol']}: {type(e).__name__}: {e}")
+                # 熔断（2026-11-18）：同查单失败——永久性错误立即熔断，
+                # 临时性错误连续达上限才熔断，避免无限重试。
+                permanent = is_permanent_binance_error(e)
+                fail_n, should_break = _bump_limit_query_fail(conn, sig, str(e), permanent)
+                if should_break:
+                    _abort_limit_query_loop(client, conn, settings, sig, str(e), permanent)
+                    continue
+                print(f"    撤单后复核失败({fail_n}/{LIMIT_QUERY_FAIL_MAX})，下轮重试 "
+                      f"{sig['symbol']}: {type(e).__name__}: {str(e)[:80]}")
                 continue
             ex2 = float(o2.get("executedQty") or 0)
             st2 = str(o2.get("status") or "")

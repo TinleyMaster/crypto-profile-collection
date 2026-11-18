@@ -562,9 +562,9 @@ def main() -> int:
     ap.add_argument("--no-db", action="store_true", help="不连 DB（只用 5m 派生特征）")
     ap.add_argument("--no-5m", action="store_true", help="跳过 5m 读取（只用 DB OI 特征）")
     ap.add_argument("--entry", choices=["nl", "limit"], default="nl",
-                    help="入场口径：nl=信号收盘立即入场 / limit=实盘限价-0.5%+60min放弃")
+                    help="入场口径：nl=信号收盘立即入场 / limit=实盘限价 -0.5%% + 60min 放弃")
     ap.add_argument("--limit-discount", type=float, default=0.005,
-                    help="限价深度（默认 0.5%，与实盘一致）")
+                    help="限价深度（默认 0.5%%，与实盘一致）")
     ap.add_argument("--limit-wait-h", type=int, default=1,
                     help="限价等待小时（默认 1h，与实盘一致）")
     ap.add_argument("--oi-source", choices=["binance", "cg"], default="binance",

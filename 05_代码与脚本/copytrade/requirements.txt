@@ -1,0 +1,11 @@
+# L1 数据源
+requests>=2.32
+
+# L5 存储：默认 SQLite（stdlib），可选 Postgres
+psycopg[binary]>=3.2; extra == "postgres"
+
+# L4 执行层：仅 live 模式需要，paper 模式不依赖
+ccxt>=4.4; extra == "live"
+
+# 测试
+pytest>=8.0; extra == "dev"

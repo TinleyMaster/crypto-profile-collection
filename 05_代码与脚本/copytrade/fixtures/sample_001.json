@@ -1,0 +1,53 @@
+{
+  "_note": "离线回放样本：模拟交易员在 BTCUSDT 双向持仓下开多→部分平仓(totalPnl=0)→全平，以及 ETHUSDT 开空。totalPnl=0 的部分平仓是旧 H2 规则的坑位。",
+  "detail": [
+    {
+      "uid": "5075281354358777856",
+      "totalEquity": 10000.0,
+      "positionShow": false
+    }
+  ],
+  "position": [],
+  "order": [
+    {
+      "orderTime": 1700000000000,
+      "symbol": "BTCUSDT",
+      "side": "BUY",
+      "positionSide": "LONG",
+      "executedQty": 1.0,
+      "price": 42000.0,
+      "totalPnl": 0,
+      "reduceOnly": false
+    },
+    {
+      "orderTime": 1700000100000,
+      "symbol": "BTCUSDT",
+      "side": "SELL",
+      "positionSide": "LONG",
+      "executedQty": 0.5,
+      "price": 42500.0,
+      "totalPnl": 0,
+      "reduceOnly": false
+    },
+    {
+      "orderTime": 1700000200000,
+      "symbol": "BTCUSDT",
+      "side": "SELL",
+      "positionSide": "LONG",
+      "executedQty": 0.5,
+      "price": 43000.0,
+      "totalPnl": 500,
+      "reduceOnly": true
+    },
+    {
+      "orderTime": 1700000300000,
+      "symbol": "ETHUSDT",
+      "side": "SELL",
+      "positionSide": "SHORT",
+      "executedQty": 10.0,
+      "price": 2300.0,
+      "totalPnl": 0,
+      "reduceOnly": false
+    }
+  ]
+}

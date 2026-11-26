@@ -51,20 +51,27 @@ python -m pip install requests pytest
 # 1. 离线回放（无需网络，验证状态机全流程）
 python daemon.py --replay
 
-# 2. 单测（23 项）
+# 2. 单测（34 项）
 python -m pytest tests/ -q
 
 # 3. 健康状态（watchdog 用；数据源故障退出码=1，交易员静默=0）
 python daemon.py --health
 
 # 4. 跑一轮真实取数（仍 paper，不下单）
+#    首次运行自动进入【冷启动】：全量回填历史成交建立基线，本轮不下单；
+#    之后每轮只拉最新一页 + dedup 增量跟单。
 python daemon.py --once
 
-# 5. 常驻（supervisor）
+# 5. 常驻（supervisor 配置见 deploy/）
 python daemon.py --loop
+
+# 6. 运行时熔断（无需重启，下一轮生效）
+python daemon.py --kill       # 拒绝所有新单
+python daemon.py --unkill     # 解除
 ```
 
 配置：复制 `.env.example` 为 `.env`，按注释填。**默认全空即可安全跑 paper + replay。**
+代理提示：程序已禁用环境代理继承（死代理会致 502）；`CT_PROXY_CANDIDATES` 可配多个候选自动轮换。
 
 ---
 

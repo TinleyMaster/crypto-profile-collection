@@ -50,13 +50,47 @@ class CopyTradeDaemon:
         self.kill_switch = False
         self.last_reconcile_day = ""
         self.round_no = 0
+        # 冷启动标志：meta 表 bootstrap_done。回放模式是离线验证，跳过回填阶段。
+        self.bootstrapped = cfg.replay_mode or self.store.get_meta("bootstrap_done") == "1"
+        # 进程重启后从 raw_order 全量重建镜像仓位（否则减仓判断全错）
+        if self.bootstrapped:
+            self._rebuild_state()
+
+    def _rebuild_state(self) -> None:
+        """从已落库的 raw_order 按 order_time 顺序重建状态机镜像仓位。
+
+        进程重启 / 崩溃恢复后必须调用——PositionStateMachine 是纯内存的，
+        不重建则 net_qty=0，后续所有减仓信号会被误判或拒绝。
+        """
+        rows = sorted(
+            self.store.iter_new_raw_orders(),
+            key=lambda x: (x.get("order_time") or 0, x.get("dedup_key") or ""),
+        )
+        from source import _normalize_row
+        for r in rows:
+            self.sm.process(_normalize_row(r["payload"]), r["dedup_key"])
+        self.log(f"[rebuild] 从 {len(rows)} 条历史成交重建镜像仓位: {len(self.sm.snapshot())} 个仓位")
+
+    def _check_kill_switch(self) -> bool:
+        """文件哨兵：data/KILL_SWITCH 存在即熔断（运维可随时 touch，无需改代码/重启）。"""
+        p = self.store.path.parent / "KILL_SWITCH"
+        if p.exists():
+            if not self.kill_switch:
+                self.log(f"🛑 检测到熔断哨兵 {p.name}，拒绝所有新单")
+            self.kill_switch = True
+        elif self.kill_switch:
+            self.log("✅ 熔断哨兵已移除，恢复新单")
+            self.kill_switch = False
+        return self.kill_switch
 
     def run_round(self) -> dict[str, Any]:
         self.round_no += 1
-        self.log(f"=== 第 {self.round_no} 轮开始（{self.cfg.mode} 模式）===")
+        self._check_kill_switch()
+        self.log(f"=== 第 {self.round_no} 轮开始（{self.cfg.mode} 模式"
+                 + ("，冷启动回填" if not self.bootstrapped else "") + "）===")
 
-        # L1
-        results = self.source.fetch_all()
+        # L1：冷启动全量回填；热运行只拉最新页
+        results = self.source.fetch_all(bootstrap=not self.bootstrapped)
         for name, r in results.items():
             self.log(f"  源 {name}: {'OK' if r.ok else 'FAIL'} "
                      f"{r.elapsed_ms}ms rows={len(r.rows)} {r.error}")
@@ -77,6 +111,29 @@ class CopyTradeDaemon:
 
         order = results.get("order")
         stats = {"fetched": 0, "signal": 0, "ready": 0, "approved": 0, "executed": 0, "hold": 0}
+
+        # 冷启动：只把全量历史成交落库建立基线（不生成执行信号、不下单），
+        # 然后从落库数据重建镜像仓位，标记 bootstrap_done。下一轮起才进入正常增量。
+        if not self.bootstrapped:
+            from source import _dedup_key
+            # 底线：order 源是跟单的命门，冷启动失败绝不标记完成——
+            # 否则下一轮按「已初始化」走增量，历史基线永久缺失，系统形同空跑。
+            if not (order and order.ok and order.rows):
+                self.log("✗ [bootstrap] order 源失败，本轮不标记完成，下轮重试（绝不带着空基线启动跟单）")
+                return {"round": self.round_no, "health": health,
+                        "stats": {"bootstrap_rows": 0}, "phase": "bootstrap_failed"}
+            n = 0
+            for r in order.rows:
+                if self.store.insert_raw_order(
+                    _dedup_key(r), r, r.get("orderTime"), r.get("symbol")
+                ):
+                    n += 1
+            self._rebuild_state()
+            self.store.mark_bootstrap_done(n)
+            self.bootstrapped = True
+            self.log(f"[bootstrap] 回填 {n} 条历史成交，建立基线；本轮不下单，下轮起增量跟单")
+            return {"round": self.round_no, "health": health,
+                    "stats": {"bootstrap_rows": n}, "phase": "bootstrap"}
 
         if order and order.ok and order.rows:
             from source import _dedup_key
@@ -275,7 +332,24 @@ def main():
     ap.add_argument("--loop", action="store_true", help="常驻轮询")
     ap.add_argument("--replay", action="store_true", help="离线回放 fixtures")
     ap.add_argument("--health", action="store_true", help="输出双时钟健康状态")
+    ap.add_argument("--kill", action="store_true", help="开启熔断哨兵（拒新单，不需重启）")
+    ap.add_argument("--unkill", action="store_true", help="移除熔断哨兵（恢复新单）")
     args = ap.parse_args()
+
+    kill_path = Path(__file__).parent / "data" / "KILL_SWITCH"
+    # 若显式指定了数据库目录（测试/多实例），哨兵跟随该目录
+    db_env = Config.load().database_url
+    if db_env:
+        kill_path = Path(db_env).expanduser().resolve().parent / "KILL_SWITCH"
+    if args.kill or args.unkill:
+        kill_path.parent.mkdir(parents=True, exist_ok=True)
+        if args.kill:
+            kill_path.write_text(f"killed at {time.strftime('%Y-%m-%d %H:%M:%S')}\n", encoding="utf-8")
+            print(f"🛑 熔断已开启：{kill_path}（下一轮生效）")
+        else:
+            kill_path.unlink(missing_ok=True)
+            print(f"✅ 熔断已解除：{kill_path}（下一轮生效）")
+        return
 
     cfg = Config.load()
     if args.replay:

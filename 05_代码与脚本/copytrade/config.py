@@ -106,7 +106,13 @@ class Config:
     endpoint_order: str = "/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/order-history"
     endpoint_position: str = "/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/position-history"
     endpoint_detail: str = "/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/detail"
-    proxy: str = ""  # 可选；留空走 requests 默认环境
+    proxy: str = ""  # 首选代理；留空走 requests 默认环境
+    # 代理候选池：本机出口波动，单代理 502 时按序轮换（实测 7890 会间歇性 502）
+    proxy_candidates: str = "http://127.0.0.1:7890"
+    # 每轮拉取的最新页条数（热运行；冷启动用全量分页回填）
+    page_size: int = 100
+    # 冷启动全量回填最大页数（防无限翻页）
+    bootstrap_max_pages: int = 20
 
     # 资金映射（D4 由用户定，默认纸面 1000 USDT）
     allocated_capital: float = 1000.0
@@ -132,6 +138,9 @@ class Config:
         cfg = cls(
             leader_uid=_env("CT_LEADER_UID", "5075281354358777856"),
             proxy=_env("CT_PROXY", ""),
+            proxy_candidates=_env("CT_PROXY_CANDIDATES", "http://127.0.0.1:7890"),
+            page_size=_int("CT_PAGE_SIZE", 100),
+            bootstrap_max_pages=_int("CT_BOOTSTRAP_MAX_PAGES", 20),
             allocated_capital=_float("CT_ALLOCATED_CAPITAL", 1000.0),
             mode=_env("CT_MODE", "paper").lower(),
             api_key=_env("CT_API_KEY", ""),

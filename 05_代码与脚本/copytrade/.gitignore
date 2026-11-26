@@ -1,0 +1,12 @@
+# 反例：根 .gitignore 的 .env.* 误伤模板，本目录显式放行（仅占位符，无凭证）
+!.env.example
+
+# 运行时产物，绝不入库
+data/*.sqlite
+data/*.sqlite-*
+data/KILL_SWITCH
+data/*.log
+data/*.err
+.pytest_cache/
+__pycache__/
+*.pyc

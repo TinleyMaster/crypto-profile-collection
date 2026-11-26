@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS copytrade.exec_order (
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- 系统元数据：冷启动标志（bootstrap_done）、熔断状态等
+CREATE TABLE IF NOT EXISTS copytrade.meta (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- 双时钟：source_* = 数据源健康；leader_* = 交易员活跃（仅提示）
 CREATE TABLE IF NOT EXISTS copytrade.sync_state (
     source                TEXT PRIMARY KEY,

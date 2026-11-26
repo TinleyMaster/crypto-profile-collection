@@ -277,31 +277,46 @@ class PositionStateMachine:
         return mirror.net_qty
 
     def reconcile_from_position(self, positions: list[dict[str, Any]]) -> list[str]:
-        """用 position-history 真实仓位校准镜像（A2 对账）。返回发现的偏差描述。"""
+        """position-history 对账（只读，绝不覆写镜像）。
+
+        H1 实测结论（2026-11-26）：币安 lead-portfolio/position-history 返回的
+        全是【已平仓历史】（status=All Closed），字段 closedVolume/maxOpenInterest
+        是累计成交量而非实时净持仓。拿它覆写镜像会产生天文数字偏差、毁掉状态机。
+
+        因此本函数仅当接口提供【明确的实时净持仓字段】（positionAmt 等）时才校准；
+        否则只返回提示字符串，绝不修改 self.mirrors。
+        """
         diffs: list[str] = []
         if not positions:
             return diffs
+        realtime_fields = ("positionAmt", "netPosition", "currentQty", "positionVolume")
+        has_realtime = any(
+            any(f in p and p.get(f) not in (None, "") for f in realtime_fields)
+            for p in positions
+        )
+        if not has_realtime:
+            n_closed = sum(1 for p in positions if "closedVolume" in p)
+            return [
+                f"position-history 全为已平仓历史（{n_closed}/{len(positions)} 条含 closedVolume），"
+                "无实时净持仓字段 → 跳过对账，镜像仓位保持不变（H1 结论）"
+            ]
+        # 仅在确有实时字段时才校准
         for p in positions:
+            amt = _as_float(p.get("positionAmt") or p.get("netPosition")
+                            or p.get("currentQty") or p.get("positionVolume"))
+            if amt is None:
+                continue
             symbol = str(p.get("symbol", ""))
             side = str(p.get("positionSide", "")).strip().upper() or "BOTH"
-            # 真实 position-history（2026-11-26 核验）：已平仓仓位只有 closedVolume/maxOpenInterest，
-            # 没有实时 positionAmt；status 全是 All Closed，故对账只用于历史复盘，
-            # 不能当实时净持仓使用。H1 结论：不支持未平仓对账。
-            amt = _as_float(
-                p.get("positionAmt") or p.get("qty") or p.get("amount")
-                or p.get("closedVolume") or p.get("maxOpenInterest")
-            ) or 0.0
             if str(p.get("positionSide") or p.get("side") or "").lower() == "short":
                 amt = -abs(amt)
             key = (symbol, side)
             m = self.get_mirror(symbol, side)
             gap = amt - m.net_qty
             if abs(gap) > 1e-6:
-                diffs.append(f"{symbol}/{side}: 真实={amt} 镜像={m.net_qty:.6f} 偏差={gap:+.6f}")
-                # 以真实仓位为准重建（单一 lot，价格用开仓均价）
-                entry = _as_float(
-                    p.get("avgOpenPrice") or p.get("entryPrice") or p.get("price") or p.get("avgCost")
-                ) or (m.avg_price or 0.0)
+                diffs.append(f"{symbol}/{side}: 实时={amt} 镜像={m.net_qty:.6f} 偏差={gap:+.6f}")
+                entry = _as_float(p.get("avgOpenPrice") or p.get("entryPrice") or p.get("avgCost")) \
+                    or (m.avg_price or 0.0)
                 m.lots = deque([Lot(qty=amt, price=entry, ts=0)]) if abs(amt) > 1e-8 else deque()
         return diffs
 

@@ -64,6 +64,13 @@ CREATE TABLE IF NOT EXISTS exec_order (
     created_at      TEXT NOT NULL
 );
 
+-- 系统元数据（冷启动标志等）
+CREATE TABLE IF NOT EXISTS meta (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
 -- 双时钟：source_* 记录「数据源健康」，leader_* 记录「交易员活跃」，互不混淆
 CREATE TABLE IF NOT EXISTS sync_state (
     source              TEXT PRIMARY KEY,
@@ -137,7 +144,7 @@ class Store:
 
     def iter_new_raw_orders(self) -> Iterable[dict[str, Any]]:
         with self._lock, self._db() as c:
-            for row in c.execute("SELECT dedup_key,payload,order_time,symbol FROM raw_order ORDER BY order_time,id"):
+            for row in c.execute("SELECT dedup_key,payload,order_time,symbol FROM raw_order ORDER BY order_time,dedup_key"):
                 yield {
                     "dedup_key": row["dedup_key"],
                     "payload": json.loads(row["payload"]),
@@ -262,9 +269,29 @@ class Store:
             except sqlite3.IntegrityError:
                 return False
 
+    # ---------- meta ----------
+    def get_meta(self, key: str) -> str | None:
+        with self._lock, self._db() as c:
+            row = c.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+            return str(row["value"]) if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._lock, self._db() as c:
+            c.execute(
+                "INSERT INTO meta(key,value,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (key, value, _now_iso()),
+            )
+
+    def mark_bootstrap_done(self, n_rows: int) -> None:
+        self.set_meta("bootstrap_done", "1")
+        self.set_meta("bootstrap_rows", str(n_rows))
+        self.set_meta("bootstrap_at", _now_iso())
+
     def stats(self) -> dict[str, int]:
         with self._lock, self._db() as c:
             out = {}
-            for t in ("raw_order", "raw_position", "follow_signal", "mirror_position", "exec_order", "sync_state"):
+            for t in ("raw_order", "raw_position", "follow_signal", "mirror_position",
+                      "exec_order", "sync_state", "meta"):
                 out[t] = int(c.execute(f"SELECT count(*) FROM {t}").fetchone()[0])
             return out

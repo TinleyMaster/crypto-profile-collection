@@ -62,10 +62,30 @@ class PaperExecutor(BaseExecutor):
                           reason="paper 模式：仅记录，未下真实单")
 
 
-class LiveExecutor(BaseExecutor):
-    """真实执行（预留）。仅在 CT_MODE=live 且凭证齐全时由工厂返回；当前不启用。
+def build_order_params(dec: Decision, client_order_id: str) -> dict[str, Any]:
+    """纯函数：构造币安 U 本位下单参数（可离线单测，不含网络/凭证）。
 
-    ccxt 为可选依赖，paper 模式 import 本类不会触发 ccxt 导入。
+    修三个真实下单才会爆的坑：
+      - 平/减仓必须 reduceOnly=True，否则可能反向开仓（币安双向持仓下尤其危险）
+      - 单向持仓 BOTH 模式不能传 positionSide，传了会 400
+      - 杠杆需显式设置（跟随交易员降级后的值，最多 3x）
+    """
+    params: dict[str, Any] = {"newClientOrderId": client_order_id}
+    pos_side = (dec.signal.position_side or "BOTH").upper()
+    is_closing = dec.signal.action.startswith(("CLOSE", "REDUCE"))
+    if is_closing:
+        params["reduceOnly"] = True
+    if pos_side in ("LONG", "SHORT"):
+        params["positionSide"] = pos_side
+    # BOTH（单向）不传 positionSide
+    return params
+
+
+class LiveExecutor(BaseExecutor):
+    """真实执行。仅在 CT_MODE=live 且凭证齐全时由工厂返回。
+
+    安全：默认 paper，本类不会被实例化；ccxt 为可选依赖。
+    实盘启用前须由用户自行确认：①凭证 ②策略期望收益 ③资金规模。AI 不代开。
     """
 
     def __init__(self, *args, **kwargs):
@@ -77,21 +97,42 @@ class LiveExecutor(BaseExecutor):
             "enableRateLimit": True,
             "options": {"defaultType": "future"},
         })
+        self._leverage_set: set[str] = set()
+
+    def _set_leverage(self, symbol: str, leverage: int) -> None:
+        """每个品种只设一次杠杆（降级后的值，≤ CT_MAX_LEVERAGE）。"""
+        if symbol in self._leverage_set:
+            return
+        try:
+            self.exchange.set_leverage(int(leverage), symbol)
+            self._leverage_set.add(symbol)
+            self.log(f"[LIVE] 设置 {symbol} 杠杆 {leverage}x")
+        except Exception as e:  # noqa: BLE001
+            # 已设置过/接口不支持时继续（以交易所现有杠杆为准），不阻断下单
+            self.log(f"[LIVE] 设置杠杆失败 {symbol}: {type(e).__name__}: {str(e)[:80]}")
 
     def execute(self, dec: Decision) -> ExecResult:
         cid = self.client_order_id(dec)
         try:
+            symbol = dec.signal.symbol
+            # 下单方向：signal.direction 是【成交方向】(+1买/-1卖)，
+            # 平多=SELL(-1)、平空=BUY(+1)，直接用即可。
             side = "buy" if dec.signal.direction > 0 else "sell"
-            order = self.exchange.create_market_order(
-                dec.signal.symbol, side, dec.qty, params={"clientOrderId": cid,
-                                                          "positionSide": dec.signal.position_side}
-            )
+            params = build_order_params(dec, cid)
+            self._set_leverage(symbol, int(dec.leverage or 1))
+            # 数量精度：交给交易所按 stepSize 规整，避免精度错误拒单
+            try:
+                qty = self.exchange.amount_to_precision(symbol, dec.qty)
+            except Exception:  # noqa: BLE001
+                qty = dec.qty
+            order = self.exchange.create_market_order(symbol, side, qty, params=params)
             self.store.insert_exec_order({
                 "client_order_id": cid, "signal_id": dec.signal_id,
                 "exchange_order_id": str(order.get("id", "")), "status": "live_submitted",
-                "filled_qty": dec.qty, "avg_price": dec.signal.price,
+                "filled_qty": float(qty), "avg_price": dec.signal.price,
             })
-            return ExecResult(True, cid, "live_submitted", dec.qty, dec.signal.price,
+            self.log(f"[LIVE] 提交 {symbol} {side} qty={qty} params={params}")
+            return ExecResult(True, cid, "live_submitted", float(qty), dec.signal.price,
                               str(order.get("id", "")), "live 已提交")
         except Exception as e:  # noqa: BLE001
             self.store.insert_exec_order({

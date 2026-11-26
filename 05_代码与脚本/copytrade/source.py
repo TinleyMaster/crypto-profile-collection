@@ -46,11 +46,22 @@ class FetchResult:
 
 
 class BinanceCopySource:
+    """实时数据源。修三个真实网络才暴露的坑：
+      - 代理单点 502 → 候选池轮换 + 成功后黏性复用
+      - indexValue 方向：实测往【历史】翻页（page2 拿到更早订单），
+        故热运行每轮只拉【最新一页】+ raw_order dedup，绝不拿游标续传（会漏新单）；
+        游标仅用于冷启动全量回填（bootstrap）。
+      - 请求头必须带完整浏览器指纹，否则 202/403 边缘风控。
+    """
+
     def __init__(self, cfg: Config, store: Any, logger: Callable[[str], None] | None = None):
         self.cfg = cfg
         self.store = store
         self.log = logger or (lambda m: None)
         self.session = requests.Session()
+        # 关键：环境里 HTTPS_PROXY=60459 是死代理，会覆盖 session.proxies 导致 502。
+        # 禁用 env 继承，完全由候选池控制代理。
+        self.session.trust_env = False
         self.session.headers.update({
             "User-Agent": UA,
             "Accept": "application/json, text/plain, */*",
@@ -58,15 +69,40 @@ class BinanceCopySource:
             "Referer": "https://www.binance.com/",
             "clienttype": "web",
         })
+        # 代理候选池：首选 CT_PROXY，再 CT_PROXY_CANDIDATES，最后直连兜底
+        cands: list[str | None] = []
         if cfg.proxy:
-            self.session.proxies.update({"http": cfg.proxy, "https": cfg.proxy})
+            cands.append(cfg.proxy)
+        for raw in cfg.proxy_candidates.split(","):
+            p = raw.strip()
+            if p and p not in cands:
+                cands.append(p)
+        # 直连仅在显式配置 CT_PROXY_CANDIDATES=direct 时加入（本机实测直连不通，默认不放进池）
+        if "direct" in [c.strip().lower() for c in cfg.proxy_candidates.split(",")]:
+            cands.append(None)
+        self._proxies: list[str | None] = cands or [None]
+        self._proxy_idx = 0
+        self._apply_proxy()
+
+    def _apply_proxy(self) -> None:
+        p = self._proxies[self._proxy_idx]
+        self.session.proxies = {"http": p, "https": p} if p else {}
+
+    def _rotate_proxy(self) -> None:
+        self._proxy_idx = (self._proxy_idx + 1) % len(self._proxies)
+        self._apply_proxy()
+        self.log(f"[proxy] 切换到候选 #{self._proxy_idx}: {self._proxies[self._proxy_idx] or '直连'}")
 
     # ---------- 公开 API ----------
-    def fetch_all(self) -> dict[str, FetchResult]:
+    def fetch_all(self, bootstrap: bool = False) -> dict[str, FetchResult]:
+        """热运行：只拉最新一页。bootstrap：用 indexValue 往历史全量回填。"""
         out = {
-            "order": self._fetch_with_retry("order", self.cfg.endpoint_order, self._parse_order),
-            "position": self._fetch_with_retry("position", self.cfg.endpoint_position, self._parse_position),
-            "detail": self._fetch_with_retry("detail", self.cfg.endpoint_detail, self._parse_detail),
+            "order": self._fetch_with_retry(
+                "order", self.cfg.endpoint_order, self._parse_order, bootstrap=bootstrap),
+            "position": self._fetch_with_retry(
+                "position", self.cfg.endpoint_position, self._parse_position, bootstrap=bootstrap),
+            "detail": self._fetch_with_retry(
+                "detail", self.cfg.endpoint_detail, self._parse_detail, bootstrap=False),
         }
         self._update_health(out)
         return out
@@ -107,70 +143,113 @@ class BinanceCopySource:
         return out
 
     # ---------- 内部 ----------
-    def _fetch_with_retry(self, name: str, endpoint: str, parser: Callable[[dict], list[dict]]) -> FetchResult:
-        """按 2026-11-26 真实抓包核验的正确协议请求。
-
-        detail  : GET  ?portfolioId=<id>
-        history : POST JSON {"portfolioId":<id>,"pageSize":100[,"indexValue":<cursor>]}
-        错误码：000000 成功 / 000002 参数非法 / 11012005 系统忙(限流) / 90801003 请求过多
-        """
+    def _request_once(self, name: str, endpoint: str, body: dict | None,
+                      params: dict | None) -> tuple[FetchResult, dict | None]:
+        """单次 HTTP 请求（当前代理）。返回 (结果, payload)。网络层失败时 ok=False。"""
         url = self.cfg.bapi_base + endpoint
-        # 真实核验：参数名是 portfolioId，不是 uid
-        if name == "detail":
-            request_kw = {"params": {"portfolioId": self.cfg.leader_uid}, "method": "get"}
-        else:
-            body: dict[str, Any] = {"portfolioId": self.cfg.leader_uid, "pageSize": 100}
-            # indexValue 是分页游标（不是时间），从上次成功游标续传
-            sync = self.store.get_sync(name)
-            cursor = sync.get("last_cursor")
-            if cursor:
-                body["indexValue"] = int(cursor)
-            request_kw = {"json": body, "method": "post"}
+        t0 = time.monotonic()
+        try:
+            if params is not None:
+                r = self.session.get(url, params=params, timeout=20, allow_redirects=False)
+            else:
+                r = self.session.post(url, json=body, timeout=20, allow_redirects=False)
+            elapsed = int((time.monotonic() - t0) * 1000)
+            redirected = r.status_code in (301, 302, 303, 307, 308, 202)
+            if r.status_code != 200 or redirected:
+                return FetchResult(source=name, ok=False, http_status=r.status_code,
+                                   redirected=redirected, elapsed_ms=elapsed,
+                                   error=f"HTTP {r.status_code}" + (" 边缘风控/重定向" if redirected else "")), None
+            payload = r.json()
+            code = str(payload.get("code", ""))
+            if code != "000000":
+                return FetchResult(source=name, ok=False, raw=payload, elapsed_ms=elapsed,
+                                   error=f"业务码 {code}: {str(payload.get('message',''))[:80]}"), payload
+            return FetchResult(source=name, ok=True, raw=payload, elapsed_ms=elapsed,
+                               http_status=200), payload
+        except requests.RequestException as e:
+            return FetchResult(source=name, ok=False,
+                               error=f"{type(e).__name__}: {str(e)[:140]}"), None
+        except (ValueError, json.JSONDecodeError) as e:
+            return FetchResult(source=name, ok=False, error=f"JSON 解析失败: {str(e)[:120]}"), None
 
-        last = FetchResult(source=name, ok=False)
-        for attempt, backoff in enumerate([0, *self.cfg.health.backoff_sec, 6, 6]):
-            if backoff:
-                time.sleep(backoff)
-            t0 = time.monotonic()
-            try:
-                if request_kw["method"] == "get":
-                    r = self.session.get(url, params=request_kw["params"], timeout=20,
-                                         allow_redirects=False)
+    def _fetch_with_retry(self, name: str, endpoint: str, parser: Callable[[dict], list[dict]],
+                          bootstrap: bool = False) -> FetchResult:
+        """代理轮换重试 + 分页。热运行只拉最新页；bootstrap 往历史翻页全量回填。
+
+        2026-11-26 实测：indexValue 是【历史方向】游标（带游标拿到更早订单），
+        因此绝不能用于常规增量续传——否则每轮拿同一批最新单、超过 pageSize 后漏新单。
+        """
+        if name == "detail":
+            params: dict | None = {"portfolioId": self.cfg.leader_uid}
+            body: dict | None = None
+        else:
+            params = None
+            body = {"portfolioId": self.cfg.leader_uid, "pageSize": self.cfg.page_size}
+
+        # 重试策略：同一代理先退避重试 2 次（代理 7890 是间歇 502，快速轮换只会加剧），
+        # 连续失败才轮换代理；每个代理至少给 3 次机会。
+        per_proxy = 3
+        max_rounds = max(3, len(self._proxies) * per_proxy)
+        all_rows: list[dict] = []
+        seen_keys: set[str] = set()
+        cursor: int | None = None
+        pages = 0
+        last_err = ""
+        total = 0
+
+        while pages < (self.cfg.bootstrap_max_pages if bootstrap else 1):
+            if body is not None and cursor is not None:
+                body = {**body, "indexValue": cursor}
+            got = False
+            same_proxy_fails = 0
+            for attempt in range(max_rounds):
+                res, payload = self._request_once(name, endpoint, body, params)
+                if res.ok and payload is not None:
+                    got = True
+                    break
+                last_err = res.error
+                same_proxy_fails += 1
+                rate_limited = any(c in res.error for c in
+                                   ("11012005", "90801003", "Too many", "系统忙", "429"))
+                if rate_limited:
+                    # 币安限流：退避 5s 起递增，不换代理（换代理没用，是业务限流）
+                    time.sleep(5 + attempt * 3)
+                elif same_proxy_fails >= per_proxy:
+                    self._rotate_proxy()
+                    same_proxy_fails = 0
+                    time.sleep(1)
                 else:
-                    r = self.session.post(url, json=request_kw["json"], timeout=20,
-                                          allow_redirects=False)
-                elapsed = int((time.monotonic() - t0) * 1000)
-                redirected = r.status_code in (301, 302, 303, 307, 308)
-                if r.status_code != 200 or redirected:
-                    last = FetchResult(
-                        source=name, ok=False, http_status=r.status_code,
-                        redirected=redirected, elapsed_ms=elapsed,
-                        error=f"HTTP {r.status_code}" + (" 302->首页(域名/风控)" if redirected else ""),
-                    )
-                    self.log(f"[{name}] attempt{attempt} {last.error}")
-                    continue
-                payload = r.json()
-                code = str(payload.get("code", ""))
-                if code != "000000":
-                    last = FetchResult(source=name, ok=False, raw=payload, elapsed_ms=elapsed,
-                                       error=f"业务码 {code}: {str(payload.get('message',''))[:80]}")
-                    self.log(f"[{name}] attempt{attempt} {last.error}")
-                    continue
-                rows = parser(payload)
-                # 字段名归一化：真实接口给 avgPrice，状态机统一读 price
-                rows = [_normalize_row(x) for x in rows]
-                last = FetchResult(source=name, ok=True, rows=rows, raw=payload,
-                                   http_status=200, elapsed_ms=elapsed)
-                # 把新游标（indexValue）带给健康更新层落库
-                if isinstance(payload.get("data"), dict) and payload["data"].get("indexValue"):
-                    last.raw["_next_cursor"] = str(payload["data"]["indexValue"])
-                return last
-            except requests.RequestException as e:
-                last = FetchResult(source=name, ok=False, error=f"{type(e).__name__}: {str(e)[:160]}")
-                self.log(f"[{name}] attempt{attempt} 网络异常 {last.error}")
-            except (ValueError, json.JSONDecodeError) as e:
-                last = FetchResult(source=name, ok=False, error=f"JSON 解析失败: {str(e)[:120]}")
-        return last
+                    # 网络层失败：短退避给代理恢复窗口
+                    time.sleep(2 + min(attempt, 3))
+            if not got:
+                return FetchResult(source=name, ok=False, error=f"{last_err}（{max_rounds}次尝试均失败）")
+
+            rows = parser(payload)
+            for row in rows:
+                k = _dedup_key(_normalize_row(row))
+                if k not in seen_keys:
+                    seen_keys.add(k)
+                    all_rows.append(_normalize_row(row))
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+            total = int(data.get("total") or 0)
+            pages += 1
+            self.log(f"[{name}] page{pages} +{len(rows)} 累计唯一={len(all_rows)}/{total}")
+
+            if not bootstrap or not rows or len(all_rows) >= total:
+                break
+            nxt = data.get("indexValue")
+            if not nxt or int(nxt) == cursor:
+                break
+            cursor = int(nxt)
+            time.sleep(3)  # 冷启动翻页节流，避免触发 11012005 限流
+
+        result = FetchResult(source=name, ok=True, rows=all_rows, raw=payload or {},
+                             http_status=200, elapsed_ms=0)
+        if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+            iv = payload["data"].get("indexValue")
+            if iv:
+                result.raw["_next_cursor"] = str(iv)
+        return result
 
     def _update_health(self, results: dict[str, FetchResult]) -> None:
         """每个源独立记成功/失败时钟，互不影响。"""
@@ -264,7 +343,8 @@ class ReplaySource:
         ))
         self.log(f"[replay] 加载 {len(self._batches)} 批样本")
 
-    def fetch_all(self) -> dict[str, FetchResult]:
+    def fetch_all(self, bootstrap: bool = False) -> dict[str, FetchResult]:
+        # bootstrap 参数仅为与 BinanceCopySource 签名兼容；回放按批次推进
         if self._idx >= len(self._batches):
             batch = {"order": [], "position": [], "detail": []}
         else:

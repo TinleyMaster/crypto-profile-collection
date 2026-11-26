@@ -250,7 +250,10 @@ class CopyTradeDaemon:
 
 
 def _extract_aum(detail: dict[str, Any]) -> float | None:
-    for k in ("totalEquity", "aum", "totalAsset", "accountBalance", "totalBalance", "equity"):
+    # 真实接口（2026-11-26 核验）给的是 aumAmount / marginBalance；
+    # copyAum 是跟单者资金、不是交易员自有 AUM，故不取值。
+    for k in ("aumAmount", "totalEquity", "aum", "totalAsset", "accountBalance",
+              "totalBalance", "equity", "marginBalance"):
         v = detail.get(k)
         if v is not None:
             try:

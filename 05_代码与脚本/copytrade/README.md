@@ -68,22 +68,28 @@ python daemon.py --loop
 
 ---
 
-## 四、H1/H2 待你本地闭环（我这边抓不到）
+## 四、真实协议与 H1/H2 闭环（2026-11-26 纠错）
 
-本机出口 IP 被币安边缘风控：`bapi.binance.com` 全部 302→`www.binance.com/en`，但 `fapi/api` 通。
-所以**真实 order-history / position-history 样本我抓不到**，以下两项需你在本地浏览器（能打开跟单页的环境）抓包后放进 `fixtures/`：
+> ⚠️ 11-25 版本曾误判「bapi 整体 302、抓不到样本」——域名用错了。已纠正，详见
+> `04_架构与代码方案/纠错_自动跟单程序_bapi协议与真实数据复验_2026-11-26.md`。
 
-- **H1**：`position-history` 是否含未平仓仓位？决定 A2 能否做实时对账。
-  抓一份有未平仓交易员的 `position-history` 响应，存为 `fixtures/real_position.json`：
-  ```json
-  {"detail": [{"totalEquity": 12345.6}], "position": [<接口原始数组>], "order": []}
-  ```
-- **H2**：用 112 笔真实仓位反查 order-history，验证三级判据准确率。
-  把成交样本存为 `fixtures/real_order.json`（格式同上，`order` 填原始数组），然后：
-  ```bash
-  CT_REPLAY_MODE=true python daemon.py --replay
-  ```
-  看 `follow_signal` 表的 action 是否符合预期；HOLD 的比例即低置信度需人工核对的比例。
+**正确协议**：域名 `www.binance.com`，参数 `portfolioId`（不是 uid）：
+
+| 接口 | 方法 | 参数 |
+|---|---|---|
+| detail | GET | `?portfolioId=5075281354358777856` |
+| order-history | POST JSON | `{"portfolioId":"...","pageSize":100[,"indexValue":<游标>]}` |
+| position-history | POST JSON | 同上 |
+
+真实样本已存档 `fixtures/real_20261126.json`（274 成交 / 100 仓位 / detail）。回放：
+```bash
+mkdir -p /tmp/ct_real && cp fixtures/real_20261126.json /tmp/ct_real/
+CT_REPLAY_MODE=true CT_REPLAY_DIR=/tmp/ct_real python daemon.py --replay
+```
+
+- **H1 已闭环**：真实 position 100 条全 `All Closed`，**不含未平仓** → A2 只能做历史复盘，不能实时对账。
+- **H2 已闭环（侧证）**：position 按 `(symbol,side)` 净方向与 274 条 order 回放镜像对比，**30/30 = 100% 同向**。严格逐 positionId 配对列为观察项。
+- **真实字段坑**：价格是 `avgPrice`（不是 price）、AUM 是 `aumAmount`、`reduceOnly/closePosition` 真实数据里 0 条 → P2 双向判据是主力。
 
 ---
 
@@ -100,5 +106,6 @@ python daemon.py --loop
 ## 六、验收快照
 
 - `python -m pytest tests/ -q` → **23 passed**
-- `CT_REPLAY_MODE=true python daemon.py --replay` → 4 成交 → 4 信号 → 3 执行（1 拒单：我方已平仓），镜像净持仓归零、已实现盈亏 250 USDT（模拟数据）
-- `python -m compileall` → 全通过（见验收报告）
+- `python -m compileall` → exit 0
+- 模拟样本回放 → 4 成交 → 4 信号 → 3 执行（1 拒单），镜像净持仓归零、已实现盈亏 250 USDT
+- **真实样本回放（274 条）** → 261 approved / 8 rejected（风控闸门）/ 5 HOLD（翻转保护）→ 232 笔执行；AUM 8,083,290.86；H1/H2 闭环见第四节

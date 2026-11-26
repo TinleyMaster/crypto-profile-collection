@@ -284,14 +284,24 @@ class PositionStateMachine:
         for p in positions:
             symbol = str(p.get("symbol", ""))
             side = str(p.get("positionSide", "")).strip().upper() or "BOTH"
-            amt = _as_float(p.get("positionAmt") or p.get("qty") or p.get("amount")) or 0.0
+            # 真实 position-history（2026-11-26 核验）：已平仓仓位只有 closedVolume/maxOpenInterest，
+            # 没有实时 positionAmt；status 全是 All Closed，故对账只用于历史复盘，
+            # 不能当实时净持仓使用。H1 结论：不支持未平仓对账。
+            amt = _as_float(
+                p.get("positionAmt") or p.get("qty") or p.get("amount")
+                or p.get("closedVolume") or p.get("maxOpenInterest")
+            ) or 0.0
+            if str(p.get("positionSide") or p.get("side") or "").lower() == "short":
+                amt = -abs(amt)
             key = (symbol, side)
             m = self.get_mirror(symbol, side)
             gap = amt - m.net_qty
             if abs(gap) > 1e-6:
                 diffs.append(f"{symbol}/{side}: 真实={amt} 镜像={m.net_qty:.6f} 偏差={gap:+.6f}")
                 # 以真实仓位为准重建（单一 lot，价格用开仓均价）
-                entry = _as_float(p.get("avgOpenPrice") or p.get("entryPrice") or p.get("price")) or (m.avg_price or 0.0)
+                entry = _as_float(
+                    p.get("avgOpenPrice") or p.get("entryPrice") or p.get("price") or p.get("avgCost")
+                ) or (m.avg_price or 0.0)
                 m.lots = deque([Lot(qty=amt, price=entry, ts=0)]) if abs(amt) > 1e-8 else deque()
         return diffs
 

@@ -99,8 +99,10 @@ class Config:
     # 目标交易员
     leader_uid: str = "5075281354358777856"
 
-    # 数据源（方案 F5/F6，公开无登录；bapi 是可变私有接口，独立可替换）
-    bapi_base: str = "https://bapi.binance.com"
+    # 数据源（2026-11-26 真实核验修正）
+    # 关键：域名必须是 www.binance.com，不是 bapi.binance.com（后者整体 302 到首页）。
+    # 参数名必须是 portfolioId，不是 uid；history 接口必须 POST JSON body。
+    bapi_base: str = "https://www.binance.com"
     endpoint_order: str = "/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/order-history"
     endpoint_position: str = "/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/position-history"
     endpoint_detail: str = "/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/detail"

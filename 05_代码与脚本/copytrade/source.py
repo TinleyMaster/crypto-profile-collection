@@ -108,42 +108,63 @@ class BinanceCopySource:
 
     # ---------- 内部 ----------
     def _fetch_with_retry(self, name: str, endpoint: str, parser: Callable[[dict], list[dict]]) -> FetchResult:
+        """按 2026-11-26 真实抓包核验的正确协议请求。
+
+        detail  : GET  ?portfolioId=<id>
+        history : POST JSON {"portfolioId":<id>,"pageSize":100[,"indexValue":<cursor>]}
+        错误码：000000 成功 / 000002 参数非法 / 11012005 系统忙(限流) / 90801003 请求过多
+        """
         url = self.cfg.bapi_base + endpoint
-        params = {"uid": self.cfg.leader_uid, "pageSize": 100, "pageIndex": 1}
+        # 真实核验：参数名是 portfolioId，不是 uid
+        if name == "detail":
+            request_kw = {"params": {"portfolioId": self.cfg.leader_uid}, "method": "get"}
+        else:
+            body: dict[str, Any] = {"portfolioId": self.cfg.leader_uid, "pageSize": 100}
+            # indexValue 是分页游标（不是时间），从上次成功游标续传
+            sync = self.store.get_sync(name)
+            cursor = sync.get("last_cursor")
+            if cursor:
+                body["indexValue"] = int(cursor)
+            request_kw = {"json": body, "method": "post"}
+
         last = FetchResult(source=name, ok=False)
-        for attempt, backoff in enumerate([0, *self.cfg.health.backoff_sec]):
+        for attempt, backoff in enumerate([0, *self.cfg.health.backoff_sec, 6, 6]):
             if backoff:
                 time.sleep(backoff)
             t0 = time.monotonic()
             try:
-                r = self.session.post(
-                    url,
-                    data=params,
-                    timeout=20,
-                    allow_redirects=False,  # 关键：不跟随 302，识别风控弹首页
-                )
+                if request_kw["method"] == "get":
+                    r = self.session.get(url, params=request_kw["params"], timeout=20,
+                                         allow_redirects=False)
+                else:
+                    r = self.session.post(url, json=request_kw["json"], timeout=20,
+                                          allow_redirects=False)
                 elapsed = int((time.monotonic() - t0) * 1000)
                 redirected = r.status_code in (301, 302, 303, 307, 308)
                 if r.status_code != 200 or redirected:
                     last = FetchResult(
                         source=name, ok=False, http_status=r.status_code,
                         redirected=redirected, elapsed_ms=elapsed,
-                        error=f"HTTP {r.status_code}" + (" 302->首页(边缘风控)" if redirected else ""),
+                        error=f"HTTP {r.status_code}" + (" 302->首页(域名/风控)" if redirected else ""),
                     )
                     self.log(f"[{name}] attempt{attempt} {last.error}")
                     continue
                 payload = r.json()
-                rows = parser(payload)
-                if payload.get("code") not in (None, 0, "0", "000000"):
-                    code = str(payload.get("code"))
-                    msg = str(payload.get("message", ""))[:120]
-                    # 11012005 系统忙 = 限流，退避重试
+                code = str(payload.get("code", ""))
+                if code != "000000":
                     last = FetchResult(source=name, ok=False, raw=payload, elapsed_ms=elapsed,
-                                       error=f"业务码 {code}: {msg}")
-                    self.log(f"[{name}] attempt{attempt} 业务错误 {last.error}")
+                                       error=f"业务码 {code}: {str(payload.get('message',''))[:80]}")
+                    self.log(f"[{name}] attempt{attempt} {last.error}")
                     continue
-                return FetchResult(source=name, ok=True, rows=rows, raw=payload,
+                rows = parser(payload)
+                # 字段名归一化：真实接口给 avgPrice，状态机统一读 price
+                rows = [_normalize_row(x) for x in rows]
+                last = FetchResult(source=name, ok=True, rows=rows, raw=payload,
                                    http_status=200, elapsed_ms=elapsed)
+                # 把新游标（indexValue）带给健康更新层落库
+                if isinstance(payload.get("data"), dict) and payload["data"].get("indexValue"):
+                    last.raw["_next_cursor"] = str(payload["data"]["indexValue"])
+                return last
             except requests.RequestException as e:
                 last = FetchResult(source=name, ok=False, error=f"{type(e).__name__}: {str(e)[:160]}")
                 self.log(f"[{name}] attempt{attempt} 网络异常 {last.error}")
@@ -167,6 +188,7 @@ class BinanceCopySource:
                 source=name,
                 has_data=bool(res.rows),
                 last_trade_at=last_trade_iso,
+                cursor=res.raw.get("_next_cursor"),
             )
             # 原始 JSON 落库统一由 daemon 处理（避免双重入库导致信号被判重跳过）
             # source 层只负责取数 + 更新健康时钟。
@@ -250,6 +272,7 @@ class ReplaySource:
             self._idx += 1
         out: dict[str, FetchResult] = {}
         for name, rows in batch.items():
+            rows = [_normalize_row(r) for r in rows]
             out[name] = FetchResult(source=name, ok=True, rows=rows, http_status=200)
             # 原始落库统一由 daemon 处理（与 BinanceCopySource 口径一致）
             # 回放模式把成功时钟和最后成交时间也推进，健康判据同样可测
@@ -265,6 +288,25 @@ class ReplaySource:
     @property
     def exhausted(self) -> bool:
         return self._idx >= len(self._batches)
+
+
+def _normalize_row(row: dict[str, Any]) -> dict[str, Any]:
+    """真实接口字段名 → 状态机内部统一字段名（2026-11-26 核验）。
+
+    真实 order-history 字段：symbol/side/positionSide/executedQty/avgPrice/totalPnl/
+    orderTime/orderUpdateTime —— 价格键是 avgPrice，不是 price！
+    真实 position-history 字段：positionId/symbol/side(Long/Short)/avgCost/avgClosePrice/
+    closedVolume/leverage/status —— side 是 Long/Short 首字母大写，需映射为 LONG/SHORT。
+    """
+    out = dict(row)
+    if "price" not in out and "avgPrice" in out:
+        out["price"] = out["avgPrice"]
+    if "price" not in out and "avgCost" in out:
+        out["price"] = out["avgCost"]
+    side = str(out.get("positionSide") or "")
+    if not side and out.get("side") in ("Long", "Short", "LONG", "SHORT"):
+        out["positionSide"] = str(out["side"]).upper()
+    return out
 
 
 def _parse_iso(s: str | None) -> datetime | None:

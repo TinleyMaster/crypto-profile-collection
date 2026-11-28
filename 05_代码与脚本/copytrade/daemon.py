@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from config import Config  # noqa: E402
 from decision import DecisionEngine  # noqa: E402
-from executor import build_executor  # noqa: E402
+from executor import build_account_executors, build_executor  # noqa: E402
 from source import BinanceCopySource, ReplaySource  # noqa: E402
 from state_machine import PositionStateMachine, SignalStatus  # noqa: E402
 from store import Store  # noqa: E402
@@ -45,8 +45,24 @@ class CopyTradeDaemon:
             self.source: Any = ReplaySource(cfg, self.store, self.log)
         else:
             self.source = BinanceCopySource(cfg, self.store, self.log)
-        self.decision = DecisionEngine(cfg)
-        self.executor = build_executor(cfg, self.store, self.log)
+        # 多账户：每个账户独立决策引擎（各自 allocated_capital）+ 独立执行器。
+        # 单账户/回放时退化为一个 "default"，旧行为不变。
+        accts = cfg.active_accounts
+        self.account_names: tuple[str, ...] = (
+            tuple(a.safe_name() for a in accts) if accts else ("default",)
+        )
+        self.account_capital: dict[str, float] = (
+            {a.safe_name(): a.allocated_capital for a in accts} if accts
+            else {"default": cfg.allocated_capital}
+        )
+        self.decisions: dict[str, DecisionEngine] = {
+            name: DecisionEngine(cfg, leader_aum=None, allocated_capital=cap)
+            for name, cap in self.account_capital.items()
+        }
+        self.executors = build_account_executors(cfg, self.store, self.log)
+        # 兼容旧代码/测试对 self.decision / self.executor 的单数引用
+        self.decision = self.decisions[self.account_names[0]]
+        self.executor = self.executors[self.account_names[0]]
         self.kill_switch = False
         self.last_reconcile_day = ""
         self.round_no = 0
@@ -106,7 +122,8 @@ class CopyTradeDaemon:
         if detail and detail.ok and detail.rows:
             aum = _extract_aum(detail.rows[0])
             if aum:
-                self.decision.leader_aum = aum
+                for eng in self.decisions.values():
+                    eng.leader_aum = aum
                 self.log(f"  交易员 AUM = {aum:.2f}")
 
         order = results.get("order")
@@ -160,52 +177,58 @@ class CopyTradeDaemon:
                     })
                     continue
                 stats["ready"] += 1
-                # L3
-                exposure, sym_exposure = self._exposure(sig.symbol)
-                dec = self.decision.decide(
-                    sig, exposure, sym_exposure,
-                    kill_switch=self.kill_switch,
-                    reconciliation_bad=(not health["source_healthy"]),
-                )
-                self.store.insert_signal({
-                    "dedup_key": key, "order_time": sig.order_time,
-                    "symbol": sig.symbol, "action": sig.action,
-                    "target_notional": dec.notional, "confidence": sig.confidence.value,
-                    "status": "approved" if dec.approved else "rejected",
-                    "reason": dec.reason,
-                })
-                # 关联 signal_id 供 _my_position 反查方向
-                with self.store._db() as c:
-                    sid = c.execute("SELECT id FROM follow_signal WHERE dedup_key=?", (key,)).fetchone()
-                dec.signal_id = int(sid["id"]) if sid else None
-                if not dec.approved:
-                    self.log(f"  ✗ 拒单 {sig.symbol} {sig.action}: {dec.reason}")
-                    continue
-
-                # 安全补丁：减仓数量 clamp 到**我方实际持仓**（从 exec_order 累计）。
-                # 注意：sm.mirror 记的是交易员仓位，不是我方仓位，两者口径不同；
-                # 开仓受单笔闸门截尾后，按比例映射的减仓量可能远大于我方实际持仓，
-                # 不 clamp 会下超量平仓单（实盘可能反向开仓）。
-                if sig.action.startswith(("CLOSE", "REDUCE")):
-                    # 用 action 后缀的方向（被平仓位方向），不是成交方向（SELL=空）
-                    pos_direction = 1 if sig.action.endswith("LONG") else -1
-                    available = self._my_position(sig.symbol, sig.position_side, pos_direction)
-                    if available <= 1e-9:
-                        self.log(f"  ✗ 拒单 {sig.symbol} {sig.action}: 我方无持仓，跳过减仓")
+                # L3+L4：每个账户独立决策与执行（各自资金/敞口/持仓/幂等键）
+                for acct in self.account_names:
+                    acct_key = f"{acct}:{key}"
+                    exposure, sym_exposure = self._exposure(sig.symbol, acct)
+                    dec = self.decisions[acct].decide(
+                        sig, exposure, sym_exposure,
+                        kill_switch=self.kill_switch,
+                        reconciliation_bad=(not health["source_healthy"]),
+                    )
+                    self.store.insert_signal({
+                        "dedup_key": acct_key, "account": acct,
+                        "order_time": sig.order_time,
+                        "symbol": sig.symbol, "action": sig.action,
+                        "target_notional": dec.notional, "confidence": sig.confidence.value,
+                        "status": "approved" if dec.approved else "rejected",
+                        "reason": dec.reason,
+                    })
+                    # 关联 signal_id 供 _my_position 反查方向（按账户 key 精确取）
+                    with self.store._db() as c:
+                        sid = c.execute(
+                            "SELECT id FROM follow_signal WHERE dedup_key=?", (acct_key,)
+                        ).fetchone()
+                    dec.signal_id = int(sid["id"]) if sid else None
+                    if not dec.approved:
+                        self.log(f"  ✗ 拒单 [{acct}] {sig.symbol} {sig.action}: {dec.reason}")
                         continue
-                    if dec.qty > available + 1e-9:
-                        self.log(f"  ⚠ 减仓 clamp {sig.symbol}: {dec.qty:.6f} → {available:.6f}（我方持仓上限）")
-                        dec.qty = available
-                        dec.notional = available * sig.price
 
-                stats["approved"] += 1
-                # L4
-                res = self.executor.execute(dec)
-                if res.ok:
-                    stats["executed"] += 1
-                    self.log(f"  ✓ 执行 {sig.symbol} {sig.action} qty={dec.qty:.6f} ({res.status})")
-                else:
-                    self.log(f"  ✗ 执行失败 {sig.symbol}: {res.reason}")
+                    # 安全补丁：减仓数量 clamp 到该账户**实际持仓**（从 exec_order 累计）。
+                    # 各账户持仓独立，绝不混用；不 clamp 会下超量平仓单（实盘反向开仓）。
+                    if sig.action.startswith(("CLOSE", "REDUCE")):
+                        # 用 action 后缀的方向（被平仓位方向），不是成交方向（SELL=空）
+                        pos_direction = 1 if sig.action.endswith("LONG") else -1
+                        available = self._my_position(sig.symbol, sig.position_side,
+                                                      pos_direction, acct)
+                        if available <= 1e-9:
+                            self.log(f"  ✗ 拒单 [{acct}] {sig.symbol} {sig.action}: 该账户无持仓，跳过减仓")
+                            continue
+                        if dec.qty > available + 1e-9:
+                            self.log(f"  ⚠ 减仓 clamp [{acct}] {sig.symbol}: "
+                                     f"{dec.qty:.6f} → {available:.6f}（该账户持仓上限）")
+                            dec.qty = available
+                            dec.notional = available * sig.price
+
+                    stats["approved"] += 1
+                    # L4：该账户自己的执行器（含自己凭证/幂等键）
+                    res = self.executors[acct].execute(dec)
+                    if res.ok:
+                        stats["executed"] += 1
+                        self.log(f"  ✓ 执行 [{acct}] {sig.symbol} {sig.action} "
+                                 f"qty={dec.qty:.6f} ({res.status})")
+                    else:
+                        self.log(f"  ✗ 执行失败 [{acct}] {sig.symbol}: {res.reason}")
 
         # 每日 A2 对账（position-history 校准镜像）
         today = time.strftime("%Y-%m-%d", time.gmtime())
@@ -220,17 +243,27 @@ class CopyTradeDaemon:
 
         return {"round": self.round_no, "health": health, "stats": stats}
 
-    def _my_position(self, symbol: str, side: str, direction: int) -> float:
-        """我方在该品种/方向的净持仓，从 exec_order + follow_signal 累计。
+    def _my_position(self, symbol: str, side: str, direction: int,
+                     account: str | None = None) -> float:
+        """该账户在该品种/方向的净持仓，从 exec_order + follow_signal 累计。
 
         exec_order 不带方向字段，关联 follow_signal 拿 action 判方向。
+        account 隔离：双账户各自持仓独立，None 时兼容旧调用（查全部）。
         """
         with self.store._db() as c:
-            rows = c.execute(
-                "SELECT e.filled_qty, f.action, f.symbol "
-                "FROM exec_order e LEFT JOIN follow_signal f ON e.signal_id=f.id "
-                "WHERE e.status IN ('paper_filled','live_submitted')"
-            ).fetchall()
+            if account is None:
+                rows = c.execute(
+                    "SELECT e.filled_qty, f.action, f.symbol "
+                    "FROM exec_order e LEFT JOIN follow_signal f ON e.signal_id=f.id "
+                    "WHERE e.status IN ('paper_filled','live_submitted')"
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT e.filled_qty, f.action, f.symbol "
+                    "FROM exec_order e LEFT JOIN follow_signal f ON e.signal_id=f.id "
+                    "WHERE e.status IN ('paper_filled','live_submitted') AND e.account=?",
+                    (account,),
+                ).fetchall()
         target_direction = "LONG" if direction > 0 else "SHORT"
         net = 0.0
         for r in rows:
@@ -246,17 +279,25 @@ class CopyTradeDaemon:
             net += qty
         return max(0.0, net)
 
-    def _exposure(self, symbol: str) -> tuple[float, float]:
-        """从 follow_signal 已批准的开仓名义估算我方敞口。
+    def _exposure(self, symbol: str, account: str | None = None) -> tuple[float, float]:
+        """从该账户已批准信号估算敞口（双账户隔离）。
 
         注意：不能用镜像仓位的 (net_qty × 对方价格)——那是交易员的名义，
         我方分配资金通常小得多，会误触发总敞口闸门。以我方批准信号的
         target_notional 为准，减仓信号扣减对应品种敞口。
         """
         with self.store._db() as c:
-            rows = c.execute(
-                "SELECT symbol, action, target_notional FROM follow_signal WHERE status='approved'"
-            ).fetchall()
+            if account is None:
+                rows = c.execute(
+                    "SELECT symbol, action, target_notional FROM follow_signal "
+                    "WHERE status='approved'"
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT symbol, action, target_notional FROM follow_signal "
+                    "WHERE status='approved' AND account=?",
+                    (account,),
+                ).fetchall()
         total = 0.0
         sym_total = 0.0
         for r in rows:

@@ -24,10 +24,13 @@ class Decision:
 
 
 class DecisionEngine:
-    def __init__(self, cfg: Config, leader_aum: float | None = None):
+    def __init__(self, cfg: Config, leader_aum: float | None = None,
+                 allocated_capital: float | None = None):
         self.cfg = cfg
         self.leader_aum = leader_aum  # 来自 position-history/detail；None 时无法用 B2，降级拒单
         self.gates = cfg.risk
+        # 多账户：每账户用各自分配资金做 B2 映射；None 时回退全局（单账户兼容）
+        self.capital = allocated_capital if allocated_capital is not None else cfg.allocated_capital
 
     def decide(self, sig: FollowSignal, current_exposure: float, symbol_exposure: float,
                kill_switch: bool = False, reconciliation_bad: bool = False) -> Decision:
@@ -45,7 +48,7 @@ class DecisionEngine:
             return Decision(False, sig, reason="缺少交易员 AUM，B2 比例映射无法计算 → 拒单")
         leader_notional = sig.qty * sig.price
         weight = leader_notional / self.leader_aum
-        target_notional = self.cfg.allocated_capital * weight
+        target_notional = self.capital * weight
         mapped_qty = target_notional / sig.price if sig.price > 0 else 0.0
 
         if sig.action.startswith("CLOSE") or sig.action.startswith("REDUCE"):
@@ -58,7 +61,7 @@ class DecisionEngine:
 
 
         # 2. 单笔上限
-        cap_single = self.cfg.allocated_capital * self.gates.max_single_notional_ratio
+        cap_single = self.capital * self.gates.max_single_notional_ratio
         if target_notional > cap_single:
             target_notional = cap_single
             reason_note = f"单笔超限截尾至 {cap_single:.2f}"
@@ -66,7 +69,7 @@ class DecisionEngine:
             reason_note = ""
 
         # 3. 总敞口上限
-        cap_total = self.cfg.allocated_capital * self.gates.max_total_exposure_ratio
+        cap_total = self.capital * self.gates.max_total_exposure_ratio
         if current_exposure + target_notional > cap_total:
             room = max(0.0, cap_total - current_exposure)
             if room <= 0:
@@ -75,7 +78,7 @@ class DecisionEngine:
             reason_note += f"；总敞口截尾至 {room:.2f}"
 
         # 4. 单品种集中度
-        cap_symbol = self.cfg.allocated_capital * self.gates.max_symbol_concentration
+        cap_symbol = self.capital * self.gates.max_symbol_concentration
         if symbol_exposure + target_notional > cap_symbol:
             room = max(0.0, cap_symbol - symbol_exposure)
             if room <= 0:

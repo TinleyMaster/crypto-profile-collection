@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS raw_position (
 CREATE TABLE IF NOT EXISTS follow_signal (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     dedup_key     TEXT UNIQUE,
+    account       TEXT,             -- 子账户名；多账户独立信号（旧库由 _ensure_columns 补列）
     order_time    BIGINT,
     symbol        TEXT,
     action        TEXT,
@@ -56,6 +57,7 @@ CREATE TABLE IF NOT EXISTS mirror_position (
 
 CREATE TABLE IF NOT EXISTS exec_order (
     client_order_id TEXT PRIMARY KEY,
+    account         TEXT,             -- 子账户名；多账户隔离（旧库由 _ensure_columns 补列）
     signal_id       INTEGER,
     exchange_order_id TEXT,
     status          TEXT NOT NULL,
@@ -109,6 +111,21 @@ class Store:
         self._lock = threading.RLock()
         with self._db() as c:
             c.executescript(SQLITE_SCHEMA)
+            self._ensure_columns(c)
+
+    @staticmethod
+    def _ensure_columns(c: sqlite3.Connection) -> None:
+        """旧库补列（CREATE IF NOT EXISTS 不会给已存在的表加列）。
+
+        exec_order.account 是多账户隔离新增列；已有 DB 必须 ALTER 补上，
+        否则双账户 insert 会因无此列报错。
+        """
+        for table in ("exec_order", "follow_signal"):
+            cols = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
+            if "account" not in cols:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN account TEXT")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_exec_order_account ON exec_order(account)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_signal_account ON follow_signal(account)")
 
     def _connect(self) -> sqlite3.Connection:
         c = sqlite3.connect(str(self.path), timeout=30)
@@ -225,10 +242,12 @@ class Store:
         with self._lock, self._db() as c:
             try:
                 c.execute(
-                    "INSERT INTO follow_signal(dedup_key,order_time,symbol,action,target_notional,confidence,status,reason,created_at)"
-                    " VALUES(?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO follow_signal(dedup_key,account,order_time,symbol,action,"
+                    "target_notional,confidence,status,reason,created_at)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?)",
                     (
-                        sig["dedup_key"], sig.get("order_time"), sig.get("symbol"), sig["action"],
+                        sig["dedup_key"], sig.get("account", "default"),
+                        sig.get("order_time"), sig.get("symbol"), sig["action"],
                         sig.get("target_notional"), sig.get("confidence", "high"),
                         sig.get("status", "pending"), sig.get("reason", ""), _now_iso(),
                     ),
@@ -236,6 +255,16 @@ class Store:
                 return True
             except sqlite3.IntegrityError:
                 return False
+
+    def iter_approved_signals(self, account: str) -> list[dict[str, Any]]:
+        """按账户返回已批准信号（敞口计算用，双账户隔离）。"""
+        with self._lock, self._db() as c:
+            rows = c.execute(
+                "SELECT symbol,action,target_notional FROM follow_signal "
+                "WHERE status='approved' AND account=?",
+                (account,),
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     def upsert_mirror(self, symbol: str, side: str, net_qty: float, avg_price: float | None, realized_pnl: float, status: str) -> None:
         with self._lock, self._db() as c:
@@ -258,16 +287,39 @@ class Store:
         with self._lock, self._db() as c:
             try:
                 c.execute(
-                    "INSERT INTO exec_order(client_order_id,signal_id,exchange_order_id,status,filled_qty,avg_price,created_at)"
-                    " VALUES(?,?,?,?,?,?,?)",
+                    "INSERT INTO exec_order(client_order_id,account,signal_id,exchange_order_id,status,filled_qty,avg_price,created_at)"
+                    " VALUES(?,?,?,?,?,?,?,?)",
                     (
-                        order["client_order_id"], order.get("signal_id"), order.get("exchange_order_id"),
+                        order["client_order_id"], order.get("account", "default"),
+                        order.get("signal_id"), order.get("exchange_order_id"),
                         order["status"], order.get("filled_qty", 0), order.get("avg_price"), _now_iso(),
                     ),
                 )
                 return True
             except sqlite3.IntegrityError:
                 return False
+
+    def iter_exec_orders(self, account: str | None = None) -> list[dict[str, Any]]:
+        """按账户返回已成交执行单（含关联信号 action 判方向）。
+
+        account=None 返回全部（兼容旧调用）；指定账户则严格隔离，
+        避免双账户持仓/敞口串账。
+        """
+        with self._lock, self._db() as c:
+            if account is None:
+                rows = c.execute(
+                    "SELECT e.account,e.filled_qty,e.status,f.action,f.symbol "
+                    "FROM exec_order e LEFT JOIN follow_signal f ON e.signal_id=f.id "
+                    "WHERE e.status IN ('paper_filled','live_submitted')"
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT e.account,e.filled_qty,e.status,f.action,f.symbol "
+                    "FROM exec_order e LEFT JOIN follow_signal f ON e.signal_id=f.id "
+                    "WHERE e.status IN ('paper_filled','live_submitted') AND e.account=?",
+                    (account,),
+                ).fetchall()
+            return [dict(r) for r in rows]
 
     # ---------- meta ----------
     def get_meta(self, key: str) -> str | None:

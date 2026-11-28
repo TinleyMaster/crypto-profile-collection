@@ -51,7 +51,7 @@ python -m pip install requests pytest
 # 1. 离线回放（无需网络，验证状态机全流程）
 python daemon.py --replay
 
-# 2. 单测（34 项）
+# 2. 单测（42 项，含 8 项双账户隔离/客户端复用）
 python -m pytest tests/ -q
 
 # 3. 健康状态（watchdog 用；数据源故障退出码=1，交易员静默=0）
@@ -72,6 +72,26 @@ python daemon.py --unkill     # 解除
 
 配置：复制 `.env.example` 为 `.env`，按注释填。**默认全空即可安全跑 paper + replay。**
 代理提示：程序已禁用环境代理继承（死代理会致 502）；`CT_PROXY_CANDIDATES` 可配多个候选自动轮换。
+
+### 多账户跟单（CT_ACCOUNT_N_*）
+
+在 `.env` 里按序号填子账户，序号从 1 连续递增（遇空 key 停止）：
+
+```ini
+CT_ACCOUNT_1_NAME=sub1
+CT_ACCOUNT_1_API_KEY=...
+CT_ACCOUNT_1_API_SECRET=...
+CT_ACCOUNT_1_CAPITAL=1000
+CT_ACCOUNT_2_NAME=sub2
+CT_ACCOUNT_2_API_KEY=...
+CT_ACCOUNT_2_API_SECRET=...
+CT_ACCOUNT_2_CAPITAL=1000
+```
+
+- **完全隔离**：每账户独立资金映射（B2 用各自 `CAPITAL`）、独立敞口/持仓、独立 `client_order_id`（含账户名）、独立 `follow_signal`（dedup_key 带账户前缀）。A 账户的仓位绝不会被 B 账户占用。
+- **复用系统开仓客户端**：live 模式用 `scripts/src/crypto_research/clients/binance_futures.py::BinanceFuturesClient`（HMAC 签名+时间校准+LOT_SIZE 精度+双开检测），不另造轮子、不挂额外止损止盈（跟单镜像交易员仓位，交易员平仓才平）。
+- **凭证安全**：`.env` 已被根 `.gitignore` 覆盖，绝不入库、程序不输出密钥；日志/DB 只显示账户名。
+- **启用实盘**：先 paper 验证无误后，把 `CT_MODE=paper` 改为 `CT_MODE=live`。启用前须自行确认 ①凭证权限（只开合约、不开提现）②策略期望收益 ③资金规模。AI 不代开实盘、不测连接。
 
 ---
 

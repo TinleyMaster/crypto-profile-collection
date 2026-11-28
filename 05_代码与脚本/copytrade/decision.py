@@ -89,6 +89,19 @@ class DecisionEngine:
         if target_notional <= 0:
             return Decision(False, sig, reason="闸门截尾后目标名义 ≤ 0")
 
+        # 4.5 MIN_NOTIONAL 保守下限（决策层预检）
+        # 决策层不碰网络，拿不到交易所 exchangeInfo，先用配置下限拦截：
+        # 闸门截尾（单笔/总敞口/集中度）后极易剩几 USDT，交易所一律 -1013 拒单。
+        # 仅拦开仓/加仓；平/减仓走"能退场优先"，由执行层用真实门槛终检。
+        floor = float(getattr(self.gates, "min_notional_floor", 0) or 0)
+        if floor > 0 and target_notional < floor:
+            return Decision(
+                False, sig,
+                reason=(f"目标名义 {target_notional:.4f} USDT < MIN_NOTIONAL 保守下限 {floor:.2f} USDT"
+                        f"（{reason_note or 'B2 映射'}），交易所会拒单 → 拒单；"
+                        f"可调 CT_MIN_NOTIONAL_FLOOR"),
+            )
+
         # 5. C3 降级杠杆：min(他杠杆, 我方上限)。这里无他杠杆字段时取 1x 保守
         leader_lev = float(sig.direction and 1 or 1)  # 占位；真实值见 apply_leader_leverage
         lev = min(leader_lev, self.gates.max_leverage)

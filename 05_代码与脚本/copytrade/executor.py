@@ -27,8 +27,41 @@ from decision import Decision
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "src"))
 from crypto_research.clients.binance_futures import (  # noqa: E402
     BinanceFuturesClient,
+    _round_down_to_step,
     is_permanent_binance_error,
 )
+
+
+def effective_min_notional(client: Any, symbol: str, floor: float) -> float:
+    """交易所真实 MIN_NOTIONAL 与本地保守下限取大者。
+
+    client 无 get_exchange_info（离线 mock）或取数失败时退回 floor，绝不静默放过。
+    floor <= 0 时仍以交易所门槛为准（不关闭真实门槛）。
+    """
+    exchange_min = 0.0
+    getter = getattr(client, "get_exchange_info", None)
+    if callable(getter):
+        try:
+            exchange_min = float(getter(symbol).get("min_notional", 0) or 0)
+        except Exception:  # noqa: BLE001 取不到就退回本地下限，不因查询失败下盲单
+            exchange_min = 0.0
+    return max(exchange_min, floor, 0.0)
+
+
+def check_min_notional(qty: float, price: float, min_notional: float,
+                       step_size: float = 0.0) -> tuple[bool, float, str]:
+    """纯函数：按【LOT_SIZE 向下取整后的实际数量】校验名义价值。
+
+    关键：币安先按 stepSize 截数量、再校验 notional。若用未取整的 qty 校验，
+    '刚好达标' 的单会被截小后被交易所拒（-1013）。故这里先取整再算。
+    """
+    real_qty = _round_down_to_step(qty, step_size) if step_size > 0 else qty
+    notional = real_qty * price
+    if min_notional > 0 and notional < min_notional:
+        return False, notional, (f"取整后名义 {notional:.4f} USDT "
+                                 f"(qty {qty:.6f}→{real_qty:.6f} @ {price}) "
+                                 f"< MIN_NOTIONAL {min_notional:.4f} USDT")
+    return True, notional, ""
 
 
 @dataclass
@@ -145,6 +178,35 @@ class LiveExecutor(BaseExecutor):
             # direction 是成交方向（+1 BUY / -1 SELL）；平多=SELL、平空=BUY，直接用
             side = "BUY" if dec.signal.direction > 0 else "SELL"
             pos_side = params.get("positionSide")  # LONG/SHORT 或 None(BOTH)
+
+            # ✅ MIN_NOTIONAL 终检：交易所真实门槛 vs 本地保守下限取大者。
+            # 开仓/加仓：不足门槛 → 硬拒（避免必被 -1013 拒掉的无谓请求）。
+            # 平仓/减仓：只告警放行——"能退场优先"，硬拒会留下"仓位永远平不掉"
+            # 的更大隐患（交易员继续平仓时映射 qty 仍可能低于门槛，形成死循环）。
+            # 注意币安 reduceOnly 单同样受 MIN_NOTIONAL 约束，小单可能被拒，
+            # 该风险以告警显式暴露，不静默吞掉。
+            try:
+                info = (self.client.get_exchange_info(symbol)
+                        if callable(getattr(self.client, "get_exchange_info", None)) else {})
+            except Exception:  # noqa: BLE001
+                info = {}
+            step_size = float(info.get("step_size", 0) or 0)
+            required = effective_min_notional(
+                self.client, symbol, float(self.cfg.risk.min_notional_floor))
+            ok, notional, why = check_min_notional(
+                dec.qty, dec.signal.price, required, step_size)
+            is_closing = dec.signal.action.startswith(("CLOSE", "REDUCE"))
+            if not ok and not is_closing:
+                self.log(f"[LIVE/{self.account}] ✗ 拒单 {symbol} {dec.signal.action}: {why}")
+                self.store.insert_exec_order({
+                    "client_order_id": cid, "account": self.account,
+                    "signal_id": dec.signal_id, "status": "rejected_min_notional",
+                    "filled_qty": 0, "avg_price": None,
+                })
+                return ExecResult(False, cid, "rejected_min_notional", reason=why)
+            if not ok and is_closing:
+                self.log(f"[LIVE/{self.account}] ⚠ 平/减仓名义过小仍放行（能退场优先）: "
+                         f"{symbol} {dec.signal.action}: {why}")
 
             # ✅ 走系统已有的 place_order：自动 LOT_SIZE 精度规整 + 双开模式检测
             # 不挂 SL/TP：跟单镜像交易员仓位，交易员平仓我们才平

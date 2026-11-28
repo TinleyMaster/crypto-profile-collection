@@ -87,6 +87,11 @@ class RiskGates:
     max_leverage: float = 3.0                 # 杠杆上限（C3 降级跟随）
     reconcile_tolerance: float = 0.05         # 对账偏差 > 5% 告警+暂停新单
     leader_idle_alert_hours: float = 24.0     # 交易员停摆告警（非故障）
+    # MIN_NOTIONAL 保守下限（USDT）：币安 U 本位多数合约为 5 USDT。
+    # 决策层拿不到交易所 exchangeInfo（纯决策/可离线），先用保守下限预检；
+    # 执行层再用 client 返回的真实 min_notional 终检，两者取大者。
+    # ≤0 表示关闭该闸门（不推荐）。
+    min_notional_floor: float = 5.0
 
     @classmethod
     def from_env(cls) -> "RiskGates":
@@ -97,6 +102,7 @@ class RiskGates:
             max_leverage=_float("CT_MAX_LEVERAGE", 3.0),
             reconcile_tolerance=_float("CT_RECON_TOLERANCE", 0.05),
             leader_idle_alert_hours=_float("CT_LEADER_IDLE_H", 24.0),
+            min_notional_floor=_float("CT_MIN_NOTIONAL_FLOOR", 5.0),
         )
 
 
@@ -227,6 +233,8 @@ class Config:
                     raise ValueError(f"账户 {a.name} allocated_capital 必须 > 0")
         if self.risk.max_leverage <= 0:
             raise ValueError("CT_MAX_LEVERAGE 必须 > 0")
+        if self.risk.min_notional_floor < 0:
+            raise ValueError("CT_MIN_NOTIONAL_FLOOR 不能为负")
 
     @property
     def is_live(self) -> bool:
